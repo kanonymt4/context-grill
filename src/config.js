@@ -5,7 +5,7 @@ import { deepMerge, sha256, stableStringify } from './util/misc.js';
 
 export const DEFAULTS = {
   project: 'untitled',
-  workspace: '.grounded',
+  workspace: '.context-grill',
   language: 'ja',
   sources: [],
   retrieval: {
@@ -69,7 +69,7 @@ export const DEFAULTS = {
   },
 };
 
-const CONFIG_NAMES = ['grounded.config.json', '.grounded.config.json', 'grounded.json'];
+const CONFIG_NAMES = ['context-grill.config.json', '.context-grill.config.json', 'context-grill.json'];
 
 export function findConfigPath(startDir = process.cwd()) {
   let dir = path.resolve(startDir);
@@ -118,7 +118,7 @@ function expandEnv(value) {
 export async function loadConfig(explicitPath) {
   const configPath = explicitPath ? path.resolve(explicitPath) : findConfigPath();
   if (!configPath) {
-    const e = new Error('grounded.config.json が見つかりません。`grounded init` で作成してください。');
+    const e = new Error('context-grill.config.json が見つかりません。`context-grill init` で作成してください。');
     e.code = 'ENOCONFIG';
     throw e;
   }

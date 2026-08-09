@@ -85,7 +85,7 @@ export class IndexStore {
 
   static async open(dir) {
     const s = new IndexStore(dir);
-    if (!IndexStore.exists(dir)) throw new Error(`索引がありません (${dir})。先に \`grounded sync\` を実行してください。`);
+    if (!IndexStore.exists(dir)) throw new Error(`索引がありません (${dir})。先に \`context-grill sync\` を実行してください。`);
     s.manifest = JSON.parse(await fsp.readFile(path.join(dir, 'manifest.json'), 'utf8'));
     s.meta = JSON.parse(await fsp.readFile(path.join(dir, 'docs.meta.json'), 'utf8'));
     s.df = JSON.parse(await fsp.readFile(path.join(dir, 'df.json'), 'utf8'));

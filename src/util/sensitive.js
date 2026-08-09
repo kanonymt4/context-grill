@@ -18,7 +18,7 @@ export const SENSITIVE_DENY = [
   '**/*.secrets.*', '**/secrets.yaml', '**/secrets.yml', '**/secrets.json', '**/secret.yaml', '**/secret.yml',
   '**/.htpasswd', '**/*.ovpn', '**/*.asc', '**/*.gpg', '**/*.pgp',
   '**/*.tfstate', '**/*.tfstate.*', '**/.terraform/**',
-  '**/.grounded/**', '.grounded/**',
+  '**/.context-grill/**', '.context-grill/**',
   '**/.DS_Store',
 ];
 
@@ -35,13 +35,13 @@ export function isSensitivePath(p, extraDeny = []) {
   for (const d of extraDeny) if (matchGlob(norm, d)) return true;
   // ディレクトリ名単位でも判定（walk 時の枝刈り用）
   const parts = norm.split('/');
-  if (parts.some((seg) => seg === '.ssh' || seg === '.aws' || seg === '.kube' || seg === '.terraform' || seg === '.grounded')) return true;
+  if (parts.some((seg) => seg === '.ssh' || seg === '.aws' || seg === '.kube' || seg === '.terraform' || seg === '.context-grill')) return true;
   return false;
 }
 
 /** walk 時にディレクトリごと降りないための判定 */
 export function isSensitiveDir(name) {
-  return ['.ssh', '.aws', '.azure', '.kube', '.terraform', '.grounded', '.git', 'node_modules'].includes(name);
+  return ['.ssh', '.aws', '.azure', '.kube', '.terraform', '.context-grill', '.git', 'node_modules'].includes(name);
 }
 
 /** 相対パス p が root 配下に収まっているか（パストラバーサル防止） */

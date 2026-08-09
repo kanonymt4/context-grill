@@ -183,7 +183,7 @@ export async function syncConfluence(src, ctx) {
         throw new Error(
           `sources[${src.id}] の取り込み範囲が指定されていません。\n` +
           `次のいずれかを設定してください: pageUrls / pageIds / spaceKey / cql / labels\n` +
-          `URL から設定を作るには: grounded resolve "<ページのURL>"`);
+          `URL から設定を作るには: context-grill resolve "<ページのURL>"`);
       }
       let url = `${base}/api/v2/pages?body-format=storage&limit=${pageSize}&space-id=${spaceId}`;
       if (src.status) url += `&status=${encodeURIComponent(src.status)}`;

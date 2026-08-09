@@ -16,13 +16,13 @@ import { SENSITIVE_DENY } from './util/sensitive.js';
 import { urlToSource } from './util/urls.js';
 import { log, setLevel } from './util/log.js';
 
-const HELP = `grounded — GitHub と Atlassian の一次資料に基づいて調査・設計を行うツール
+const HELP = `context-grill — GitHub と Atlassian の一次資料に基づいて調査・設計を行うツール
 
 使い方:
-  grounded <コマンド> [オプション]
+  context-grill <コマンド> [オプション]
 
 コマンド:
-  init                      grounded.config.json のひな形を作成
+  init                      context-grill.config.json のひな形を作成
   resolve <URL...>          ブラウザのURLを貼ると sources 定義を生成（--add で設定に追記）
   sync                      ソースを取得して索引を再構築
   build                     取得済みキャッシュから索引だけ再構築（ネットワーク不要）
@@ -62,10 +62,10 @@ ask:
   --out <file>              レポートの保存先
 
 例:
-  grounded sync
-  grounded ask "決済リトライの仕様を整理して" --task spec
-  grounded ask "500 エラーが断続的に出る原因を調べて" --task bug --effort deep
-  grounded ask "認証まわりのセキュリティリスク" --task security --dry-run
+  context-grill sync
+  context-grill ask "決済リトライの仕様を整理して" --task spec
+  context-grill ask "500 エラーが断続的に出る原因を調べて" --task bug --effort deep
+  context-grill ask "認証まわりのセキュリティリスク" --task security --dry-run
 `;
 
 function parseArgs(argv) {
@@ -130,14 +130,14 @@ export async function main(argv) {
 
 // ---------------------------------------------------------------- init
 async function cmdInit(flags) {
-  const target = path.resolve(String(flags.dir || process.cwd()), 'grounded.config.json');
+  const target = path.resolve(String(flags.dir || process.cwd()), 'context-grill.config.json');
   if (fs.existsSync(target) && !flags.force) {
     process.stderr.write(`${target} は既に存在します（--force で上書き）\n`);
     return 1;
   }
   const sample = {
     project: path.basename(path.dirname(target)),
-    workspace: '.grounded',
+    workspace: '.context-grill',
     sources: [
       {
         id: 'repo', type: 'github', repo: 'your-org/your-repo', ref: 'main', mode: 'clone',
@@ -180,23 +180,23 @@ async function cmdInit(flags) {
   const dir = path.dirname(target);
   const giPath = path.join(dir, '.gitignore');
   const gi = fs.existsSync(giPath) ? await fsp.readFile(giPath, 'utf8') : '';
-  const missing = ['.env', '.grounded/'].filter((e) => !gi.split(/\r?\n/).some((l) => l.trim() === e || l.trim() === e.replace(/\/$/, '')));
+  const missing = ['.env', '.context-grill/'].filter((e) => !gi.split(/\r?\n/).some((l) => l.trim() === e || l.trim() === e.replace(/\/$/, '')));
   process.stdout.write(`作成しました: ${target}\n`);
   if (missing.length) {
     process.stdout.write(
       `\n注意: ${giPath} に次の行が見つかりません。手動で追加してください（自動では変更しません）:\n` +
       missing.map((m) => `  ${m}\n`).join('') +
-      `  ※ .grounded/ 配下には .gitignore(*) が自動生成されるため、通常はコミット対象になりませんが、二重に防ぐことを推奨します。\n`);
+      `  ※ .context-grill/ 配下には .gitignore(*) が自動生成されるため、通常はコミット対象になりませんが、二重に防ぐことを推奨します。\n`);
   }
-  process.stdout.write(`\n次: sources を編集し、.env に認証情報を設定して \`grounded sync\` を実行してください。\n`);
-  process.stdout.write(`送信内容を確認するには: grounded privacy\n`);
+  process.stdout.write(`\n次: sources を編集し、.env に認証情報を設定して \`context-grill sync\` を実行してください。\n`);
+  process.stdout.write(`送信内容を確認するには: context-grill privacy\n`);
   return 0;
 }
 
 // ------------------------------------------------------------- resolve
 async function cmdResolve(urls, flags) {
   if (!urls.length) {
-    process.stderr.write('URL を指定してください。例:\n  grounded resolve "https://github.com/acme/api" "https://acme.atlassian.net/wiki/spaces/ENG/pages/12345/仕様"\n');
+    process.stderr.write('URL を指定してください。例:\n  context-grill resolve "https://github.com/acme/api" "https://acme.atlassian.net/wiki/spaces/ENG/pages/12345/仕様"\n');
     return 1;
   }
   const results = urls.map((u, i) => ({ url: u, ...urlToSource(u, { id: typeof flags.id === 'string' && urls.length === 1 ? flags.id : undefined }) }));
@@ -217,12 +217,12 @@ async function cmdResolve(urls, flags) {
     if (!r.source) { for (const n of r.notes) process.stdout.write(`  ! ${n}\n`); continue; }
     for (const n of r.notes) process.stdout.write(`  ※ ${n}\n`);
   }
-  process.stdout.write('\n--- grounded.config.json の "sources" に貼り付けてください ---\n');
+  process.stdout.write('\n--- context-grill.config.json の "sources" に貼り付けてください ---\n');
   process.stdout.write(JSON.stringify(sources, null, 2) + '\n');
 
   if (flags.add) {
     const cfgPath = flags.config ? path.resolve(String(flags.config)) : findConfigPath();
-    if (!cfgPath) { process.stderr.write('\n設定ファイルが見つかりません（grounded init を先に実行してください）\n'); return 1; }
+    if (!cfgPath) { process.stderr.write('\n設定ファイルが見つかりません（context-grill init を先に実行してください）\n'); return 1; }
     const raw = JSON.parse(await fsp.readFile(cfgPath, 'utf8'));
     raw.sources = raw.sources || [];
     const existing = new Set(raw.sources.map((s) => s.id));
@@ -234,7 +234,7 @@ async function cmdResolve(urls, flags) {
       existing.add(id); added++;
     }
     await fsp.writeFile(cfgPath, JSON.stringify(raw, null, 2) + '\n');
-    process.stdout.write(`\n${cfgPath} に ${added} 件追記しました。\n次: grounded sync\n`);
+    process.stdout.write(`\n${cfgPath} に ${added} 件追記しました。\n次: context-grill sync\n`);
   } else if (sources.length) {
     process.stdout.write('\n（--add を付けると設定ファイルに直接追記します）\n');
   }
@@ -264,7 +264,7 @@ async function cmdDoctor(flags) {
   checks.push({ name: 'git CLI', ok: gitOk, detail: gitVer });
 
   const cfgPath = flags.config ? path.resolve(String(flags.config)) : findConfigPath();
-  checks.push({ name: '設定ファイル', ok: Boolean(cfgPath), detail: cfgPath || '見つかりません（grounded init）' });
+  checks.push({ name: '設定ファイル', ok: Boolean(cfgPath), detail: cfgPath || '見つかりません（context-grill init）' });
 
   let config = null;
   if (cfgPath) {
@@ -284,7 +284,7 @@ async function cmdDoctor(flags) {
       checks.push({ name: `env ${n}`, ok: Boolean(process.env[n]) || optional, detail: process.env[n] ? '設定済み' : (optional ? '不要' : '未設定') });
     }
     const p = paths(config);
-    checks.push({ name: '索引', ok: IndexStore.exists(p.index), detail: IndexStore.exists(p.index) ? p.index : '未構築（grounded sync）' });
+    checks.push({ name: '索引', ok: IndexStore.exists(p.index), detail: IndexStore.exists(p.index) ? p.index : '未構築（context-grill sync）' });
     initEgress(config);
     const plan = egressPlan();
     checks.push({ name: '送信許可ホスト', ok: true, detail: plan.hosts.map((h) => h.host).join(', ') || 'なし（オフライン相当）' });
@@ -322,7 +322,7 @@ async function cmdStatus(flags) {
   const config = await load(flags);
   const p = paths(config);
   if (!IndexStore.exists(p.index)) {
-    process.stdout.write('索引がまだありません。`grounded sync` を実行してください。\n');
+    process.stdout.write('索引がまだありません。`context-grill sync` を実行してください。\n');
     return 1;
   }
   const store = await IndexStore.open(p.index);
@@ -353,7 +353,7 @@ async function cmdSearch(query, flags) {
   // 既定で墨消し（出力をチケットやチャットに貼っても認証情報が漏れないようにする）
   const doRedact = config.security?.redactSecrets !== false && !flags.raw;
   const view = (t) => (doRedact ? redactText(t).text : t);
-  if (flags.raw) process.stderr.write('[grounded:warn]  --raw: 墨消しを無効化しています。出力の取り扱いに注意してください。\n');
+  if (flags.raw) process.stderr.write('[context-grill:warn]  --raw: 墨消しを無効化しています。出力の取り扱いに注意してください。\n');
   if (flags.json) { process.stdout.write(JSON.stringify(results.map((r) => ({ ...r, text: view(r.text).slice(0, 1200) })), null, 2) + '\n'); return 0; }
   for (const r of results) {
     process.stdout.write(`\n#${r.rank} (${r.score.toFixed(4)}) ${citationLabel(r)}\n${r.url ? r.url + '\n' : ''}`);
@@ -384,7 +384,7 @@ async function cmdScan(flags) {
 
 // ----------------------------------------------------------------- ask
 async function cmdAsk(instruction, flags) {
-  if (!instruction) { process.stderr.write('指示を指定してください。例: grounded ask "認証の仕様を整理して" --task spec\n'); return 1; }
+  if (!instruction) { process.stderr.write('指示を指定してください。例: context-grill ask "認証の仕様を整理して" --task spec\n'); return 1; }
   const config = await load(flags);
   const taskId = String(flags.task || 'spec');
   if (!TASKS[taskId]) { process.stderr.write(`未知のタスク: ${taskId}（${Object.keys(TASKS).join(', ')}）\n`); return 1; }
@@ -430,7 +430,7 @@ async function cmdPrivacy(flags) {
     localWrites: [
       `${paths(config).workspace}/ 配下のみ（権限 ${(sec.workspaceMode ?? 0o700).toString(8)}）`,
       '--out で指定したファイル',
-      'init 実行時の grounded.config.json / .env.example',
+      'init 実行時の context-grill.config.json / .env.example',
     ],
     neverWrites: ['ユーザーのリポジトリ（git push / commit / add / checkout は実装上到達不能）', 'Confluence / Jira（参照系 API のみ）'],
     sensitiveDenyPatterns: sec.denySensitivePaths === false ? ['(無効化されています — 非推奨)'] : SENSITIVE_DENY,
