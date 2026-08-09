@@ -1,4 +1,4 @@
-# grounded
+# context-grill
 
 GitHub リポジトリと Atlassian（Confluence / Jira）の資料を「一次資料」として登録し、
 **仕様の整理・バグ調査・セキュリティリスク評価・静的解析・新機能設計** を
@@ -47,24 +47,24 @@ LLM を使わない静的ルールで行うため、**どのモデルでも必�
 # Node.js 20 以上があれば OK（npm install は不要 — 依存パッケージがありません）
 node --version
 
-# 任意の場所に配置してパスを通す（またはそのまま node bin/grounded.js で実行）
+# 任意の場所に配置してパスを通す（またはそのまま node bin/context-grill.js で実行）
 npm link          # 省略可
-grounded doctor   # 環境チェック
+context-grill doctor   # 環境チェック
 ```
 
 プロジェクトのルートで初期化します。
 
 ```bash
-grounded init          # grounded.config.json と .env.example を作成
+context-grill init          # context-grill.config.json と .env.example を作成
 
 # 対象リポジトリ / Confluence ページの URL を貼るだけで設定を生成（詳細は 7 章）
-grounded resolve "https://github.com/acme/api-service" \
+context-grill resolve "https://github.com/acme/api-service" \
                  "https://acme.atlassian.net/wiki/spaces/ENG/pages/393217/決済仕様" --add
 
-$EDITOR grounded.config.json
+$EDITOR context-grill.config.json
 cp .env.example .env && $EDITOR .env
-grounded sync          # 資料を取得して索引を構築
-grounded status
+context-grill sync          # 資料を取得して索引を構築
+context-grill status
 ```
 
 ### 認証情報
@@ -83,27 +83,27 @@ grounded status
 
 ```bash
 # 仕様の整理
-grounded ask "決済の返金フローの仕様を実装ベースで整理して" --task spec
+context-grill ask "決済の返金フローの仕様を実装ベースで整理して" --task spec
 
 # バグ調査（深く探す）
-grounded ask "本番で断続的に 504 が出る原因を調べて" --task bug --effort deep
+context-grill ask "本番で断続的に 504 が出る原因を調べて" --task bug --effort deep
 
 # セキュリティリスク
-grounded ask "認証・認可まわりのリスク" --task security --source api,wiki
+context-grill ask "認証・認可まわりのリスク" --task security --source api,wiki
 
 # 静的解析（LLM が誤検知を仕分ける）
-grounded ask "リリース前に直すべき品質問題" --task static
+context-grill ask "リリース前に直すべき品質問題" --task static
 
 # 新機能設計（既存の規約・制約を証拠で裏付ける）
-grounded ask "サブスク解約の予約機能を追加したい" --task design --effort deep
+context-grill ask "サブスク解約の予約機能を追加したい" --task design --effort deep
 ```
 
 ### トークンを一切使わないコマンド
 
 ```bash
-grounded search "リトライ 上限"     # ハイブリッド検索だけ（LLM 不使用）
-grounded scan --severity medium     # 静的解析だけ（LLM 不使用・毎回同じ結果）
-grounded ask "..." --dry-run        # 証拠パック + プロンプト一式を生成して終了
+context-grill search "リトライ 上限"     # ハイブリッド検索だけ（LLM 不使用）
+context-grill scan --severity medium     # 静的解析だけ（LLM 不使用・毎回同じ結果）
+context-grill ask "..." --dry-run        # 証拠パック + プロンプト一式を生成して終了
 ```
 
 `--dry-run` が出力する `bundle.md` は、そのまま任意のチャット（Claude / ChatGPT / ローカル LLM）に
@@ -111,7 +111,7 @@ grounded ask "..." --dry-run        # 証拠パック + プロンプト一式を
 
 ### 出力
 
-各実行は `.grounded/runs/<日時>-<タスク>-<ハッシュ>/` に保存されます。
+各実行は `.context-grill/runs/<日時>-<タスク>-<ハッシュ>/` に保存されます。
 
 ```
 report.md      最終レポート（Markdown・全主張に一次資料リンク付き）
@@ -127,7 +127,7 @@ static.json    静的解析の生データ
 Claude Code / Cowork / Cursor などから、この索引を直接使えます。
 
 ```bash
-grounded mcp     # stdio
+context-grill mcp     # stdio
 ```
 
 設定例（`.mcp.json` / `claude_desktop_config.json`）:
@@ -135,9 +135,9 @@ grounded mcp     # stdio
 ```json
 {
   "mcpServers": {
-    "grounded": {
+    "context-grill": {
       "command": "node",
-      "args": ["/abs/path/to/grounded/bin/grounded.js", "mcp", "--config", "/abs/path/to/your-project/grounded.config.json"],
+      "args": ["/abs/path/to/context-grill/bin/context-grill.js", "mcp", "--config", "/abs/path/to/your-project/context-grill.config.json"],
       "env": { "GITHUB_TOKEN": "...", "ATLASSIAN_EMAIL": "...", "ATLASSIAN_API_TOKEN": "..." }
     }
   }
@@ -148,16 +148,16 @@ grounded mcp     # stdio
 
 | ツール | 用途 |
 | --- | --- |
-| `grounded_status` | 索引済み資料の範囲を確認 |
-| `grounded_search` | ハイブリッド検索（行番号・URL 付き） |
-| `grounded_evidence_pack` | 指示に対する証拠パック + 契約 + 出力スキーマを一括取得 |
-| `grounded_verify` | ホスト側モデルが書いた回答を証拠に照らして機械検証 |
-| `grounded_static_scan` | LLM 非依存の静的解析 |
-| `grounded_fetch` | 証拠やファイルの指定行を取得 |
-| `grounded_run_task` | 設定済みモデルで完結実行 |
-| `grounded_sync` | 資料の再取得 |
+| `context_grill_status` | 索引済み資料の範囲を確認 |
+| `context_grill_search` | ハイブリッド検索（行番号・URL 付き） |
+| `context_grill_evidence_pack` | 指示に対する証拠パック + 契約 + 出力スキーマを一括取得 |
+| `context_grill_verify` | ホスト側モデルが書いた回答を証拠に照らして機械検証 |
+| `context_grill_static_scan` | LLM 非依存の静的解析 |
+| `context_grill_fetch` | 証拠やファイルの指定行を取得 |
+| `context_grill_run_task` | 設定済みモデルで完結実行 |
+| `context_grill_sync` | 資料の再取得 |
 
-**推奨フロー**：`grounded_evidence_pack` → ホストのモデルが JSON を生成 → `grounded_verify` → 合格した結果だけを提示。
+**推奨フロー**：`context_grill_evidence_pack` → ホストのモデルが JSON を生成 → `context_grill_verify` → 合格した結果だけを提示。
 これによりホストのモデルが何であっても、**証拠の選定と合否判定は同一**になります。
 
 ---
@@ -197,12 +197,12 @@ grounded mcp     # stdio
 一番簡単なのは **ブラウザの URL をそのまま貼る**方法です。
 
 ```bash
-grounded resolve "https://github.com/acme/api-service/tree/develop/services/payment" \
+context-grill resolve "https://github.com/acme/api-service/tree/develop/services/payment" \
                  "https://acme.atlassian.net/wiki/spaces/ENG/pages/393217/決済仕様" --add
 ```
 
-`--add` を付けると `grounded.config.json` の `sources` に直接追記されます（付けなければ貼り付け用の JSON を表示するだけ）。
-あとは `grounded sync` で取り込まれます。
+`--add` を付けると `context-grill.config.json` の `sources` に直接追記されます（付けなければ貼り付け用の JSON を表示するだけ）。
+あとは `context-grill sync` で取り込まれます。
 
 ### 7.1 GitHub の指定
 
@@ -304,7 +304,7 @@ grounded resolve "https://github.com/acme/api-service/tree/develop/services/paym
   "jql": "project = ENG AND updated >= -180d ORDER BY updated DESC", "limit": 300 }
 ```
 
-チケット URL を `grounded resolve` に渡すと `key = ENG-1234` の形で生成されます。
+チケット URL を `context-grill resolve` に渡すと `key = ENG-1234` の形で生成されます。
 
 ### 7.4 ローカルディレクトリ
 
@@ -330,20 +330,20 @@ grounded resolve "https://github.com/acme/api-service/tree/develop/services/paym
 { "llm": { "provider": "openai-compat", "baseUrl": "http://localhost:11434/v1", "model": "qwen2.5-coder:32b", "apiKeyEnv": "LLM_API_KEY" } }
 ```
 
-設定を変えたら `grounded sync`（取得からやり直し）か `grounded build`（取得済みキャッシュから索引だけ再構築）を実行します。
-取り込み結果は `grounded status` で件数を確認できます。
+設定を変えたら `context-grill sync`（取得からやり直し）か `context-grill build`（取得済みキャッシュから索引だけ再構築）を実行します。
+取り込み結果は `context-grill status` で件数を確認できます。
 
 ## 8. 移植 / チームでの共有
 
-- `.grounded/`（索引・キャッシュ・実行結果）は自動的に `.gitignore` されます
-- 共有するのは `grounded.config.json` だけ。各自が `grounded sync` すれば同じ索引ができます
+- `.context-grill/`（索引・キャッシュ・実行結果）は自動的に `.gitignore` されます
+- 共有するのは `context-grill.config.json` だけ。各自が `context-grill sync` すれば同じ索引ができます
 - 索引の再現性キー（`indexKey`）はレポートに記録されるため、**別の人・別のモデルの結果と厳密に比較**できます
 - CI で使う例：
 
 ```yaml
-- run: node grounded/bin/grounded.js sync
-- run: node grounded/bin/grounded.js scan --severity high --json --out scan.json
-- run: node grounded/bin/grounded.js ask "この PR で増えたセキュリティリスク" --task security --out risk.md
+- run: node context-grill/bin/context-grill.js sync
+- run: node context-grill/bin/context-grill.js scan --severity high --json --out scan.json
+- run: node context-grill/bin/context-grill.js ask "この PR で増えたセキュリティリスク" --task security --out risk.md
 ```
 
 ---
@@ -351,7 +351,7 @@ grounded resolve "https://github.com/acme/api-service/tree/develop/services/paym
 ## 9. セキュリティ（社内非公開リポジトリ／社内 Confluence 前提）
 
 社外に出せない資料を扱う前提で、**外部送信**と**書き込み**の両方を機械的に制御しています。
-実際の挙動は `grounded privacy` で確認でき、通信は `.grounded/egress.log` に記録されます。
+実際の挙動は `context-grill privacy` で確認でき、通信は `.context-grill/egress.log` に記録されます。
 
 ### 9.1 外部へ出るデータ（送信先ホワイトリスト方式）
 
@@ -385,7 +385,7 @@ service-account*.json / secrets.* / *.tfstate* / .terraform/** / .htpasswd / *.g
 
 通常のコードや設定に埋め込まれた認証情報は、**外部に出る境界で必ず墨消し**されます。
 
-- 対象: LLM へ送る証拠パック / 埋め込み API へ送る本文 / MCP がホストモデルに返す本文 / 静的解析の検出スニペット / `grounded search` の出力
+- 対象: LLM へ送る証拠パック / 埋め込み API へ送る本文 / MCP がホストモデルに返す本文 / 静的解析の検出スニペット / `context-grill search` の出力
 - 検出: 秘密鍵ブロック、AWS / GitHub / Slack / Stripe / OpenAI / Anthropic / Google / JWT、URL 埋め込みパスワード、`key = "..."` 形式、`.env` 形式
 - `process.env.API_KEY` のような環境変数参照は誤検知しません
 - **行数を変えない**実装なので、行番号・逐語引用の検証は壊れません
@@ -395,16 +395,16 @@ service-account*.json / secrets.* / *.tfstate* / .terraform/** / .htpasswd / *.g
 + const AWS_KEY = "«REDACTED:AWS_ACCESS_KEY»";
 ```
 
-ローカルキャッシュ（`.grounded/cache/`）は静的解析と行番号照合のため原文を保持しますが、
-ワークスペースは `0700` で作成され、`.grounded/.gitignore`（`*`）によりコミット対象になりません。
+ローカルキャッシュ（`.context-grill/cache/`）は静的解析と行番号照合のため原文を保持しますが、
+ワークスペースは `0700` で作成され、`.context-grill/.gitignore`（`*`）によりコミット対象になりません。
 
 ### 9.4 書き込みリスク（誤コミット・誤更新の防止）
 
 **このツールが書き込む場所は 3 つだけです。**
 
-1. `<workspace>/`（既定 `.grounded/`）配下
+1. `<workspace>/`（既定 `.context-grill/`）配下
 2. `--out` で明示指定したファイル
-3. `grounded init` 実行時の `grounded.config.json` / `.env.example`（既存があれば `--force` なしでは上書きしません）
+3. `context-grill init` 実行時の `context-grill.config.json` / `.env.example`（既存があれば `--force` なしでは上書きしません）
 
 git については、実行しうるサブコマンドを許可リストで固定しています。
 
@@ -412,7 +412,7 @@ git については、実行しうるサブコマンドを許可リストで固�
 | --- | --- |
 | **到達不能** | `push` `commit` `add` `rm` `checkout` `switch` `clean` `merge` `rebase` `stash` `tag` `submodule` ほか |
 
-- `reset --hard` は **grounded が作成したクローン**（マーカーファイル `.grounded-managed` を持ち、ワークスペース内にある）に対してのみ実行されます。既存ディレクトリを見つけた場合は上書きせずエラーになります
+- `reset --hard` は **context-grill が作成したクローン**（マーカーファイル `.context-grill-managed` を持ち、ワークスペース内にある）に対してのみ実行されます。既存ディレクトリを見つけた場合は上書きせずエラーになります
 - `sources[].path` でローカルの作業リポジトリを指す場合は、`git rev-parse HEAD` しか実行しません（**完全に読み取り専用**。未コミットの変更やブランチに一切触れません）
 - Confluence / Jira は参照系 API のみ。ページ作成・更新・削除の実装自体がありません
 
@@ -427,7 +427,7 @@ git 認証は URL・コマンドライン引数・`.git/config` のいずれに�
 
 - 例外・ログ・監査ログはすべて墨消しを通します（環境変数の実値も落とします）
 - 監査ログにクエリ文字列は記録しません
-- `grounded doctor` は環境変数の**名前と設定有無**だけを表示し、値は出しません
+- `context-grill doctor` は環境変数の**名前と設定有無**だけを表示し、値は出しません
 
 ### 9.6 プロンプトインジェクション
 
@@ -441,7 +441,7 @@ Confluence ページや Issue に「これまでの指示を無視して〜」�
 
 - GitHub は **fine-grained PAT（Contents: Read-only）** を使う
 - Atlassian API トークンは閲覧権限のみのアカウントで発行する
-- 初回は `grounded privacy` と `grounded ask --dry-run` で送信内容を確認してから本番運用に入る
+- 初回は `context-grill privacy` と `context-grill ask --dry-run` で送信内容を確認してから本番運用に入る
 - 完全にローカルで済ませたい場合: `security.networkMode` を通常運用にしつつ `llm.provider: "openai-compat"` でローカル LLM を指定し、`retrieval.embedding.provider: "none"` のままにする
 - LLM プロバイダ側の学習利用除外・データ保持ポリシー（Zero Data Retention 等）は別途契約で確認してください。本ツールはそこまでは保証できません
 

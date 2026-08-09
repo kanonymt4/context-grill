@@ -66,7 +66,7 @@ test('文書チャンク: 見出し階層をタイトルに持つ', () => {
 });
 
 test('索引: BM25 で該当チャンクが上位に来る', async (t) => {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'grounded-'));
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-'));
   const b = new IndexBuilder(dir);
   await b.start();
   const mk = (i, text, p) => ({ id: `s:${p}#0`, docId: `s:${p}`, sourceId: 's', sourceType: 'local', path: p, title: p, kind: 'code', lang: 'js', url: null, version: '1', meta: {}, start: 1, end: 3, hash: String(i), ntok: 10, text });

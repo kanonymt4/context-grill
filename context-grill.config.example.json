@@ -1,6 +1,6 @@
 {
   "project": "my-service",
-  "workspace": ".grounded",
+  "workspace": ".context-grill",
 
   "sources": [
     {
@@ -29,7 +29,7 @@
       "auth": { "tokenEnv": "GITHUB_TOKEN" }
     },
     {
-      "_comment": "A) ページを名指し + 配下ツリー（URL をそのまま貼れる。grounded resolve <URL> --add で自動生成）",
+      "_comment": "A) ページを名指し + 配下ツリー（URL をそのまま貼れる。context-grill resolve <URL> --add で自動生成）",
       "id": "spec",
       "type": "confluence",
       "baseUrl": "https://your-org.atlassian.net/wiki",

@@ -1,18 +1,18 @@
 {
-  "name": "grounded",
+  "name": "context-grill",
   "version": "0.1.0",
   "description": "GitHub + Atlassian(Confluence/Jira) を一次資料として、仕様整理・バグ調査・セキュリティ/静的解析・機能設計を根拠付きで実施する CLI + MCP サーバー",
   "type": "module",
   "bin": {
-    "grounded": "bin/grounded.js"
+    "context-grill": "bin/context-grill.js"
   },
   "engines": {
     "node": ">=20.10.0"
   },
   "scripts": {
     "test": "node --test test/",
-    "mcp": "node bin/grounded.js mcp",
-    "doctor": "node bin/grounded.js doctor"
+    "mcp": "node bin/context-grill.js mcp",
+    "doctor": "node bin/context-grill.js doctor"
   },
   "dependencies": {},
   "devDependencies": {},
@@ -21,7 +21,7 @@
     "bin",
     "src",
     "schema",
-    "grounded.config.example.json",
+    "context-grill.config.example.json",
     "usage.md",
     "README.md"
   ]

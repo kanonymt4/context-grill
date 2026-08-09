@@ -1,17 +1,17 @@
 # 対象の指定方法（リポジトリ / Confluence ページ）
 
-grounded に「どのリポジトリ・どのページを読ませるか」を設定する手順です。
+context-grill に「どのリポジトリ・どのページを読ませるか」を設定する手順です。
 
 ---
 
 ## 基本：URL をそのまま貼るだけ
 
-`grounded resolve` にブラウザからコピーした URL を渡すと設定を生成し、`--add` で設定ファイルに追記します。
+`context-grill resolve` にブラウザからコピーした URL を渡すと設定を生成し、`--add` で設定ファイルに追記します。
 
 ```bash
-grounded resolve "https://github.com/acme/api-service/tree/develop/services/payment" \
+context-grill resolve "https://github.com/acme/api-service/tree/develop/services/payment" \
                  "https://acme.atlassian.net/wiki/spaces/ENG/pages/393217/決済仕様" --add
-grounded sync
+context-grill sync
 ```
 
 上の例だと、GitHub は「develop ブランチの `services/payment` 配下だけ」、Confluence は「そのページと配下ツリー」という設定が自動で作られます。
@@ -19,9 +19,9 @@ grounded sync
 `--add` を付けなければ、貼り付け用の JSON を表示するだけです（設定ファイルは変更されません）。
 
 ```bash
-grounded resolve "https://github.com/acme/api-service"          # 確認のみ
-grounded resolve "https://github.com/acme/api-service" --add    # 設定に追記
-grounded resolve "https://github.com/acme/api-service" --json   # 機械可読な出力
+context-grill resolve "https://github.com/acme/api-service"          # 確認のみ
+context-grill resolve "https://github.com/acme/api-service" --add    # 設定に追記
+context-grill resolve "https://github.com/acme/api-service" --json   # 機械可読な出力
 ```
 
 ---
@@ -161,7 +161,7 @@ grounded resolve "https://github.com/acme/api-service" --json   # 機械可読�
 }
 ```
 
-チケット URL（`.../browse/ENG-1234`）を `grounded resolve` に渡すと `key = ENG-1234` の形になります。
+チケット URL（`.../browse/ENG-1234`）を `context-grill resolve` に渡すと `key = ENG-1234` の形になります。
 
 ---
 
@@ -178,19 +178,19 @@ grounded resolve "https://github.com/acme/api-service" --json   # 機械可読�
 ## 設定後の流れ
 
 ```bash
-grounded sync      # 取得 → 索引構築（設定を変えたらこれ）
-grounded build     # 取得済みキャッシュから索引だけ再構築（ネットワーク不要）
-grounded status    # 何が何件取り込まれたかを確認
-grounded privacy   # どのデータがどこへ送られるかを確認
+context-grill sync      # 取得 → 索引構築（設定を変えたらこれ）
+context-grill build     # 取得済みキャッシュから索引だけ再構築（ネットワーク不要）
+context-grill status    # 何が何件取り込まれたかを確認
+context-grill privacy   # どのデータがどこへ送られるかを確認
 ```
 
-`grounded status` の出典別件数が想定と違う場合は、`include` / `exclude` / `limit` を見直してください。
+`context-grill status` の出典別件数が想定と違う場合は、`include` / `exclude` / `limit` を見直してください。
 
 意図した資料が検索に出てくるかは、LLM を呼ばずに確認できます。
 
 ```bash
-grounded search "返金 リトライ 上限"        # 検索だけ（トークン消費ゼロ）
-grounded ask "..." --dry-run               # 送信予定の証拠とプロンプトを全部表示
+context-grill search "返金 リトライ 上限"        # 検索だけ（トークン消費ゼロ）
+context-grill ask "..." --dry-run               # 送信予定の証拠とプロンプトを全部表示
 ```
 
 ---
@@ -200,7 +200,7 @@ grounded ask "..." --dry-run               # 送信予定の証拠とプロン�
 | 状況 | 対処 |
 | --- | --- |
 | 関係ないページが大量に入る | `exclude` にタイトル glob を追加、または `labels` / `pageIds` で絞る |
-| 目的のコードが検索に出ない | `include` が狭すぎないか確認。`grounded search` で直接確認する |
+| 目的のコードが検索に出ない | `include` が狭すぎないか確認。`context-grill search` で直接確認する |
 | 同期が遅い / 重い | `maxFiles`、`limit`、`include` を絞る。`mode: "api"` は少数ファイル向け |
-| 資料が古い | `grounded sync`（差分同期なので更新分だけ取り直します） |
+| 資料が古い | `context-grill sync`（差分同期なので更新分だけ取り直します） |
 | 文書と実装で信頼度に差がある | `priority` を調整（大きいほど検索で優遇） |

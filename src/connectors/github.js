@@ -20,13 +20,13 @@ const DEFAULT_EXCLUDE = [
   '**/*.woff*', '**/*.ttf', '**/*.mp4', '**/*.snap',
 ];
 
-// grounded が実行してよい git サブコマンド。これ以外は実行しない。
+// context-grill が実行してよい git サブコマンド。これ以外は実行しない。
 // 特に push / commit / add / checkout / clean / rm は allowWrite でも実行できない。
 const READ_ONLY_GIT = new Set(['rev-parse', 'config', 'log', 'show', 'ls-files', 'ls-tree', 'status', '--version']);
 const MANAGED_GIT = new Set(['clone', 'fetch', 'reset', 'remote', ...READ_ONLY_GIT]);
 const FORBIDDEN_GIT = new Set(['push', 'commit', 'add', 'rm', 'mv', 'checkout', 'switch', 'clean', 'merge', 'rebase', 'cherry-pick', 'tag', 'am', 'apply', 'stash', 'filter-branch', 'gc', 'prune', 'worktree', 'submodule', 'send-email', 'daemon']);
 
-const MANAGED_MARKER = '.grounded-managed';
+const MANAGED_MARKER = '.context-grill-managed';
 const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 const REF_RE = /^[A-Za-z0-9._\/-]{1,200}$/;
 
@@ -89,7 +89,7 @@ export async function assertManagedClone(dir, reposDir) {
   const marker = path.join(dir, MANAGED_MARKER);
   if (fs.existsSync(dir) && fs.readdirSync(dir).length > 0 && !fs.existsSync(marker)) {
     throw new Error(
-      `${dir} は grounded が作成したクローンではないため、上書き・reset を行いません。\n` +
+      `${dir} は context-grill が作成したクローンではないため、上書き・reset を行いません。\n` +
       `別のディレクトリを workspace に指定するか、このディレクトリを削除してください。`
     );
   }
@@ -106,7 +106,7 @@ async function ensureClone(src, reposDir) {
     return { dir: p, sha, managed: false };
   }
 
-  // (B) grounded がワークスペース内に持つクローン
+  // (B) context-grill がワークスペース内に持つクローン
   if (!REPO_RE.test(String(src.repo || ''))) {
     throw new Error(`sources[${src.id}].repo の形式が不正です（"org/name" 形式のみ）: ${src.repo}`);
   }
@@ -128,7 +128,7 @@ async function ensureClone(src, reposDir) {
     if (src.ref) args.push('--branch', src.ref);
     args.push('--', url, dir);
     await git(args, undefined, { src, allowWrite: true });
-    await fsp.writeFile(path.join(dir, MANAGED_MARKER), `created by grounded at ${new Date().toISOString()}\n`);
+    await fsp.writeFile(path.join(dir, MANAGED_MARKER), `created by context-grill at ${new Date().toISOString()}\n`);
   } else {
     log.step(`fetch ${src.repo} (${ref})`);
     await git(['fetch', '--depth', String(src.depth || 1), '--no-tags', url, ref], dir, { src, allowWrite: true });
@@ -195,7 +195,7 @@ export async function syncGithub(src, ctx) {
     // API モード: サブセット取得向け（大規模リポには clone を推奨）
     const tk = token(src);
     const api = src.apiBaseUrl || 'https://api.github.com';
-    const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'grounded' };
+    const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'context-grill' };
     if (tk) headers.Authorization = `Bearer ${tk}`;
     const refInfo = await httpJson(`${api}/repos/${src.repo}/commits/${encodeURIComponent(src.ref || 'HEAD')}`, { headers, purpose: `github:${src.id}` });
     sha = refInfo.sha;
@@ -225,7 +225,7 @@ export async function syncGithub(src, ctx) {
   if (src.issues?.enabled || src.pulls?.enabled) {
     const tk = token(src);
     const api = src.apiBaseUrl || 'https://api.github.com';
-    const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'grounded' };
+    const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'context-grill' };
     if (tk) headers.Authorization = `Bearer ${tk}`;
     const limit = Math.max(src.issues?.limit || 0, src.pulls?.limit || 0) || 100;
     const state = src.issues?.state || src.pulls?.state || 'all';

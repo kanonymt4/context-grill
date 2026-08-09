@@ -25,7 +25,7 @@ const SECRETS = {
 };
 
 async function secureFixture(overrides = {}) {
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'grounded-sec-'));
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-sec-'));
   await fsp.mkdir(path.join(dir, 'src'), { recursive: true });
   await fsp.mkdir(path.join(dir, 'conf'), { recursive: true });
   await fsp.writeFile(path.join(dir, '.env'), `DB_PASSWORD=${SECRETS.env}\nSTRIPE_SECRET_KEY=${SECRETS.stripe}\n`);
@@ -34,7 +34,7 @@ async function secureFixture(overrides = {}) {
   await fsp.writeFile(path.join(dir, '.netrc'), `machine github.com login bot password ${SECRETS.gh}\n`);
   await fsp.writeFile(path.join(dir, 'conf', 'prod.yaml'), `database:\n  password: "${SECRETS.dbpass}"\naws_access_key_id: ${SECRETS.aws}\n`);
   await fsp.writeFile(path.join(dir, 'src', 'app.js'), `const AWS_KEY = "${SECRETS.aws}";\nfunction main() { return AWS_KEY; }\n`);
-  await fsp.writeFile(path.join(dir, 'grounded.config.json'), JSON.stringify({
+  await fsp.writeFile(path.join(dir, 'context-grill.config.json'), JSON.stringify({
     project: 'sec',
     sources: [{ id: 'repo', type: 'local', path: dir, include: ['**/*'], includeUnknownTypes: true }],
     llm: { provider: 'dry', model: 'dry' },
@@ -103,11 +103,11 @@ test('機密パス: include に "**/*" を書いても取り込まれない', ()
 
 test('E2E: 機密ファイルは索引に入らず、LLM 送信内容にも秘密が残らない', async () => {
   const dir = await secureFixture();
-  const config = await loadConfig(path.join(dir, 'grounded.config.json'));
+  const config = await loadConfig(path.join(dir, 'context-grill.config.json'));
   await syncSources(config, {});
   await buildIndex(config, { embed: false });
 
-  const cached = (await fsp.readFile(path.join(dir, '.grounded', 'cache', 'sources', 'repo', 'docs.jsonl'), 'utf8'))
+  const cached = (await fsp.readFile(path.join(dir, '.context-grill', 'cache', 'sources', 'repo', 'docs.jsonl'), 'utf8'))
     .trim().split('\n').map(JSON.parse);
   const indexed = cached.map((d) => d.path);
   for (const bad of ['.env', 'id_rsa', '.netrc']) {
@@ -126,12 +126,12 @@ test('E2E: 機密ファイルは索引に入らず、LLM 送信内容にも秘�
 
 test('シンボリックリンクをたどってリポジトリ外を読まない', async (t) => {
   const dir = await secureFixture();
-  const outside = await fsp.mkdtemp(path.join(os.tmpdir(), 'grounded-outside-'));
+  const outside = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-outside-'));
   await fsp.writeFile(path.join(outside, 'secret.txt'), 'TOP_SECRET_OUTSIDE_CONTENT');
   try { await fsp.symlink(outside, path.join(dir, 'linked')); } catch { return t.skip('symlink 不可の環境'); }
-  const config = await loadConfig(path.join(dir, 'grounded.config.json'));
+  const config = await loadConfig(path.join(dir, 'context-grill.config.json'));
   await syncSources(config, {});
-  const cached = (await fsp.readFile(path.join(dir, '.grounded', 'cache', 'sources', 'repo', 'docs.jsonl'), 'utf8'))
+  const cached = (await fsp.readFile(path.join(dir, '.context-grill', 'cache', 'sources', 'repo', 'docs.jsonl'), 'utf8'))
     .trim().split('\n').map(JSON.parse);
   assert.ok(!cached.some((d) => d.text.includes('TOP_SECRET_OUTSIDE_CONTENT')), 'リンク先が読まれてはいけない');
   await fsp.rm(dir, { recursive: true, force: true });
@@ -190,12 +190,12 @@ test('git: 認証トークンは argv / URL に載らず環境変数経由にな
   delete process.env.TEST_GH_TOKEN;
 });
 
-test('git: grounded が作っていないディレクトリには破壊的操作をしない', async () => {
-  const repos = await fsp.mkdtemp(path.join(os.tmpdir(), 'grounded-repos-'));
+test('git: context-grill が作っていないディレクトリには破壊的操作をしない', async () => {
+  const repos = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-repos-'));
   const victim = path.join(repos, 'myrepo');
   await fsp.mkdir(victim, { recursive: true });
   await fsp.writeFile(path.join(victim, 'important.txt'), '消えては困るファイル');
-  await assert.rejects(() => assertManagedClone(victim, repos), /grounded が作成したクローンではない/);
+  await assert.rejects(() => assertManagedClone(victim, repos), /context-grill が作成したクローンではない/);
   await assert.rejects(() => assertManagedClone('/tmp/elsewhere', repos), /ワークスペース外/);
   assert.ok(fs.existsSync(path.join(victim, 'important.txt')), 'ファイルは無傷であること');
   await fsp.rm(repos, { recursive: true, force: true });
@@ -212,7 +212,7 @@ test('パス封じ込め: isInside がトラバーサルを弾く', () => {
 test('埋め込み送信は明示同意が無ければ実行されない', async () => {
   const dir = await secureFixture({ retrieval: { embedding: { provider: 'openai', model: 'm', dimensions: 8, apiKeyEnv: 'TEST_EMB_KEY' } } });
   process.env.TEST_EMB_KEY = 'dummy';
-  const config = await loadConfig(path.join(dir, 'grounded.config.json'));
+  const config = await loadConfig(path.join(dir, 'context-grill.config.json'));
   await syncSources(config, {});
   await assert.rejects(() => buildIndex(config, { embed: true }), /allowEmbeddingUpload/);
   delete process.env.TEST_EMB_KEY;
@@ -222,7 +222,7 @@ test('埋め込み送信は明示同意が無ければ実行されない', async
 test('allowLlmUpload=false なら ask は送信前にブロックされる', async () => {
   const dir = await secureFixture({ llm: { provider: 'anthropic', model: 'm', apiKeyEnv: 'TEST_LLM_KEY' }, security: { allowLlmUpload: false } });
   process.env.TEST_LLM_KEY = 'dummy';
-  const config = await loadConfig(path.join(dir, 'grounded.config.json'));
+  const config = await loadConfig(path.join(dir, 'context-grill.config.json'));
   await syncSources(config, {});
   await buildIndex(config, { embed: false });
   await assert.rejects(() => runTask(config, { taskId: 'spec', instruction: 'x', effort: 'low', save: false }), /allowLlmUpload=false/);
@@ -235,13 +235,13 @@ test('allowLlmUpload=false なら ask は送信前にブロックされる', asy
 
 test('設定に環境変数の秘密値が展開されていたら起動を拒否する', async () => {
   process.env.EVIL_API_TOKEN = 'super-secret-token-value-123';
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'grounded-cfg-'));
-  await fsp.writeFile(path.join(dir, 'grounded.config.json'), JSON.stringify({
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-cfg-'));
+  await fsp.writeFile(path.join(dir, 'context-grill.config.json'), JSON.stringify({
     project: 'x',
     sources: [{ id: 'w', type: 'confluence', baseUrl: 'https://evil.example.com/${EVIL_API_TOKEN}' }],
     llm: { provider: 'dry', model: 'd' },
   }));
-  await assert.rejects(() => loadConfig(path.join(dir, 'grounded.config.json')), /EVIL_API_TOKEN の値が展開/);
+  await assert.rejects(() => loadConfig(path.join(dir, 'context-grill.config.json')), /EVIL_API_TOKEN の値が展開/);
   delete process.env.EVIL_API_TOKEN;
   await fsp.rm(dir, { recursive: true, force: true });
 });

@@ -1,4 +1,4 @@
-# CLAUDE.md — grounded
+# CLAUDE.md — context-grill
 
 このリポジトリを開いた Claude が最初に読むファイル。作業のたびに追記・更新する。
 
@@ -37,7 +37,7 @@ GitHub / Confluence / Jira の資料を一次資料として登録し、仕様�
 ## 構成
 
 ```
-bin/grounded.js          エントリポイント
+bin/context-grill.js          エントリポイント
 src/cli.js               CLI
 src/mcp/server.js        MCP サーバー
 src/connectors/          github.js / jira.js / confluence.js / local.js / base.js
@@ -63,7 +63,7 @@ test/                    unit / e2e / security
   いずれも実害の大きいもの。`.env.example` のみ追跡する
 - `test/security.test.js` にはダミートークン（`ghp_ABCDEF…` 等）が意図的に含まれる。
   秘密情報検出のテストなので、スキャナが反応しても正常
-- `.grounded/` はインデックスのキャッシュ置き場。git 管理しない
+- `.context-grill/` はインデックスのキャッシュ置き場。git 管理しない
 
 ## 未確認・次にやること
 
@@ -75,4 +75,4 @@ test/                    unit / e2e / security
 ## 履歴
 
 - 2026-08-06 〜 08-07 初版作成
-- 2026-08-09 Cowork のセッション領域から `~/repos/grounded/` へ移設、git 管理を開始
+- 2026-08-09 Cowork のセッション領域から `~/repos/context-grill/` へ移設、git 管理を開始
