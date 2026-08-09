@@ -1,0 +1,140 @@
+{
+  "project": "my-service",
+  "workspace": ".grounded",
+
+  "sources": [
+    {
+      "id": "api",
+      "type": "github",
+      "repo": "your-org/api-service",
+      "ref": "main",
+      "mode": "clone",
+      "priority": 1.0,
+      "include": ["src/**", "lib/**", "migrations/**", "docs/**", "*.md", "package.json", "Dockerfile", ".github/workflows/**"],
+      "exclude": ["**/__snapshots__/**", "**/*.generated.*"],
+      "maxFileBytes": 400000,
+      "maxFiles": 5000,
+      "auth": { "tokenEnv": "GITHUB_TOKEN" },
+      "issues": { "enabled": false, "state": "all", "limit": 200 },
+      "pulls": { "enabled": false, "state": "all", "limit": 100 }
+    },
+    {
+      "id": "web",
+      "type": "github",
+      "repo": "your-org/web-frontend",
+      "ref": "main",
+      "mode": "clone",
+      "priority": 0.8,
+      "include": ["src/**", "*.md"],
+      "auth": { "tokenEnv": "GITHUB_TOKEN" }
+    },
+    {
+      "_comment": "A) ページを名指し + 配下ツリー（URL をそのまま貼れる。grounded resolve <URL> --add で自動生成）",
+      "id": "spec",
+      "type": "confluence",
+      "baseUrl": "https://your-org.atlassian.net/wiki",
+      "pageUrls": ["https://your-org.atlassian.net/wiki/spaces/ENG/pages/393217/決済仕様"],
+      "includeDescendants": true,
+      "maxDepth": 5,
+      "limit": 200,
+      "priority": 1.0,
+      "auth": { "emailEnv": "ATLASSIAN_EMAIL", "tokenEnv": "ATLASSIAN_API_TOKEN" }
+    },
+    {
+      "_comment": "B) 条件で絞る（labels / titleContains / updatedWithinDays / 任意の cql）",
+      "id": "adr",
+      "type": "confluence",
+      "baseUrl": "https://your-org.atlassian.net/wiki",
+      "spaceKey": "ENG",
+      "labels": ["spec", "adr"],
+      "updatedWithinDays": 365,
+      "limit": 300,
+      "auth": { "emailEnv": "ATLASSIAN_EMAIL", "tokenEnv": "ATLASSIAN_API_TOKEN" }
+    },
+    {
+      "_comment": "C) スペース全体 + タイトルで最終フィルタ",
+      "id": "wiki",
+      "type": "confluence",
+      "baseUrl": "https://your-org.atlassian.net/wiki",
+      "spaceKey": "ENG",
+      "limit": 500,
+      "priority": 0.9,
+      "exclude": ["*議事録*", "*日報*"],
+      "auth": { "emailEnv": "ATLASSIAN_EMAIL", "tokenEnv": "ATLASSIAN_API_TOKEN" }
+    },
+    {
+      "id": "jira",
+      "type": "jira",
+      "baseUrl": "https://your-org.atlassian.net",
+      "jql": "project = ENG AND updated >= -180d ORDER BY updated DESC",
+      "limit": 300,
+      "priority": 0.6,
+      "auth": { "emailEnv": "ATLASSIAN_EMAIL", "tokenEnv": "ATLASSIAN_API_TOKEN" }
+    },
+    {
+      "id": "designdocs",
+      "type": "local",
+      "path": "./design-docs",
+      "include": ["**/*.md"]
+    }
+  ],
+
+  "retrieval": {
+    "glossaryBridge": true,
+    "chunk": {
+      "code": { "maxLines": 110, "overlapLines": 12, "maxChars": 6000 },
+      "doc": { "maxChars": 2200, "overlapChars": 220 }
+    },
+    "hybrid": { "rrfK": 60, "mmrLambda": 0.72, "final": 28, "perQueryTop": 60 },
+    "embedding": {
+      "provider": "none",
+      "model": "text-embedding-3-small",
+      "dimensions": 512,
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "batch": 96
+    }
+  },
+
+  "llm": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-5",
+    "apiKeyEnv": "ANTHROPIC_API_KEY",
+    "temperature": 0,
+    "maxOutputTokens": 8000,
+    "promptCache": true
+  },
+
+  "budget": {
+    "evidenceTokens": 55000,
+    "staticFactsTokens": 6000,
+    "maxTotalTokensPerRun": 220000,
+    "maxRepairs": 2
+  },
+
+  "security": {
+    "networkMode": "normal",
+    "allowHosts": [],
+    "denySensitivePaths": true,
+    "extraDenyPaths": ["**/dumps/**", "**/*.sql.gz"],
+    "redactSecrets": true,
+    "allowEmbeddingUpload": false,
+    "allowLlmUpload": true,
+    "auditLog": true,
+    "workspaceMode": 448
+  },
+
+  "policy": {
+    "requireCitations": true,
+    "minEvidencePerItem": 1,
+    "requireVerbatimQuote": true,
+    "dropUnverifiedItems": true,
+    "forbidSpeculativeLanguage": true,
+    "language": "ja"
+  },
+
+  "effortPresets": {
+    "low": { "queries": 3, "final": 14, "evidenceTokens": 20000 },
+    "normal": { "queries": 6, "final": 28, "evidenceTokens": 55000 },
+    "deep": { "queries": 12, "final": 56, "evidenceTokens": 110000 }
+  }
+}
