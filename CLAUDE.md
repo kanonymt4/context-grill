@@ -54,7 +54,7 @@ test/                    unit / e2e / security
 
 - **テスト37件すべて成功**（2026-08-09 に `node --test test/` で確認、Node v20.15.1）
 - 依存パッケージゼロ。`npm install` 不要
-- `schema/` は空ディレクトリ。`package.json` の `files` には含まれているが中身がない
+- ~~`schema/` は空ディレクトリ~~ 2026-08-10 削除済み（経緯不明のまま package.json の files から除去。理由は下記）
 
 ## 注意点
 
@@ -67,12 +67,20 @@ test/                    unit / e2e / security
 
 ## 未確認・次にやること
 
-- `schema/` が空。JSON Schema を置く想定だったのか、不要になったのかが不明
-- 実際に GitHub / Confluence / Jira へ接続して動かした記録がない。
-  `npm run doctor` で疎通確認ができる設計になっている
-- 埋め込みプロバイダ（OpenAI / Voyage）を有効にした状態での動作が未検証
+- ~~`schema/` が空~~ 2026-08-10 解消。ITEM_SCHEMA/envelopeSchema (src/tasks/index.js) は「LLM回答の構造契約」であり対象プロジェクト非依存（itemTypes も spec/debug/security/techdebt/design の固定5種）。外部化するとカスタマイズ可能に見えて evidence/quotes の強制が緩められるリスクがあるため、inline のままが妥当と判断し schema/ を削除、package.json の files からも除去
+- ~~実際に GitHub / Confluence / Jira へ接続して動かした記録がない~~ 2026-08-10 GitHub のみ検証済み（private repo kanonymt4/context-grill を対象に mode:clone で実クローン成功、42ドキュメント/130チャンク、パーマリンク生成も正常）。`GITHUB_TOKEN` を用意しなくても `credential.helper=osxkeychain` があれば通ることを確認 （コードが独自 Authorization ヘッダを付けるのはトークンがある場合のみで、無い場合は素の git にフォールバックするため）。Confluence / Jira は未検証のまま
+- ~~埋め込みプロバイダを有効にした状態での動作が未検証~~ 2026-08-10 検証済み。ローカル Ollama（nomic-embed-text, 768次元, openai-compat 経由）で sync→embedding API 実呼び出し→egress.log記録→ベクトル索引構築→2回目syncでキャッシュ全ヒット、を一通り確認。ただし RRF 融合の効果は一様ではなく、クエリによってはBM25単体の方が正解ファイルの順位が高いケースもあった（言い換え耐性は効く場合とそうでない場合がある）。2026-08-10 OpenAI/Voyage 実APIでも検証済み。
+  - OpenAI (text-embedding-3-small, dimensions:512): sync/cache reuse/検索まで完全に成功。`dimensions` 指定時に実際に返るベクトル長も一致することを確認（キャッシュ破損リスクは杞憂だった）
+  - Voyage (voyage-3-lite): 単独API呼び出しは成功するが、無料枠のレート制限(3RPM/10K TPM)に対し`retry()`のバックオフ(最大5秒程度)が短すぎ、実際の`sync`では埋め込み取得が継続的に失敗。ただし例外を握りつぶさずBM25のみへグレースフルデグレードする設計は正しく機能した（src/index/ingest.js）
+  - **要修正候補**: `embed.js`の`embedQuery()`が`embedChunks()`と同じ経路を通るため、Voyageのクエリでも`input_type:"document"`が固定送信される。実測で正解/無関係文書の分離度が本来の`query`指定時0.418 → 現状のbug挙動0.294と、約30%低下することを確認
+  - **要修正候補**: Voyage分岐だけ`data[].index`でソートしていない（openai/openai-compatはソートあり）。レスポンス順を無条件に信頼している
+  - **要修正候補**: 埋め込み取得が失敗すると`EmbedCache.close()`未到達のため、途中まで成功した分も含めて次回`sync`時にゼロからやり直しになる（部分キャッシュが永続化されない）
 
 ## 履歴
 
 - 2026-08-06 〜 08-07 初版作成
 - 2026-08-09 Cowork のセッション領域から `~/repos/context-grill/` へ移設、git 管理を開始
+- 2026-08-10 埋め込みプロバイダ（openai-compat, ローカル Ollama）の動作検証を実施、上記の通り確認。副産物として `.gitignore` に改名前の `.grounded/` が残っていたのを `.context-grill/` に修正（実害はなし。ワークスペース内側の `.context-grill/.gitignore` の `*` で二重に保護されていた）。加えて schema/ を削除し package.json の files からも除去（理由は上記）
+
+- 2026-08-10 GitHub 実接続を検証（private repo 自身を対象、mode:clone、42ドキュメント）。GITHUB_TOKEN 無しで osxkeychain 経由の認証だけで通ることを確認
+- 2026-08-10 OpenAI/Voyage 実APIでの埋め込み検証を実施。OpenAIは完全成功。Voyageは無料枠のレート制限で`sync`は失敗するがBM25へのフォールバックは正常動作。input_type固定・index未ソート・部分キャッシュ非永続化の3点を修正候補として記録。（作業中、APIキーが誤ってファイル名や出力に露出する事故が2回発生、都度キーを失効・再発行して対応）

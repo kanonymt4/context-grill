@@ -20,7 +20,6 @@
   "files": [
     "bin",
     "src",
-    "schema",
     "context-grill.config.example.json",
     "usage.md",
     "README.md"
