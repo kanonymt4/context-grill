@@ -84,3 +84,12 @@ test/                    unit / e2e / security
 
 - 2026-08-10 GitHub 実接続を検証（private repo 自身を対象、mode:clone、42ドキュメント）。GITHUB_TOKEN 無しで osxkeychain 経由の認証だけで通ることを確認
 - 2026-08-10 OpenAI/Voyage 実APIでの埋め込み検証を実施。OpenAIは完全成功。Voyageは無料枠のレート制限で`sync`は失敗するがBM25へのフォールバックは正常動作。input_type固定・index未ソート・部分キャッシュ非永続化の3点を修正候補として記録。（作業中、APIキーが誤ってファイル名や出力に露出する事故が2回発生、都度キーを失効・再発行して対応）
+- 2026-08-10 local vs GitHub ソースの比較整理（認証コスト・鮮度・証拠の耐久性・LLMトークン消費量の4軸）。
+  **LLMトークン消費量は差がないことを確認** — `isIndexable`/`isSensitiveDir` によるフィルタリングは
+  `src/connectors/base.js` / `src/util/sensitive.js` の共通ロジックを両コネクタが参照しており、
+  同一内容であればチャンク数・埋め込み対象・LLMへの投入トークン数は理論上同一になる
+  （差が出るとすれば「未コミットの変更で内容そのものが違う」場合のみで、取得経路自体は影響しない）。
+  ついでに GITHUB_TOKEN の「コスト」も整理: `mode: "clone"`（既定）は git プロトコルのみで
+  REST API を一切呼ばないためレート制限に無関係。`mode: "api"` はファイル1つにつき1 API 呼び出しが
+  発生し、GitHub の制限（未認証60/時・認証済み5,000/時）に直接影響するため大規模リポでは非推奨
+  （コード内コメントにも明記あり）。issues/pulls 取り込みも同じ REST エンドポイントを使う。
