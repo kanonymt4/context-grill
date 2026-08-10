@@ -346,6 +346,27 @@ context-grill resolve "https://github.com/acme/api-service/tree/develop/services
 - run: node context-grill/bin/context-grill.js ask "この PR で増えたセキュリティリスク" --task security --out risk.md
 ```
 
+### 8.1 npm パッケージとして配布する
+
+git リポジトリへのアクセスを渡さずに、単一ファイルで配布したい場合は `npm pack` を使います。`zip -r` などでディレクトリを丸ごと固めるのは避けてください — `.env`（APIキー）や `.git/` の履歴、`.context-grill/`（索引キャッシュ）まで含まれてしまいます。
+
+`npm pack` は `package.json` の `files` フィールドを許可リストとして参照するため、上記は原理的に含まれません。
+
+```bash
+npm pack --dry-run   # 中身を事前確認（何もファイルは生成されない）
+npm pack             # context-grill-<version>.tgz を生成
+```
+
+受け取った側のインストール：
+
+```bash
+npm install -g ./context-grill-<version>.tgz
+context-grill doctor   # 自分の GITHUB_TOKEN / ANTHROPIC_API_KEY 等を .env に用意してから実行
+```
+
+配布物に含まれるのは `bin/` `src/` `context-grill.config.example.json` `usage.md` `README.md` のみです。認証情報・索引・作業メモ（`CLAUDE.md`）はどの配布物にも含まれません。
+
+
 ---
 
 ## 9. セキュリティ（社内非公開リポジトリ／社内 Confluence 前提）
