@@ -394,6 +394,34 @@ npm install -g ./context-grill-<version>.tgz
 
 配布物に含まれるのは `bin/` `src/` `scripts/` `context-grill.config.example.json` `usage.md` `README.md` のみです。認証情報・索引・作業メモ（`CLAUDE.md`）はどの配布物にも含まれません。
 
+### 8.2 メールで配布する場合の注意
+
+Gmail は添付ファイルの**名前**を見てブロックします。`.js` や `.ps1` などは、アーカイブの中に入っていても検出されます。
+
+実測した挙動は次のとおりです（2026-08 時点）。
+
+| 送るもの | 結果 |
+| --- | --- |
+| `.tgz` をそのまま添付 | ブロック（中の `.js` が展開・検出される） |
+| `.tgz` を暗号化 zip に入れる | 通る（中身は復号できないためスキャンされない） |
+| 暗号化 zip に `setup.ps1` を同梱 | **ブロック**（暗号化しても**ファイル名は平文**なので `.ps1` が見える） |
+| `setup.ps1` → `setup.ps1.txt` にリネームして同梱 | 通る |
+
+`setup.sh` はブロックリストに含まれないため、そのままで問題ありません。
+
+つまりメールで送るなら、`setup.ps1` だけリネームして暗号化 zip にまとめます。
+
+```bash
+mkdir context-grill-dist
+cp context-grill-<version>.tgz scripts/setup.sh context-grill-dist/
+cp scripts/setup.ps1 context-grill-dist/setup.ps1.txt   # .ps1 のままだと弾かれる
+zip -er context-grill-dist.zip context-grill-dist       # パスワードは別経路で伝える
+```
+
+受け取った Windows ユーザーには、使う前に `setup.ps1.txt` を `setup.ps1` に戻してもらう必要があります。その旨を書いた案内を同梱しておくと親切です。
+
+なお、受信側が企業のメールゲートウェイを使っている場合は、暗号化アーカイブ自体を隔離するポリシーのこともあります。確実に渡したいなら、クラウドストレージの共有リンクを使うほうが安全です。
+
 
 ---
 
