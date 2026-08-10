@@ -359,6 +359,22 @@ npm pack             # context-grill-<version>.tgz を生成
 
 受け取った側のインストール：
 
+同梱の `scripts/setup.sh`（macOS / Linux）または `scripts/setup.ps1`（Windows）を、`.tgz` と同じディレクトリに置いて実行すると、Node のバージョン確認・インストール・作業ディレクトリの `init`・`doctor` までを一度に行います。
+
+```bash
+sh setup.sh                    # カレントに作業ディレクトリを作る
+sh setup.sh ~/work/my-project  # 場所を指定する
+```
+
+```powershell
+# Windows（実行できない場合は powershell -ExecutionPolicy Bypass -File .\setup.ps1）
+.\setup.ps1
+```
+
+スクリプトは**シェル設定ファイルの書き換え・`sources` の編集・`.env` への認証情報の記入は行いません**。必要な手順を表示するだけなので、そこはご自身で設定してください。
+
+手動でインストールする場合：
+
 ```bash
 npm install -g ./context-grill-<version>.tgz
 context-grill doctor   # 自分の GITHUB_TOKEN / ANTHROPIC_API_KEY 等を .env に用意してから実行
@@ -376,7 +392,7 @@ npm install -g ./context-grill-<version>.tgz
 ```
 
 
-配布物に含まれるのは `bin/` `src/` `context-grill.config.example.json` `usage.md` `README.md` のみです。認証情報・索引・作業メモ（`CLAUDE.md`）はどの配布物にも含まれません。
+配布物に含まれるのは `bin/` `src/` `scripts/` `context-grill.config.example.json` `usage.md` `README.md` のみです。認証情報・索引・作業メモ（`CLAUDE.md`）はどの配布物にも含まれません。
 
 
 ---
