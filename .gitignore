@@ -1,4 +1,4 @@
 node_modules/
-.grounded/
+.context-grill/
 .env
 *.log
