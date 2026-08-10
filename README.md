@@ -364,6 +364,18 @@ npm install -g ./context-grill-<version>.tgz
 context-grill doctor   # 自分の GITHUB_TOKEN / ANTHROPIC_API_KEY 等を .env に用意してから実行
 ```
 
+**`npm install -g` で `EACCES` エラーが出る場合**
+
+macOS では npm のグローバルインストール先（`/usr/local/lib/node_modules` など）への書き込み権限がなく、`Error: EACCES: permission denied` になることがあります。`sudo npm install -g ...` でも回避できますが、恒久的に直すなら prefix をユーザー所有のディレクトリに変更するのがおすすめです。
+
+```bash
+npm config set prefix ~/.npm-global
+echo 'export PATH="$HOME/.npm-global/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+npm install -g ./context-grill-<version>.tgz
+```
+
+
 配布物に含まれるのは `bin/` `src/` `context-grill.config.example.json` `usage.md` `README.md` のみです。認証情報・索引・作業メモ（`CLAUDE.md`）はどの配布物にも含まれません。
 
 
