@@ -192,6 +192,7 @@ context-grill mcp     # stdio
 
 ## 7. 対象の指定方法（リポジトリ / Confluence ページ）
 
+> コマンドとオプションの一覧・使用例は **[commands.md](./commands.md)**、
 > 実践的な設定例と調整の勘所は **[usage.md](./usage.md)** にまとめてあります。
 
 一番簡単なのは **ブラウザの URL をそのまま貼る**方法です。
@@ -392,7 +393,7 @@ npm install -g ./context-grill-<version>.tgz
 ```
 
 
-配布物に含まれるのは `bin/` `src/` `scripts/` `context-grill.config.example.json` `usage.md` `README.md` のみです。認証情報・索引・作業メモ（`CLAUDE.md`）はどの配布物にも含まれません。
+配布物に含まれるのは `bin/` `src/` `scripts/` `context-grill.config.example.json` `commands.md` `usage.md` `README.md` のみです。認証情報・索引・作業メモ（`CLAUDE.md`）はどの配布物にも含まれません。
 
 ### 8.2 メールで配布する場合の注意
 
