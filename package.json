@@ -22,6 +22,7 @@
     "src",
     "scripts",
     "context-grill.config.example.json",
+    "commands.md",
     "usage.md",
     "README.md"
   ]
