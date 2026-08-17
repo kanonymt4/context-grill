@@ -87,9 +87,33 @@ if (Get-Command context-grill -ErrorAction SilentlyContinue) {
 
     npm install -g $installTarget
     if ($LASTEXITCODE -ne 0) {
-        Die "インストールに失敗しました。管理者権限の PowerShell で再実行するか、npm のエラー出力を確認してください。"
+        # 書き込み権限がない場合はユーザー領域へフォールバックする（管理者権限を要求しない）
+        Write-Warn "グローバル領域へのインストールに失敗しました。ユーザー領域に切り替えて再試行します。"
+
+        $npmPrefix = Join-Path $env:APPDATA 'npm-global'
+        npm config set prefix $npmPrefix
+        npm install -g $installTarget
+        if ($LASTEXITCODE -ne 0) {
+            Die "インストールに失敗しました。npm のエラー出力を確認してください。"
+        }
+        Write-Ok "OK: $npmPrefix にインストールしました"
+
+        # PATH は自動で書き換えない。必要な操作を提示するだけ。
+        $npmBin = $npmPrefix
+        if ($env:Path -notlike "*$npmBin*") {
+            Write-Host ""
+            Write-Warn "PATH が通っていません。次のディレクトリを PATH に追加してください:"
+            Write-Host ""
+            Write-Host "    $npmBin"
+            Write-Host ""
+            Write-Host "「システム環境変数の編集」→「環境変数」→ ユーザー環境変数の Path に追加してください"
+            Write-Host "（管理者権限は不要です）。"
+            Write-Host "（このスクリプトは PATH を一時的に通して続行します）"
+            $env:Path = "$npmBin;$env:Path"
+        }
+    } else {
+        Write-Ok "OK: グローバルインストールが完了しました"
     }
-    Write-Ok "OK: グローバルインストールが完了しました"
 
     # npm のグローバル bin に PATH が通っているか確認（自動で書き換えはしない）
     if (-not (Get-Command context-grill -ErrorAction SilentlyContinue)) {
