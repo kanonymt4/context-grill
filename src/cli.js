@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadConfig, paths, ensureDirs, DEFAULTS, findConfigPath } from './config.js';
 import { syncSources, buildIndex, allDocs } from './index/ingest.js';
 import { IndexStore } from './index/store.js';
@@ -178,6 +179,21 @@ async function cmdInit(flags) {
     ].join('\n') + '\n');
   }
   const dir = path.dirname(target);
+
+  // 同梱ドキュメントを作業ディレクトリへコピーする（インストール先まで辿らずに読めるように）
+  const pkgRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const copiedDocs = [];
+  for (const name of ['commands.md', 'usage.md']) {
+    const from = path.join(pkgRoot, name);
+    const to = path.join(dir, name);
+    if (fs.existsSync(from) && !fs.existsSync(to)) {
+      try {
+        await fsp.copyFile(from, to);
+        copiedDocs.push(name);
+      } catch { /* コピーできなくても初期化は続行する */ }
+    }
+  }
+
   const giPath = path.join(dir, '.gitignore');
   const gi = fs.existsSync(giPath) ? await fsp.readFile(giPath, 'utf8') : '';
   const missing = ['.env', '.context-grill/'].filter((e) => !gi.split(/\r?\n/).some((l) => l.trim() === e || l.trim() === e.replace(/\/$/, '')));
@@ -188,8 +204,45 @@ async function cmdInit(flags) {
       missing.map((m) => `  ${m}\n`).join('') +
       `  ※ .context-grill/ 配下には .gitignore(*) が自動生成されるため、通常はコミット対象になりませんが、二重に防ぐことを推奨します。\n`);
   }
-  process.stdout.write(`\n次: sources を編集し、.env に認証情報を設定して \`context-grill sync\` を実行してください。\n`);
-  process.stdout.write(`送信内容を確認するには: context-grill privacy\n`);
+  if (copiedDocs.length) {
+    process.stdout.write(`\nドキュメントを配置しました: ${copiedDocs.join(', ')}\n`);
+  }
+
+  process.stdout.write([
+    '',
+    '── 次の手順 ────────────────────────────────',
+    '',
+    '1) 調査対象を設定する',
+    `     ${target}`,
+    '   を開いて sources を書き換えます。使わないソースは削除してください。',
+    '',
+    '     GitHub    { "id": "repo", "type": "github", "repo": "owner/name", "ref": "main" }',
+    '     ローカル   { "id": "proj", "type": "local",  "path": "../my-project" }',
+    '',
+    '   URL から自動生成することもできます:',
+    '     context-grill resolve "https://github.com/owner/name" --add',
+    '',
+    '2) 認証情報を用意する（必要な場合のみ）',
+    '     .env.example を .env にコピーして編集します。',
+    '     GITHUB_TOKEN       private リポジトリを見る場合',
+    '                        （git の資格情報ヘルパーが設定済みなら不要なことがあります）',
+    '     ATLASSIAN_EMAIL / ATLASSIAN_API_TOKEN   Confluence / Jira を見る場合',
+    '     ANTHROPIC_API_KEY  ask で回答を生成する場合',
+    '     ※ search / scan / ask --dry-run だけなら、いずれも不要です',
+    '',
+    '3) 索引を作って使う',
+    '     context-grill doctor                    環境と設定を確認',
+    '     context-grill sync                      資料を取得して索引を構築',
+    '     context-grill search "キーワード"         検索（LLM 不使用・キー不要）',
+    '     context-grill ask "調べたいこと" --dry-run --out bundle.md',
+    '                                             証拠パックを生成（LLM 不使用・キー不要）',
+    '',
+    '   コマンドの一覧と使用例は commands.md、',
+    '   調査対象の指定方法は usage.md を参照してください。',
+    '',
+    '   送信内容を事前に確認する: context-grill privacy',
+    '',
+  ].join('\n') + '\n');
   return 0;
 }
 
