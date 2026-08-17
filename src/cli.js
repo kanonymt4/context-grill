@@ -139,8 +139,16 @@ async function cmdInit(flags) {
   const sample = {
     project: path.basename(path.dirname(target)),
     workspace: '.context-grill',
+    _README: 'sources は使うものだけ残し、他は削除してください（ダミーのまま sync するとエラーになります）。id は自分で決める呼び名で、実際のリポジトリ名と一致させる必要はありません。詳細は commands.md / usage.md を参照。',
     sources: [
       {
+        _comment: '手元のフォルダを対象にする。認証不要・外部通信なし。GitHub につなげない環境では clone 済みフォルダをこれで指す',
+        id: 'proj', type: 'local', path: './my-project',
+        include: ['src/**', 'docs/**', '*.md'],
+        exclude: ['**/node_modules/**', '**/*.test.*'],
+      },
+      {
+        _comment: 'GitHub リポジトリを対象にする',
         id: 'repo', type: 'github', repo: 'your-org/your-repo', ref: 'main', mode: 'clone',
         include: ['src/**', 'lib/**', 'app/**', 'docs/**', '*.md', 'package.json'],
         exclude: ['**/*.test.*', '**/__snapshots__/**'],
@@ -148,6 +156,7 @@ async function cmdInit(flags) {
         issues: { enabled: false, limit: 100 }, pulls: { enabled: false, limit: 50 },
       },
       {
+        _comment: 'Confluence を対象にする',
         id: 'wiki', type: 'confluence',
         baseUrl: 'https://your-org.atlassian.net/wiki', spaceKey: 'ENG', limit: 300,
         auth: { emailEnv: 'ATLASSIAN_EMAIL', tokenEnv: 'ATLASSIAN_API_TOKEN' },
