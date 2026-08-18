@@ -360,26 +360,18 @@ npm pack             # context-grill-<version>.tgz を生成
 
 受け取った側のインストール：
 
-同梱の `scripts/setup.sh`（macOS / Linux）または `scripts/setup.ps1`（Windows）を、`.tgz` と同じディレクトリに置いて実行すると、Node のバージョン確認・インストール・作業ディレクトリの `init`・`doctor` までを一度に行います。
-
-```bash
-sh setup.sh                    # カレントに作業ディレクトリを作る
-sh setup.sh ~/work/my-project  # 場所を指定する
-```
-
-```powershell
-# Windows（実行できない場合は powershell -ExecutionPolicy Bypass -File .\setup.ps1）
-.\setup.ps1
-```
-
-スクリプトは**シェル設定ファイルの書き換え・`sources` の編集・`.env` への認証情報の記入は行いません**。必要な手順を表示するだけなので、そこはご自身で設定してください。
-
-手動でインストールする場合：
-
 ```bash
 npm install -g ./context-grill-<version>.tgz
-context-grill doctor   # 自分の GITHUB_TOKEN / ANTHROPIC_API_KEY 等を .env に用意してから実行
+
+mkdir my-project && cd my-project
+context-grill init        # 設定のひな形とドキュメントを配置し、次の手順を表示する
 ```
+
+OS を問わず同じ手順です。`init` が `commands.md` / `usage.md` を作業ディレクトリに置き、
+続けて何をすればよいかを画面に表示します。あとは `sources` を設定して `sync` するだけです。
+
+`npm install -g` で `EACCES` が出る場合と、PATH が通らない場合の対処は同梱の
+`README-FIRST.md` に記載しています。
 
 **`npm install -g` で `EACCES` エラーが出る場合**
 
@@ -405,21 +397,18 @@ Gmail は添付ファイルの**名前**を見てブロックします。`.js` �
 | --- | --- |
 | `.tgz` をそのまま添付 | ブロック（中の `.js` が展開・検出される） |
 | `.tgz` を暗号化 zip に入れる | 通る（中身は復号できないためスキャンされない） |
-| 暗号化 zip に `setup.ps1` を同梱 | **ブロック**（暗号化しても**ファイル名は平文**なので `.ps1` が見える） |
-| `setup.ps1` → `setup.ps1.txt` にリネームして同梱 | 通る |
+| 暗号化 zip に `.ps1` を同梱 | **ブロック**（暗号化しても**ファイル名は平文**なので拡張子が見える） |
 
-`setup.sh` はブロックリストに含まれないため、そのままで問題ありません。
-
-つまりメールで送るなら、`setup.ps1` だけリネームして暗号化 zip にまとめます。
+つまりメールで送るなら、暗号化 zip にまとめます。
 
 ```bash
 mkdir context-grill-dist
-cp context-grill-<version>.tgz scripts/setup.sh context-grill-dist/
-cp scripts/setup.ps1 context-grill-dist/setup.ps1.txt   # .ps1 のままだと弾かれる
+cp context-grill-<version>.tgz scripts/README-FIRST.md context-grill-dist/
 zip -er context-grill-dist.zip context-grill-dist       # パスワードは別経路で伝える
 ```
 
-受け取った Windows ユーザーには、使う前に `setup.ps1.txt` を `setup.ps1` に戻してもらう必要があります。その旨を書いた案内を同梱しておくと親切です。
+`.js` や `.ps1` を含むファイルを同梱する必要が生じた場合は、拡張子を `.txt` などに変えて
+同梱し、受け取り側に戻してもらう必要があります。
 
 なお、受信側が企業のメールゲートウェイを使っている場合は、暗号化アーカイブ自体を隔離するポリシーのこともあります。確実に渡したいなら、クラウドストレージの共有リンクを使うほうが安全です。
 
