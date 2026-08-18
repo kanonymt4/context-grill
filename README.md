@@ -55,7 +55,7 @@ context-grill doctor   # 環境チェック
 プロジェクトのルートで初期化します。
 
 ```bash
-context-grill init          # context-grill.config.json と .env.example を作成
+context-grill init          # 設定のひな形とドキュメント（commands.md / usage.md）を配置
 
 # 対象リポジトリ / Confluence ページの URL を貼るだけで設定を生成（詳細は 7 章）
 context-grill resolve "https://github.com/acme/api-service" \
@@ -482,7 +482,7 @@ service-account*.json / secrets.* / *.tfstate* / .terraform/** / .htpasswd / *.g
 
 1. `<workspace>/`（既定 `.context-grill/`）配下
 2. `--out` で明示指定したファイル
-3. `context-grill init` 実行時の `context-grill.config.json` / `.env.example`（既存があれば `--force` なしでは上書きしません）
+3. `context-grill init` 実行時の `context-grill.config.json` / `.env.example` / `commands.md` / `usage.md`（既存があれば上書きしません。設定ファイルは `--force` なしでは上書きしません）
 
 git については、実行しうるサブコマンドを許可リストで固定しています。
 
