@@ -31,13 +31,32 @@ context-grill --help
 
 **`context-grill が見つからない` と出た場合** — npm のインストール先に PATH が通っていません。
 
+**Windows（PowerShell）**
+
+次の2行で、自分のユーザー環境変数の Path に追加できます。管理者権限は不要です。
+
 ```
-npm config get prefix
+$p = [Environment]::GetEnvironmentVariable('Path','User')
+[Environment]::SetEnvironmentVariable('Path', "$(npm config get prefix);$p", 'User')
 ```
 
-で表示されたパス（Windows はその直下、macOS / Linux は `bin` の下）を PATH に追加してください。
-Windows なら「システム環境変数の編集」→「環境変数」→ **ユーザー環境変数**の Path に追加（管理者権限は不要です）。
-macOS / Linux なら `~/.zshrc` などに次の1行を追記して、新しいターミナルを開きます。
+実行後、**PowerShell を閉じて開き直す**と反映されます。
+
+> **`setx` は使わないでください。** 1024文字を超える PATH を切り詰めて壊すことが知られています。
+> 上の `[Environment]::SetEnvironmentVariable` には、その制限はありません。
+
+> GUI（「システム環境変数の編集」→「環境変数」）からも設定できますが、UAC の状態によっては
+> ボタンがグレーアウトして編集できないことがあります。
+
+**PATH を変更したくない場合**は、インストール先を直接指定して実行することもできます。
+
+```
+& "$(npm config get prefix)\context-grill.cmd" --help
+```
+
+**macOS / Linux**
+
+`~/.zshrc`（bash なら `~/.bashrc`）に次の1行を追記して、新しいターミナルを開きます。
 
 ```
 export PATH="$(npm config get prefix)/bin:$PATH"
