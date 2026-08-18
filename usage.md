@@ -216,7 +216,17 @@ context-grill resolve "https://github.com/acme/api-service" --json   # 機械可
   "exclude": ["**/node_modules/**", "**/*.test.*"] }
 ```
 
-`path` は絶対パスでも、設定ファイルから見た相対パスでも構いません。`.git` は自動的に除外されます。
+`path` は絶対パスでも相対パスでも構いません。**相対パスは `context-grill.config.json` のある
+ディレクトリが基準**です（実行時のカレントディレクトリではありません）。`-c` で別の場所から
+設定ファイルを指定した場合も基準は変わらないため、どこから実行しても同じ場所を指します。
+
+```
+~/work/
+├── context-grill.config.json   "path": "./my-app"  →  ~/work/my-app
+└── my-app/
+```
+
+`.git` は自動的に除外されます。
 
 ```json
 { "id": "designdocs", "type": "local", "path": "./design-docs", "include": ["**/*.md"] }

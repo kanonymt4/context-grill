@@ -18,7 +18,9 @@ async function* walk(root, rel = '') {
 
 /** ローカルディレクトリ（設計書置き場やモノレポの一部）を一次資料として取り込む */
 export async function syncLocal(src, ctx = {}) {
-  const root = path.resolve(src.path);
+  // 相対パスは設定ファイルのあるディレクトリ基準で解決する（workspace と同じ基準）。
+  // 絶対パスが渡された場合は path.resolve が基準を無視するため、そのまま使われる。
+  const root = path.resolve(ctx.config?.rootDir || process.cwd(), src.path);
   const maxBytes = src.maxFileBytes ?? 400_000;
   const security = ctx.config?.security || {};
   const docs = [];
