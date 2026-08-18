@@ -20,7 +20,7 @@ init / resolve  →  sync  →  search / scan / ask
 
 | コマンド | 何をするか | LLM | 外部通信 |
 | --- | --- | --- | --- |
-| `init` | `context-grill.config.json` のひな形を作成 | 不使用 | なし |
+| `init` | 設定のひな形とドキュメントを作業ディレクトリに配置 | 不使用 | なし |
 | `resolve <URL...>` | ブラウザのURLから sources 定義を生成（`--add` で設定に追記） | 不使用 | あり |
 | `sync` | ソースを取得して索引を再構築 | 不使用 | あり |
 | `build` | 取得済みキャッシュから索引だけ再構築 | 不使用 | なし |
@@ -48,6 +48,29 @@ APIキーが要るのは `ask` だけです（`--dry-run` なら不要）。`syn
 | `--offline` | 一切の外部通信を禁止（`search` / `scan` / `--dry-run` のみ動作） |
 
 `--offline` は、閉じたネットワークで「本当に何も出ていかないこと」を強制したいときに使います。
+
+---
+
+## init — 作業ディレクトリを初期化する
+
+```bash
+mkdir my-project && cd my-project
+context-grill init
+```
+
+実行したディレクトリに次を配置します。既にあるファイルは上書きしません。
+
+| ファイル | 内容 |
+| --- | --- |
+| `context-grill.config.json` | 調査対象の設定。`sources` を書き換えて使う |
+| `.env.example` | 認証情報のテンプレート。使う場合は `.env` にコピーして編集 |
+| `commands.md` | このファイル |
+| `usage.md` | 調査対象（GitHub / Confluence / Jira / ローカル）の指定方法 |
+
+**雛形には local / GitHub / Confluence の3種類の `sources` が入っています。使うものだけ残して、他は削除してください。**
+ダミーのまま `sync` すると、存在しないリポジトリを取得しようとしてエラーになります。
+
+実行後、次に打つべきコマンドが画面に表示されます。
 
 ---
 

@@ -23,7 +23,7 @@ const HELP = `context-grill — GitHub と Atlassian の一次資料に基づい
   context-grill <コマンド> [オプション]
 
 コマンド:
-  init                      context-grill.config.json のひな形を作成
+  init                      設定のひな形とドキュメントを作業ディレクトリに配置
   resolve <URL...>          ブラウザのURLを貼ると sources 定義を生成（--add で設定に追記）
   sync                      ソースを取得して索引を再構築
   build                     取得済みキャッシュから索引だけ再構築（ネットワーク不要）
@@ -492,7 +492,7 @@ async function cmdPrivacy(flags) {
     localWrites: [
       `${paths(config).workspace}/ 配下のみ（権限 ${(sec.workspaceMode ?? 0o700).toString(8)}）`,
       '--out で指定したファイル',
-      'init 実行時の context-grill.config.json / .env.example',
+      'init 実行時の context-grill.config.json / .env.example / commands.md / usage.md',
     ],
     neverWrites: ['ユーザーのリポジトリ（git push / commit / add / checkout は実装上到達不能）', 'Confluence / Jira（参照系 API のみ）'],
     sensitiveDenyPatterns: sec.denySensitivePaths === false ? ['(無効化されています — 非推奨)'] : SENSITIVE_DENY,
