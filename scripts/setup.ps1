@@ -106,8 +106,13 @@ if (Get-Command context-grill -ErrorAction SilentlyContinue) {
             Write-Host ""
             Write-Host "    $npmBin"
             Write-Host ""
-            Write-Host "「システム環境変数の編集」→「環境変数」→ ユーザー環境変数の Path に追加してください"
-            Write-Host "（管理者権限は不要です）。"
+            Write-Host "次の2行で追加できます（管理者権限は不要。実行後 PowerShell を開き直してください）:"
+            Write-Host ""
+            Write-Host "    `$p = [Environment]::GetEnvironmentVariable('Path','User')"
+            Write-Host "    [Environment]::SetEnvironmentVariable('Path', `"$npmBin;`$p`", 'User')"
+            Write-Host ""
+            Write-Host "※ setx は 1024 文字を超える PATH を切り詰めて壊すため使わないでください。"
+            Write-Host "  GUI（システム環境変数の編集）は UAC の状態によって編集できないことがあります。"
             Write-Host "（このスクリプトは PATH を一時的に通して続行します）"
             $env:Path = "$npmBin;$env:Path"
         }
@@ -123,8 +128,14 @@ if (Get-Command context-grill -ErrorAction SilentlyContinue) {
         Write-Host ""
         Write-Host "    $npmPrefix"
         Write-Host ""
-        Write-Host "「システム環境変数の編集」→「環境変数」→ ユーザー環境変数の Path に追加し、"
-        Write-Host "新しい PowerShell を開いてから、もう一度このスクリプトを実行してください。"
+        Write-Host "次の2行で追加できます（管理者権限は不要）:"
+        Write-Host ""
+        Write-Host "    `$p = [Environment]::GetEnvironmentVariable('Path','User')"
+        Write-Host "    [Environment]::SetEnvironmentVariable('Path', `"$npmPrefix;`$p`", 'User')"
+        Write-Host ""
+        Write-Host "実行後、新しい PowerShell を開いてから、もう一度このスクリプトを実行してください。"
+        Write-Host "※ setx は 1024 文字を超える PATH を切り詰めて壊すため使わないでください。"
+        Write-Host "  GUI からの設定は UAC の状態によって編集できないことがあります。"
         exit 1
     }
 }
