@@ -1,5 +1,6 @@
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { isIncluded } from '../util/misc.js';
 import { isSensitiveDir } from '../util/sensitive.js';
 import { classify, isProbablyBinary, makeDoc, isIndexable } from './base.js';
@@ -34,7 +35,7 @@ export async function syncLocal(src, ctx = {}) {
     if (kind === 'other' && !src.includeUnknownTypes) continue;
     docs.push(makeDoc({
       sourceId: src.id, sourceType: 'local', docPath: rel, title: rel, kind, lang,
-      text: buf.toString('utf8'), url: `file://${abs}`, version: String(st.mtimeMs),
+      text: buf.toString('utf8'), url: pathToFileURL(abs).href, version: String(st.mtimeMs),
       meta: { root, bytes: st.size },
     }));
   }
