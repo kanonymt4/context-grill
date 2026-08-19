@@ -170,8 +170,13 @@ export function planQueries(taskId, instruction, { max = 6 } = {}) {
   push(instruction);
 
   // 引用符で囲まれた語・識別子らしき語・パスらしき語を独立クエリにする
-  const quoted = [...instruction.matchAll(/["'「『`]([^"'」』`]{2,80})["'」』`]/g)].map((m) => m[1]);
-  for (const q of quoted) push(q);
+  // 「額」「税」のように漢字・仮名は1文字でも意味を持つため独立クエリにする。
+  // 一方 "a" "I" のような英数字1文字は検索語として無意味なので除く。
+  const quoted = [...instruction.matchAll(/["'「『`]([^"'」』`]{1,80})["'」』`]/g)].map((m) => m[1]);
+  for (const q of quoted) {
+    if (q.length === 1 && !/[\u3040-\u30ff\u3400-\u9fff]/.test(q)) continue;
+    push(q);
+  }
   const idents = [...instruction.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*(?:[./][A-Za-z0-9_.-]+)+|[A-Z][a-z]+[A-Z][A-Za-z0-9]+|[a-z]+_[a-z_]+)\b/g)].map((m) => m[1]);
   for (const q of [...new Set(idents)].slice(0, 4)) push(q);
 
