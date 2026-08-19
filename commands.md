@@ -156,10 +156,13 @@ context-grill scan --severity medium --out scan.md
 ## ask — 調査・回答を生成する
 
 ```bash
-context-grill ask "決済リトライの仕様を整理して" --task spec
-context-grill ask "500 エラーの原因を調べて" --task bug --effort deep
-context-grill ask "認証まわりのリスク" --task security --dry-run --out bundle.md
+context-grill ask '決済リトライの仕様を整理して。「リトライ上限」「バックオフ」「冪等性」を確認' --task spec
+context-grill ask '500 エラーの原因を調べて。「タイムアウト」「コネクション」まわりを見たい' --task bug --effort deep
+context-grill ask '認証まわりのリスク。「トークン」「権限チェック」を確認' --task security --dry-run --out bundle.md
 ```
+
+> 調べたい概念を `「」` や `"` で囲むと、それぞれが独立した検索クエリになります。
+> 詳しくは後述の[指示文の書き方](#指示文の書き方で証拠の集まり方が変わる)を参照してください。
 
 | オプション | 説明 |
 | --- | --- |
@@ -322,7 +325,7 @@ LLM を呼ばずに、送るはずだったプロンプト一式（契約・証�
 - 送信前に「何が外に出るか」を目視確認できます
 
 ```bash
-context-grill ask "設計に穴がないか検証して" --task spec --effort deep --dry-run --out bundle.md
+context-grill ask '設計に穴がないか検証して。「状態遷移」「エラー処理」「排他制御」を確認' --task spec --effort deep --dry-run --out bundle.md
 ```
 
 `--out` を付けない場合は `.context-grill/runs/<日時>-<タスク>-<ハッシュ>/bundle.md` に出力され、実行後にパスが表示されます。
@@ -341,7 +344,7 @@ API キーを使わずに、GitHub Copilot や別のチャットに渡して議�
 
 ```bash
 context-grill sync
-context-grill ask "壁打ちしたいテーマ" --task design --effort deep --dry-run --out bundle.md
+context-grill ask '<何をしたいか>。「概念語1」「概念語2」「概念語3」の現状と課題を整理して' --task design --effort deep --dry-run --out bundle.md
 ```
 
 生成された `bundle.md` を渡します（Copilot なら `#file:bundle.md` で参照、

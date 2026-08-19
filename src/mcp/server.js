@@ -42,7 +42,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        instruction: { type: 'string', description: '調査したい内容' },
+        instruction: { type: 'string', description: '調査したい内容。検索クエリはこの文から機械的に組み立てられるため、調べたい概念を「」や "" で囲むと、それぞれが独立したクエリになり証拠が広く集まる（囲まないと実質4クエリで頭打ち）。ファイル名や識別子は囲まなくても抽出される' },
         task: { type: 'string', enum: ['spec', 'bug', 'security', 'static', 'design'], description: 'タスク種別（既定 spec）' },
         effort: { type: 'string', enum: ['low', 'normal', 'deep'], description: '深さ（既定 normal）' },
         sources: { type: 'array', items: { type: 'string' } },

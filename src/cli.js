@@ -64,9 +64,12 @@ ask:
 
 例:
   context-grill sync
-  context-grill ask "決済リトライの仕様を整理して" --task spec
-  context-grill ask "500 エラーが断続的に出る原因を調べて" --task bug --effort deep
-  context-grill ask "認証まわりのセキュリティリスク" --task security --dry-run
+  context-grill ask '決済リトライの仕様を整理して。「リトライ上限」「冪等性」を確認' --task spec
+  context-grill ask '500 エラーの原因を調べて。「タイムアウト」「コネクション」を見たい' --task bug --effort deep
+  context-grill ask '認証まわりのリスク。「トークン」「権限チェック」を確認' --task security --dry-run
+
+  指示文で調べたい概念を「」や "" で囲むと、それぞれが独立した検索クエリになります。
+  囲まないと実質 4 クエリしか生成されません（詳細は commands.md）。
 `;
 
 // 値を取らない真偽フラグ。これらの直後の語を値として消費すると、
