@@ -69,6 +69,13 @@ ask:
   context-grill ask "認証まわりのセキュリティリスク" --task security --dry-run
 `;
 
+// 値を取らない真偽フラグ。これらの直後の語を値として消費すると、
+// `context-grill --offline search "..."` の search がフラグの値に吸われてしまう。
+const BOOL_FLAGS = new Set([
+  'offline', 'dry-run', 'dryRun', 'json', 'force', 'full', 'raw',
+  'help', 'add', 'embed', 'includeTests', 'include-tests',
+]);
+
 function parseArgs(argv) {
   const out = { _: [], flags: {} };
   const alias = { c: 'config', k: 'top', t: 'task', e: 'effort', m: 'model', h: 'help', o: 'out' };
@@ -81,13 +88,15 @@ function parseArgs(argv) {
       if (k.startsWith('no-')) { neg = true; k = k.slice(3); }
       if (v === undefined) {
         if (neg) v = false;
+        else if (BOOL_FLAGS.has(k)) v = true;   // 次の語を消費しない
         else if (argv[i + 1] && !argv[i + 1].startsWith('-')) v = argv[++i];
         else v = true;
       }
       out.flags[k] = v;
     } else if (a.startsWith('-') && a.length > 1) {
       const k = alias[a.slice(1)] || a.slice(1);
-      let v = argv[i + 1] && !argv[i + 1].startsWith('-') ? argv[++i] : true;
+      let v = BOOL_FLAGS.has(k) ? true
+        : (argv[i + 1] && !argv[i + 1].startsWith('-') ? argv[++i] : true);
       out.flags[k] = v;
     } else out._.push(a);
   }
