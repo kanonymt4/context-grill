@@ -83,20 +83,25 @@ context-grill status
 
 ```bash
 # 仕様の整理
-context-grill ask "決済の返金フローの仕様を実装ベースで整理して" --task spec
+context-grill ask '決済の返金フローを実装ベースで整理して。「返金ステータス」「部分返金」「取消期限」の扱いを確認したい' --task spec
 
 # バグ調査（深く探す）
-context-grill ask "本番で断続的に 504 が出る原因を調べて" --task bug --effort deep
+context-grill ask '本番で断続的に 504 が出る原因を調べて。「タイムアウト」「コネクションプール」「リトライ」まわりを見たい' --task bug --effort deep
 
 # セキュリティリスク
-context-grill ask "認証・認可まわりのリスク" --task security --source api,wiki
+context-grill ask '認証・認可まわりのリスク。「トークン有効期限」「権限チェック」「セッション」を確認' --task security --source api,wiki
 
 # 静的解析（LLM が誤検知を仕分ける）
 context-grill ask "リリース前に直すべき品質問題" --task static
 
 # 新機能設計（既存の規約・制約を証拠で裏付ける）
-context-grill ask "サブスク解約の予約機能を追加したい" --task design --effort deep
+context-grill ask 'サブスク解約の予約機能を追加したい。「解約」「日割り」「課金サイクル」の既存実装と規約を確認' --task design --effort deep
 ```
+
+> **指示文の書き方で集まる証拠が変わります。** クエリは指示文から機械的に組み立てられるため、
+> 調べたい概念を `「」` や `"` で囲むと、それぞれが独立した検索クエリになります。
+> 囲まないと実質 4 クエリしか生成されず、`--effort` を上げても増えません。
+> 詳しくは [commands.md](./commands.md) を参照してください。
 
 ### トークンを一切使わないコマンド
 
@@ -174,8 +179,11 @@ context-grill mcp     # stdio
 | 差分同期 | Confluence は `version.number`、GitHub は shallow fetch |
 | `--dry-run` / `search` / `scan` | LLM を呼ばずに調査を進める |
 
-`--effort low|normal|deep` で、証拠量（20k / 55k / 110k トークン）とクエリ数だけが変わります。
+`--effort low|normal|deep` で、証拠量（20k / 55k / 110k トークン）とクエリ数の**上限**だけが変わります。
 **契約・スキーマ・検証基準は effort によって変わりません**（＝ 工数を変えても品質基準は同一）。
+
+なお `--effort` が変えるのは上限であって、実際に生成されるクエリ数は指示文に依存します。
+調べたい概念を引用符で囲まないと上限まで使われません（[commands.md](./commands.md) 参照）。
 
 ---
 
