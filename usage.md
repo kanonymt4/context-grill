@@ -91,6 +91,9 @@ context-grill resolve "https://github.com/acme/api-service" --json   # 機械可
 }
 ```
 
+- **`repo`** は `"acme/api-service"` という **`org/name` 形式のみ**です。
+  ブラウザの URL（`https://github.com/acme/api-service`）をそのまま貼らないでください
+  （`context-grill doctor` が検出して正しい値を提示します）
 - **`ref`** はブランチ / タグ / コミット。省略時は既定ブランチ
 - **`mode`** は `clone`（既定・大量ファイル向け）か `api`（少数ファイルだけ取りたいとき）
 - 手元にクローン済みなら `"path": "/Users/me/work/api-service"`（**読み取り専用**、`repo` 不要）
