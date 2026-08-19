@@ -135,6 +135,15 @@ export async function loadConfig(explicitPath) {
   merged.rootDir = rootDir;
   merged.configPath = configPath;
   merged.workspaceDir = path.resolve(rootDir, merged.workspace);
+  // 配列を期待するフィールドに文字列が1つだけ書かれても動くようにする。
+  // （文字列のまま for...of すると1文字ずつ反復してしまうため、ここで吸収する）
+  const ARRAY_FIELDS = ['pageUrls', 'pageIds', 'labels', 'include', 'exclude', 'titleGlobs', 'spaceKeys'];
+  for (const s of merged.sources || []) {
+    for (const f of ARRAY_FIELDS) {
+      if (typeof s[f] === 'string') s[f] = [s[f]];
+    }
+  }
+
   validate(merged);
   // 索引の再現性キー: ソース定義とチャンク設定のみが影響する
   merged.indexKey = sha256(stableStringify({
@@ -189,6 +198,13 @@ function validate(c) {
     }
     if (s.type === 'github' && s.ref && !/^[A-Za-z0-9._\/-]{1,200}$/.test(String(s.ref))) {
       errs.push(`${where}.ref の形式が不正です: ${s.ref}`);
+    }
+
+    // 配列を期待するフィールドの型（文字列は上で配列化済みなので、ここに来るのは別の型）
+    for (const f of ['pageUrls', 'pageIds', 'labels', 'include', 'exclude']) {
+      if (s[f] !== undefined && !Array.isArray(s[f])) {
+        errs.push(`${where}.${f} は配列で指定してください（現在: ${typeof s[f]}）\n      例: "${f}": ["..."]`);
+      }
     }
 
     // Confluence の pageUrls が解釈できる形か

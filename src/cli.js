@@ -156,9 +156,17 @@ async function cmdInit(flags) {
         issues: { enabled: false, limit: 100 }, pulls: { enabled: false, limit: 50 },
       },
       {
-        _comment: 'Confluence を対象にする',
+        _comment: 'Confluence のスペース全体を対象にする。baseUrl はサイトのルートまで（/wiki）で止めること',
         id: 'wiki', type: 'confluence',
         baseUrl: 'https://your-org.atlassian.net/wiki', spaceKey: 'ENG', limit: 300,
+        auth: { emailEnv: 'ATLASSIAN_EMAIL', tokenEnv: 'ATLASSIAN_API_TOKEN' },
+      },
+      {
+        _comment: 'Confluence の特定ページ（と配下）を対象にする。pageUrls は必ず配列で書くこと',
+        id: 'spec', type: 'confluence',
+        baseUrl: 'https://your-org.atlassian.net/wiki',
+        pageUrls: ['https://your-org.atlassian.net/wiki/spaces/ENG/pages/393217/ページ名'],
+        includeDescendants: true, maxDepth: 5, limit: 200,
         auth: { emailEnv: 'ATLASSIAN_EMAIL', tokenEnv: 'ATLASSIAN_API_TOKEN' },
       },
     ],
