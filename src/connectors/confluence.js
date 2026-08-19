@@ -162,6 +162,12 @@ export async function syncConfluence(src, ctx) {
       ? await expandDescendants(base, headers, seeds, { maxDepth: src.maxDepth ?? 10, limit, purpose })
       : seeds;
     log.step(`Confluence 対象ページ ${ids.length} 件（起点 ${seeds.length} 件）`);
+    if (!src.includeDescendants) {
+      log.warn(
+        `${src.id}: 指定したページのみを取得しました（配下のページは含まれません）。` +
+        `配下ツリーも取り込むには "includeDescendants": true を設定してください`
+      );
+    }
     raw = await fetchPagesByIds(base, headers, ids.slice(0, limit), purpose);
   } else {
     const cql = buildCql(src);

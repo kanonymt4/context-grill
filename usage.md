@@ -124,7 +124,16 @@ context-grill resolve "https://github.com/acme/api-service" --json   # 機械可
 }
 ```
 
-`includeDescendants: true` で**そのページの配下ツリーごと**取り込みます（`maxDepth` で深さ制限）。
+**`includeDescendants` を省略すると、指定したページ 1 枚だけ**が対象になります。
+配下のページも取り込みたい場合は明示的に `true` を指定してください（`maxDepth` で深さ制限。既定 10）。
+
+| 設定 | 取り込まれるもの |
+| --- | --- |
+| 指定なし | 指定したページのみ |
+| `"includeDescendants": true` | 指定したページ＋その配下ツリー（`maxDepth` まで） |
+
+`sync` の実行時に `Confluence 対象ページ N 件（起点 M 件）` と表示されるので、
+N が想定より少ない場合はこの設定を確認してください。
 `pageIds: ["393217"]` のように ID 直指定も可能です。
 
 ### B. 条件で絞る（ラベル / タイトル / 更新日）
