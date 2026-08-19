@@ -132,10 +132,9 @@ export async function main(argv) {
 // ---------------------------------------------------------------- init
 async function cmdInit(flags) {
   const target = path.resolve(String(flags.dir || process.cwd()), 'context-grill.config.json');
-  if (fs.existsSync(target) && !flags.force) {
-    process.stderr.write(`${target} は既に存在します（--force で上書き）\n`);
-    return 1;
-  }
+  // 設定ファイルが既にある場合は上書きしない（--force のときだけ書き換える）。
+  // ただしドキュメントの補充は行うため、ここでは処理を止めない。
+  const configExists = fs.existsSync(target) && !flags.force;
   const sample = {
     project: path.basename(path.dirname(target)),
     workspace: '.context-grill',
@@ -182,7 +181,12 @@ async function cmdInit(flags) {
       auditLog: true,
     },
   };
-  await fsp.writeFile(target, JSON.stringify(sample, null, 2) + '\n');
+  if (configExists) {
+    process.stdout.write(`設定ファイルは既に存在するため、変更していません: ${target}\n`);
+    process.stdout.write(`（設定をひな形に戻すには --force を付けてください）\n`);
+  } else {
+    await fsp.writeFile(target, JSON.stringify(sample, null, 2) + '\n');
+  }
   const envPath = path.join(path.dirname(target), '.env.example');
   if (!fs.existsSync(envPath)) {
     await fsp.writeFile(envPath, [
@@ -214,7 +218,7 @@ async function cmdInit(flags) {
   const giPath = path.join(dir, '.gitignore');
   const gi = fs.existsSync(giPath) ? await fsp.readFile(giPath, 'utf8') : '';
   const missing = ['.env', '.context-grill/'].filter((e) => !gi.split(/\r?\n/).some((l) => l.trim() === e || l.trim() === e.replace(/\/$/, '')));
-  process.stdout.write(`作成しました: ${target}\n`);
+  if (!configExists) process.stdout.write(`作成しました: ${target}\n`);
   if (missing.length) {
     process.stdout.write(
       `\n注意: ${giPath} に次の行が見つかりません。手動で追加してください（自動では変更しません）:\n` +
