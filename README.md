@@ -294,7 +294,8 @@ context-grill resolve "https://github.com/acme/api-service/tree/develop/services
 
 補足:
 
-- `baseUrl` は **`/wiki` まで**含めます（Cloud の場合）
+- `baseUrl` は **サイトのルートまで**（Cloud なら `https://xxx.atlassian.net/wiki`）。
+  ブラウザのページ URL をそのまま貼らないでください。特定ページの指定は `pageUrls` で行います
 - 短縮リンク（`/wiki/x/AbCdEf`）は URL だけでは解決できません。ページを開いて通常の URL をコピーしてください
 - 差分同期はページの `version.number` で判定するため、更新のないページは再取得されません
 

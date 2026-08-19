@@ -160,6 +160,22 @@ function validate(c) {
     if (s.type === 'github' && !s.repo && !s.path) errs.push(`${where}.repo (org/name) が必要です`);
     if (s.type === 'confluence' && !s.baseUrl) errs.push(`${where}.baseUrl が必要です`);
     if (s.type === 'jira' && !s.baseUrl) errs.push(`${where}.baseUrl が必要です`);
+    // baseUrl は API のルート。ブラウザのページ URL をそのまま貼ると /api/v2/... を
+    // 連結した先が 404 になるため、実際に叩く前にここで弾く。
+    if ((s.type === 'confluence' || s.type === 'jira') && s.baseUrl) {
+      const bad = String(s.baseUrl).match(/\/(spaces|pages|display|browse|wiki\/spaces)\//);
+      if (bad) {
+        const m = String(s.baseUrl).match(/^(https?:\/\/[^/]+(?:\/wiki)?)/);
+        const suggest = m ? m[1] : 'https://your-org.atlassian.net' + (s.type === 'confluence' ? '/wiki' : '');
+        const field = s.type === 'confluence' ? 'pageUrls / spaceKey' : 'jql / projectKey';
+        errs.push(
+          `${where}.baseUrl にページのパスが含まれています（"${bad[1]}/" 以降は不要です）\n` +
+          `      指定された値: ${s.baseUrl}\n` +
+          `      正しい形式  : ${suggest}\n` +
+          `      特定のページ・課題を対象にする場合は ${field} で指定してください`
+        );
+      }
+    }
     if (s.type === 'local' && !s.path) errs.push(`${where}.path が必要です`);
   }
   if (!['anthropic', 'openai', 'openai-compat', 'dry'].includes(c.llm.provider)) {
