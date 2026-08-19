@@ -41,7 +41,57 @@ LLM を使わない静的ルールで行うため、**どのモデルでも必�
 
 ---
 
-## 2. セットアップ
+## 2. 他のツールとの違い
+
+同じ領域のツールは大きく2種類あり、context-grill はその**交差点**にあります。
+
+### A) GitHub / Atlassian に接続するツール
+
+[Atlassian Rovo MCP Server](https://github.com/atlassian/atlassian-mcp-server)（公式）、
+[sooperset/mcp-atlassian](https://github.com/sooperset/mcp-atlassian)、
+[samwang0723/mcp-atlassian](https://github.com/samwang0723/mcp-atlassian)、
+[athapong/aio-mcp](https://github.com/athapong/aio-mcp) など多数あります。
+
+これらは API を叩いて内容を取得し、モデルに渡すところまでを担います。
+**取得した内容をモデルが正しく使ったかは検証しません。** 認証や権限の扱いは公式のものが最も洗練されているため、
+「Confluence の内容を AI から読みたい」だけであれば、公式の Rovo MCP を使うほうが合理的です。
+
+### B) 引用検証・ハルシネーション検出を行うツール
+
+`file:line` 形式の引用を強制して機械的に照合する Claude Code プラグインや、
+索引・検索・検証を一体化したローカル RAG などがあります
+（[GitHub の hallucination トピック](https://github.com/topics/hallucination)）。
+
+考え方は近いものの、**GitHub や Confluence を一次資料として直接扱うものは見当たりません。**
+
+### context-grill の位置づけ
+
+次の3点が同時に成立している点が独自です。
+
+| | 内容 |
+| --- | --- |
+| **一次資料の横断** | GitHub と Confluence / Jira を**同一の索引**に載せ、「設計書にはこう書いてあるが実装はこうなっている」という食い違いを、双方に逐語引用とパーマリンクを付けて示せます |
+| **証拠の機械検証** | 逐語引用が実在するかを照合し、不合格の主張を**出力前に除去**します（A のツールは検証しない、B のツールは Atlassian に繋がらない） |
+| **閉域での運用** | 依存パッケージゼロ、`--dry-run` で外部送信ゼロ。証拠パックだけを生成して、別の AI に渡す運用ができます |
+
+### 向き・不向き
+
+**向いている用途**
+
+- 設計資料と実装の整合性を、後から検証できる形で確認したい
+- レポートの根拠を第三者が追跡・再現できる必要がある（`indexKey` で索引が固定されます）
+- 外部にコードを送れない環境で、証拠パックだけ作って別の場所で議論したい
+
+**向いていない用途**
+
+- Confluence のページを読む・書くだけ → 公式の Rovo MCP のほうが適切です
+- 自由な発想での壁打ち → 「証拠にないことは書くな」という契約が提案を止めます
+  （証拠パックを作って契約を外して使う方法は [commands.md](./commands.md) を参照）
+- 図（draw.io / Gliffy 等）の内容を読ませたい → 本文テキストのみが対象です
+
+---
+
+## 3. セットアップ
 
 ```bash
 # Node.js 20 以上があれば OK（npm install は不要 — 依存パッケージがありません）
@@ -57,7 +107,7 @@ context-grill doctor   # 環境チェック
 ```bash
 context-grill init          # 設定のひな形とドキュメント（commands.md / usage.md）を配置
 
-# 対象リポジトリ / Confluence ページの URL を貼るだけで設定を生成（詳細は 7 章）
+# 対象リポジトリ / Confluence ページの URL を貼るだけで設定を生成（詳細は 8 章）
 context-grill resolve "https://github.com/acme/api-service" \
                  "https://acme.atlassian.net/wiki/spaces/ENG/pages/393217/決済仕様" --add
 
@@ -79,7 +129,7 @@ context-grill status
 
 ---
 
-## 3. 使い方
+## 4. 使い方
 
 ```bash
 # 仕様の整理
@@ -127,7 +177,7 @@ static.json    静的解析の生データ
 
 ---
 
-## 4. MCP サーバーとして使う
+## 5. MCP サーバーとして使う
 
 Claude Code / Cowork / Cursor などから、この索引を直接使えます。
 
@@ -167,7 +217,7 @@ context-grill mcp     # stdio
 
 ---
 
-## 5. トークン消費の抑え方
+## 6. トークン消費の抑え方
 
 | 仕組み | 効果 |
 | --- | --- |
@@ -187,7 +237,7 @@ context-grill mcp     # stdio
 
 ---
 
-## 6. 検索の仕組みと日英ギャップ
+## 7. 検索の仕組みと日英ギャップ
 
 - **BM25**：コード識別子に強い。`camelCase` / `snake_case` を部分語に分解して索引化
 - **日本語**：形態素解析器に依存せず 1-gram + 2-gram で索引化（追加依存なしで動く）
@@ -198,7 +248,7 @@ context-grill mcp     # stdio
 
 ---
 
-## 7. 対象の指定方法（リポジトリ / Confluence ページ）
+## 8. 対象の指定方法（リポジトリ / Confluence ページ）
 
 > コマンドとオプションの一覧・使用例は **[commands.md](./commands.md)**、
 > 実践的な設定例と調整の勘所は **[usage.md](./usage.md)** にまとめてあります。
@@ -213,7 +263,7 @@ context-grill resolve "https://github.com/acme/api-service/tree/develop/services
 `--add` を付けると `context-grill.config.json` の `sources` に直接追記されます（付けなければ貼り付け用の JSON を表示するだけ）。
 あとは `context-grill sync` で取り込まれます。
 
-### 7.1 GitHub の指定
+### 8.1 GitHub の指定
 
 | 貼る URL | 生成される設定 |
 | --- | --- |
@@ -247,7 +297,7 @@ context-grill resolve "https://github.com/acme/api-service/tree/develop/services
 - 既に手元にクローン済みなら `"path": "/Users/me/work/api-service"` を指定できます（**読み取り専用**。`repo` は不要）
 - 複数リポジトリは `sources` に並べるだけ。`priority` で信頼度に差を付けられます
 
-### 7.2 Confluence の指定（4 通り）
+### 8.2 Confluence の指定（4 通り）
 
 範囲の決め方は上から優先されます。
 
@@ -316,7 +366,7 @@ N が想定より少ない場合はこの設定を確認してください。
 - 短縮リンク（`/wiki/x/AbCdEf`）は URL だけでは解決できません。ページを開いて通常の URL をコピーしてください
 - 差分同期はページの `version.number` で判定するため、更新のないページは再取得されません
 
-### 7.3 Jira の指定
+### 8.3 Jira の指定
 
 ```json
 { "id": "jira", "type": "jira", "baseUrl": "https://acme.atlassian.net",
@@ -325,13 +375,13 @@ N が想定より少ない場合はこの設定を確認してください。
 
 チケット URL を `context-grill resolve` に渡すと `key = ENG-1234` の形で生成されます。
 
-### 7.4 ローカルディレクトリ
+### 8.4 ローカルディレクトリ
 
 ```json
 { "id": "designdocs", "type": "local", "path": "./design-docs", "include": ["**/*.md"] }
 ```
 
-### 7.5 主要な設定キー
+### 8.5 主要な設定キー
 
 | キー | 既定 | 説明 |
 | --- | --- | --- |
@@ -352,7 +402,7 @@ N が想定より少ない場合はこの設定を確認してください。
 設定を変えたら `context-grill sync`（取得からやり直し）か `context-grill build`（取得済みキャッシュから索引だけ再構築）を実行します。
 取り込み結果は `context-grill status` で件数を確認できます。
 
-## 8. 移植 / チームでの共有
+## 9. 移植 / チームでの共有
 
 - `.context-grill/`（索引・キャッシュ・実行結果）は自動的に `.gitignore` されます
 - 共有するのは `context-grill.config.json` だけ。各自が `context-grill sync` すれば同じ索引ができます
@@ -365,7 +415,7 @@ N が想定より少ない場合はこの設定を確認してください。
 - run: node context-grill/bin/context-grill.js ask "この PR で増えたセキュリティリスク" --task security --out risk.md
 ```
 
-### 8.1 npm パッケージとして配布する
+### 9.1 npm パッケージとして配布する
 
 git リポジトリへのアクセスを渡さずに、単一ファイルで配布したい場合は `npm pack` を使います。`zip -r` などでディレクトリを丸ごと固めるのは避けてください — `.env`（APIキー）や `.git/` の履歴、`.context-grill/`（索引キャッシュ）まで含まれてしまいます。
 
@@ -405,7 +455,7 @@ npm install -g ./context-grill-<version>.tgz
 
 配布物に含まれるのは `bin/` `src/` `scripts/` `context-grill.config.example.json` `commands.md` `usage.md` `README.md` のみです。認証情報・索引・作業メモ（`CLAUDE.md`）はどの配布物にも含まれません。
 
-### 8.2 メールで配布する場合の注意
+### 9.2 メールで配布する場合の注意
 
 Gmail は添付ファイルの**名前**を見てブロックします。`.js` や `.ps1` などは、アーカイブの中に入っていても検出されます。
 
@@ -433,12 +483,12 @@ zip -er context-grill-dist.zip context-grill-dist       # パスワードは別�
 
 ---
 
-## 9. セキュリティ（社内非公開リポジトリ／社内 Confluence 前提）
+## 10. セキュリティ（社内非公開リポジトリ／社内 Confluence 前提）
 
 社外に出せない資料を扱う前提で、**外部送信**と**書き込み**の両方を機械的に制御しています。
 実際の挙動は `context-grill privacy` で確認でき、通信は `.context-grill/egress.log` に記録されます。
 
-### 9.1 外部へ出るデータ（送信先ホワイトリスト方式）
+### 10.1 外部へ出るデータ（送信先ホワイトリスト方式）
 
 すべての外部通信は単一のゲート（`src/util/egress.js`）を通ります。
 **設定から導出したホスト以外へは、送信そのものが例外になります。**
@@ -454,7 +504,7 @@ zip -er context-grill-dist.zip context-grill-dist       # パスワードは別�
 - `--dry-run` は LLM を呼ばずにプロンプト一式を出力するため、**何を送るかを送信前に全部読めます**
 - 設定値に環境変数の秘密の実値が展開されていた場合（`baseUrl` への混入など）、起動時に拒否します
 
-### 9.2 機密ファイルは索引に入りません
+### 10.2 機密ファイルは索引に入りません
 
 `include` に `**/*` を書いても、次のパターンは**無条件で除外**されます（`security.denySensitivePaths`）。
 
@@ -466,7 +516,7 @@ service-account*.json / secrets.* / *.tfstate* / .terraform/** / .htpasswd / *.g
 
 `.env.example` などのサンプルは許可されます。シンボリックリンクはたどりません（リポジトリ外の読み出し防止）。
 
-### 9.3 シークレット墨消し（多層防御）
+### 10.3 シークレット墨消し（多層防御）
 
 通常のコードや設定に埋め込まれた認証情報は、**外部に出る境界で必ず墨消し**されます。
 
@@ -483,7 +533,7 @@ service-account*.json / secrets.* / *.tfstate* / .terraform/** / .htpasswd / *.g
 ローカルキャッシュ（`.context-grill/cache/`）は静的解析と行番号照合のため原文を保持しますが、
 ワークスペースは `0700` で作成され、`.context-grill/.gitignore`（`*`）によりコミット対象になりません。
 
-### 9.4 書き込みリスク（誤コミット・誤更新の防止）
+### 10.4 書き込みリスク（誤コミット・誤更新の防止）
 
 **このツールが書き込む場所は 3 つだけです。**
 
@@ -501,7 +551,7 @@ git については、実行しうるサブコマンドを許可リストで固�
 - `sources[].path` でローカルの作業リポジトリを指す場合は、`git rev-parse HEAD` しか実行しません（**完全に読み取り専用**。未コミットの変更やブランチに一切触れません）
 - Confluence / Jira は参照系 API のみ。ページ作成・更新・削除の実装自体がありません
 
-### 9.5 認証トークンの取り扱い
+### 10.5 認証トークンの取り扱い
 
 git 認証は URL・コマンドライン引数・`.git/config` のいずれにも載せず、`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0` 環境変数（git 2.31+）経由で渡します。
 
@@ -514,7 +564,7 @@ git 認証は URL・コマンドライン引数・`.git/config` のいずれに�
 - 監査ログにクエリ文字列は記録しません
 - `context-grill doctor` は環境変数の**名前と設定有無**だけを表示し、値は出しません
 
-### 9.6 プロンプトインジェクション
+### 10.6 プロンプトインジェクション
 
 Confluence ページや Issue に「これまでの指示を無視して〜」と書かれていても実行しないよう、
 システム契約と MCP の `instructions` に明示条項を入れています。
@@ -522,7 +572,7 @@ Confluence ページや Issue に「これまでの指示を無視して〜」�
 またツール群には任意の URL を取得する機能が無く、更新系 API も持たないため、
 **注入が成功しても外部送信・データ改変の経路がありません**。
 
-### 9.7 推奨運用
+### 10.7 推奨運用
 
 - GitHub は **fine-grained PAT（Contents: Read-only）** を使う
 - Atlassian API トークンは閲覧権限のみのアカウントで発行する
@@ -530,14 +580,14 @@ Confluence ページや Issue に「これまでの指示を無視して〜」�
 - 完全にローカルで済ませたい場合: `security.networkMode` を通常運用にしつつ `llm.provider: "openai-compat"` でローカル LLM を指定し、`retrieval.embedding.provider: "none"` のままにする
 - LLM プロバイダ側の学習利用除外・データ保持ポリシー（Zero Data Retention 等）は別途契約で確認してください。本ツールはそこまでは保証できません
 
-### 9.8 それでも残る制約
+### 10.8 それでも残る制約
 
 - Confluence は Cloud（REST API v2）が対象。Server/Data Center は API が異なります
 - 大規模リポジトリでは `include` / `maxFiles` を絞ってください（索引構築時にメモリを使います）
 - 静的解析は正規表現ベースで、網羅的な SAST の代替ではありません
 - 墨消しは既知パターンに対する多層防御であり、独自形式の秘密を 100% 捕捉するものではありません。機密ファイルの除外（9.2）が第一防衛線です
 
-## 10. テスト
+## 11. テスト
 
 ```bash
 npm test        # node --test（37 ケース）
