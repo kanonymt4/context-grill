@@ -181,6 +181,11 @@ context-grill resolve "https://github.com/acme/api-service" --json   # 機械可
   Server/DC なら `https://wiki.example.com/confluence` のような形です。
   **ブラウザのページ URL をそのまま貼ってはいけません**（`/spaces/...` や `/pages/...` を含めると
   API のパスを連結した先が 404 になります）。特定のページを対象にしたい場合は `pageUrls` を使います。
+- **`pageUrls` は1件だけでも配列（`[ ]`）で書いてください。** `pageIds` / `labels` / `include` / `exclude` も同様です
+
+  ```json
+  "pageUrls": ["https://acme.atlassian.net/wiki/spaces/ENG/pages/393217/決済仕様"]
+  ```
 - 短縮リンク（`/wiki/x/AbCdEf`）は URL だけでは解決できません。ページを開いて `/wiki/spaces/.../pages/<数字>/...` 形式の URL をコピーしてください
 - 差分同期はページの `version.number` で判定するため、更新のないページは再取得されません
 - 対象は Confluence Cloud（REST API v2 / v1 検索）です。Server / Data Center は API が異なります
