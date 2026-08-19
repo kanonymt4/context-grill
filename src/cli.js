@@ -345,6 +345,23 @@ async function cmdDoctor(flags) {
       const optional = config.llm.provider === 'dry' && n === config.llm.apiKeyEnv;
       checks.push({ name: `env ${n}`, ok: Boolean(process.env[n]) || optional, detail: process.env[n] ? '設定済み' : (optional ? '不要' : '未設定') });
     }
+    // local ソースの実体があるか（sync まで待たずにここで気づけるように）
+    for (const s of config.sources) {
+      if (s.type !== 'local' || !s.path) continue;
+      const abs = path.resolve(config.rootDir, s.path);
+      let detail;
+      let ok = false;
+      if (!fs.existsSync(abs)) {
+        detail = `見つかりません: ${abs}`;
+      } else if (!fs.statSync(abs).isDirectory()) {
+        detail = `ディレクトリではありません: ${abs}`;
+      } else {
+        ok = true;
+        detail = abs;
+      }
+      checks.push({ name: `source "${s.id}" のパス`, ok, detail });
+    }
+
     const p = paths(config);
     checks.push({ name: '索引', ok: IndexStore.exists(p.index), detail: IndexStore.exists(p.index) ? p.index : '未構築（context-grill sync）' });
     initEgress(config);
