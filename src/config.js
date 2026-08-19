@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { deepMerge, sha256, stableStringify } from './util/misc.js';
+import { parseConfluenceUrl } from './util/urls.js';
 
 export const DEFAULTS = {
   project: 'untitled',
@@ -177,6 +178,34 @@ function validate(c) {
       }
     }
     if (s.type === 'local' && !s.path) errs.push(`${where}.path が必要です`);
+
+    // repo / ref の形式（sync まで待たずにここで弾く）
+    if (s.type === 'github' && s.repo && !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(String(s.repo))) {
+      const m = String(s.repo).match(/github\.com\/([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)/);
+      errs.push(
+        `${where}.repo は "org/name" 形式で指定してください（現在: ${s.repo}）` +
+        (m ? `\n      URL ではなく "${m[1]}" と書いてください` : '')
+      );
+    }
+    if (s.type === 'github' && s.ref && !/^[A-Za-z0-9._\/-]{1,200}$/.test(String(s.ref))) {
+      errs.push(`${where}.ref の形式が不正です: ${s.ref}`);
+    }
+
+    // Confluence の pageUrls が解釈できる形か
+    if (s.type === 'confluence' && Array.isArray(s.pageUrls)) {
+      for (const [j, u] of s.pageUrls.entries()) {
+        const parsed = parseConfluenceUrl(u);
+        if (parsed?.pageId) continue;
+        if (parsed?.kind === 'shortlink') {
+          errs.push(
+            `${where}.pageUrls[${j}] は短縮リンクのため解決できません: ${u}\n` +
+            `      ページを開いて /wiki/spaces/.../pages/<数字>/... 形式の URL をコピーしてください`
+          );
+        } else {
+          errs.push(`${where}.pageUrls[${j}] を Confluence のページ URL として解釈できません: ${u}`);
+        }
+      }
+    }
   }
   if (!['anthropic', 'openai', 'openai-compat', 'dry'].includes(c.llm.provider)) {
     errs.push(`llm.provider は anthropic|openai|openai-compat|dry のいずれかです`);
