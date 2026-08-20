@@ -1,0 +1,39 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: ['20.10', '22', '24']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 依存パッケージがないため npm install は不要
+      - name: Run tests
+        run: node --test test/
+
+      - name: Verify CLI starts
+        run: node bin/context-grill.js --help
+
+      - name: Verify init works
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/cg-ci" && cd "$RUNNER_TEMP/cg-ci"
+          node "$GITHUB_WORKSPACE/bin/context-grill.js" init
+          test -f context-grill.config.json
+          test -f commands.md
+          test -f usage.md

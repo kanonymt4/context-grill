@@ -1,5 +1,11 @@
 # context-grill
 
+[![test](https://github.com/kanonymt4/context-grill/actions/workflows/test.yml/badge.svg)](https://github.com/kanonymt4/context-grill/actions/workflows/test.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![node](https://img.shields.io/badge/node-%3E%3D20.10-brightgreen.svg)](https://nodejs.org/)
+[![dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](./package.json)
+
+
 GitHub リポジトリと Atlassian（Confluence / Jira）の資料を「一次資料」として登録し、
 **仕様の整理・バグ調査・セキュリティリスク評価・静的解析・新機能設計** を
 **根拠（証拠 ID + 行番号 + パーマリンク）付き** で行う CLI / MCP サーバーです。
