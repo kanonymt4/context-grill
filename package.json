@@ -2,6 +2,33 @@
   "name": "context-grill",
   "version": "0.1.0",
   "description": "GitHub + Atlassian(Confluence/Jira) を一次資料として、仕様整理・バグ調査・セキュリティ/静的解析・機能設計を根拠付きで実施する CLI + MCP サーバー",
+  "keywords": [
+    "llm",
+    "rag",
+    "evidence",
+    "citation",
+    "grounding",
+    "hallucination",
+    "github",
+    "confluence",
+    "jira",
+    "atlassian",
+    "mcp",
+    "model-context-protocol",
+    "cli",
+    "code-analysis",
+    "documentation",
+    "zero-dependency"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kanonymt4/context-grill.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kanonymt4/context-grill/issues"
+  },
+  "homepage": "https://github.com/kanonymt4/context-grill#readme",
   "type": "module",
   "bin": {
     "context-grill": "bin/context-grill.js"
@@ -16,7 +43,6 @@
   },
   "dependencies": {},
   "devDependencies": {},
-  "license": "MIT",
   "files": [
     "bin",
     "src",
