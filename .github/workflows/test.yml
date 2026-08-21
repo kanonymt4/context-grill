@@ -24,7 +24,7 @@ jobs:
 
       # 依存パッケージがないため npm install は不要
       - name: Run tests
-        run: node --test test/
+        run: npm test
 
       - name: Verify CLI starts
         run: node bin/context-grill.js --help
