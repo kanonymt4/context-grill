@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 import fsp from 'node:fs/promises';
 
 import { matchGlob, isIncluded, stableStringify } from '../src/util/misc.js';
@@ -15,6 +16,8 @@ import { verify } from '../src/verify/gate.js';
 import { envelopeSchema, planQueries, TASKS } from '../src/tasks/index.js';
 import { scanDocument } from '../src/analysis/rules.js';
 import { htmlToText, adfToText } from '../src/util/html.js';
+import { buildEmbeddingRequest, parseEmbeddingResponse, embedChunks } from '../src/index/embed.js';
+import { initEgress } from '../src/util/egress.js';
 
 test('glob: 代表的なパターン', () => {
   assert.ok(matchGlob('src/a/b.js', 'src/**'));
@@ -202,4 +205,86 @@ test('URL 解析: GitHub / Confluence / Jira の指定方法', async () => {
   assert.equal(jira.jql, 'key = ENG-1234');
 
   assert.equal(parseGithubUrl('https://example.com/foo'), null);
+});
+
+// ------------------------------------------------------------------ 埋め込み
+test('埋め込み: クエリと文書で input_type を使い分ける', () => {
+  const voyage = { provider: 'voyage', model: 'voyage-3-lite', dimensions: 512 };
+  assert.equal(buildEmbeddingRequest(voyage, ['x']).body.input_type, 'document', '既定は文書側');
+  assert.equal(buildEmbeddingRequest(voyage, ['x'], 'query').body.input_type, 'query');
+  assert.equal(buildEmbeddingRequest(voyage, ['x']).url, 'https://api.voyageai.com/v1/embeddings');
+
+  // OpenAI 系に input_type は存在しないので送らない
+  const openai = { provider: 'openai', model: 'text-embedding-3-small', dimensions: 512 };
+  assert.equal(buildEmbeddingRequest(openai, ['x'], 'query').body.input_type, undefined);
+  assert.equal(buildEmbeddingRequest(openai, ['x']).body.dimensions, 512);
+
+  // dimensions は openai のみ。compat 先（Ollama 等）には送らない
+  const compat = { provider: 'openai-compat', model: 'nomic-embed-text', dimensions: 768, baseUrl: 'http://localhost:11434/v1/' };
+  assert.equal(buildEmbeddingRequest(compat, ['x']).body.dimensions, undefined);
+  assert.equal(buildEmbeddingRequest(compat, ['x']).url, 'http://localhost:11434/v1/embeddings', '末尾スラッシュが重複しない');
+});
+
+test('埋め込み: レスポンスを data[].index の順に並べ直す', () => {
+  const shuffled = { data: [{ index: 2, embedding: [3] }, { index: 0, embedding: [1] }, { index: 1, embedding: [2] }] };
+  assert.deepEqual(parseEmbeddingResponse(shuffled, 3), [[1], [2], [3]]);
+
+  // index を返さないプロバイダではレスポンス順を保つ（sort の安定性）
+  const noIndex = { data: [{ embedding: [1] }, { embedding: [2] }] };
+  assert.deepEqual(parseEmbeddingResponse(noIndex, 2), [[1], [2]]);
+
+  // 数が合わない応答を黙って受け入れるとチャンクとベクトルの対応がずれる
+  assert.throws(() => parseEmbeddingResponse({ data: [{ index: 0, embedding: [1] }] }, 2), /応答数/);
+  assert.throws(() => parseEmbeddingResponse({}, 1), /data 配列/);
+});
+
+test('埋め込み: 途中で失敗しても成功分はキャッシュに残る', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-emb-'));
+  const requests = [];
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      const { input } = JSON.parse(body);
+      requests.push(input);
+      // 入力順と違う順で返す（index に従って戻せることの確認）
+      const data = input.map((t, i) => ({ index: i, embedding: [t.length, 1, 0, 0] })).reverse();
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data }));
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
+
+  const cfg = { provider: 'openai-compat', model: 'test-embed', dimensions: 4, baseUrl, apiKeyEnv: 'TEST_EMBED_KEY', batch: 2 };
+  initEgress({
+    sources: [], llm: { provider: 'dry' }, retrieval: { embedding: cfg },
+    security: { auditLog: false }, workspaceDir: dir,
+  });
+  const chunks = ['a', 'bb', 'ccc', 'dddd'].map((t, i) => ({ hash: `h${i}`, text: t }));
+  const opts = { security: { allowEmbeddingUpload: true } };
+
+  // 1 バッチ目の直後に認証情報を失わせて中断させる
+  // （noRetry の失敗なのでバックオフ待ちなしに中断点を再現できる）
+  process.env.TEST_EMBED_KEY = 'dummy';
+  server.once('request', (req) => req.on('end', () => { delete process.env.TEST_EMBED_KEY; }));
+  await assert.rejects(() => embedChunks(chunks, cfg, dir, opts), /TEST_EMBED_KEY/);
+  assert.equal(requests.length, 1, '1 バッチだけ送られて中断していること');
+
+  // 再実行: 成功していた 2 件はキャッシュから復元され、残り 2 件だけを取りにいく
+  process.env.TEST_EMBED_KEY = 'dummy';
+  const vectors = await embedChunks(chunks, cfg, dir, opts);
+  assert.equal(requests.length, 2, '失敗前の分を再取得している（部分キャッシュが永続化されていない）');
+  assert.deepEqual(requests[1], ['ccc', 'dddd']);
+
+  assert.equal(vectors.length, 4);
+  for (const [i, t] of ['a', 'bb', 'ccc', 'dddd'].entries()) {
+    assert.equal(vectors[i].length, 4);
+    // 正規化後も v[0]/v[1] は元の比（= 文字数）を保つ。順序がずれればここで落ちる
+    assert.ok(Math.abs(vectors[i][0] / vectors[i][1] - t.length) < 1e-4, `${t} のベクトルが対応していない`);
+  }
+
+  delete process.env.TEST_EMBED_KEY;
+  await new Promise((r) => server.close(r));
+  await fsp.rm(dir, { recursive: true, force: true });
 });

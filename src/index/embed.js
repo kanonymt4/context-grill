@@ -50,31 +50,49 @@ function normalize(v) {
   return out;
 }
 
-async function callEmbeddingApi(cfg, inputs) {
-  const provider = cfg.provider;
+/**
+ * プロバイダごとのリクエストを組み立てる（純関数・ネットワーク非依存）。
+ * `inputType` は Voyage 系のみ意味を持つ。文書側は 'document'、検索クエリ側は 'query' を渡す。
+ * ここを取り違えると同じベクトル空間に載らず、分離度が実測で 3 割落ちる。
+ */
+export function buildEmbeddingRequest(cfg, inputs, inputType = 'document') {
+  if (cfg.provider === 'voyage') {
+    return {
+      url: cfg.baseUrl || 'https://api.voyageai.com/v1/embeddings',
+      body: { model: cfg.model, input: inputs, input_type: inputType, output_dimension: cfg.dimensions },
+    };
+  }
+  const base = (cfg.baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '');
+  const body = { model: cfg.model, input: inputs };
+  if (cfg.dimensions && cfg.provider === 'openai') body.dimensions = cfg.dimensions;
+  return { url: `${base}/embeddings`, body };
+}
+
+/**
+ * 埋め込み API のレスポンスを入力順に並べ直す（純関数）。
+ * レスポンス順は仕様上保証されないため、全プロバイダで `data[].index` に従う。
+ * index が無いプロバイダでは Array#sort の安定性によりレスポンス順が保たれる。
+ */
+export function parseEmbeddingResponse(json, expected) {
+  const data = json?.data;
+  if (!Array.isArray(data)) throw new Error('埋め込み API のレスポンスに data 配列がありません');
+  if (expected !== undefined && data.length !== expected) {
+    throw new Error(`埋め込み API の応答数が入力数と一致しません (入力 ${expected} / 応答 ${data.length})`);
+  }
+  return data.slice().sort((a, b) => (a?.index ?? 0) - (b?.index ?? 0)).map((d) => d.embedding);
+}
+
+async function callEmbeddingApi(cfg, inputs, { inputType = 'document' } = {}) {
   const key = process.env[cfg.apiKeyEnv || 'OPENAI_API_KEY'];
   if (!key) throw Object.assign(new Error(`埋め込み用の環境変数 ${cfg.apiKeyEnv} が未設定です`), { noRetry: true });
-  if (provider === 'voyage') {
-    const res = await guardedFetch(cfg.baseUrl || 'https://api.voyageai.com/v1/embeddings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ model: cfg.model, input: inputs, input_type: 'document', output_dimension: cfg.dimensions }),
-    }, { purpose: 'embedding' });
-    if (!res.ok) throw new Error(redactMessage(`voyage embeddings HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`));
-    const j = await res.json();
-    return j.data.map((d) => d.embedding);
-  }
-  const base = cfg.baseUrl || 'https://api.openai.com/v1';
-  const body = { model: cfg.model, input: inputs };
-  if (cfg.dimensions && provider === 'openai') body.dimensions = cfg.dimensions;
-  const res = await guardedFetch(`${base.replace(/\/+$/, '')}/embeddings`, {
+  const { url, body } = buildEmbeddingRequest(cfg, inputs, inputType);
+  const res = await guardedFetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
     body: JSON.stringify(body),
   }, { purpose: 'embedding' });
-  if (!res.ok) throw new Error(redactMessage(`embeddings HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`));
-  const j = await res.json();
-  return j.data.sort((a, b) => a.index - b.index).map((d) => d.embedding);
+  if (!res.ok) throw new Error(redactMessage(`${cfg.provider} embeddings HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`));
+  return parseEmbeddingResponse(await res.json(), inputs.length);
 }
 
 /** チャンク配列 → 正規化済みベクトル配列（キャッシュヒット分は API を呼ばない） */
@@ -99,22 +117,27 @@ export async function embedChunks(chunks, cfg, cacheDir, { onProgress, security 
   }
   log.info(`埋め込み: キャッシュ ${chunks.length - todo.length} / 新規 ${todo.length}`);
   const batch = cfg.batch || 96;
-  for (let s = 0; s < todo.length; s += batch) {
-    const slice = todo.slice(s, s + batch);
-    const vecs = await retry(() => callEmbeddingApi(cfg, slice.map((t) => t.text)), { attempts: 4 });
-    for (let k = 0; k < slice.length; k++) {
-      const nv = normalize(vecs[k]);
-      out[slice[k].i] = nv;
-      cache.put(slice[k].h, nv);
+  try {
+    for (let s = 0; s < todo.length; s += batch) {
+      const slice = todo.slice(s, s + batch);
+      const vecs = await retry(() => callEmbeddingApi(cfg, slice.map((t) => t.text), { inputType: 'document' }), { attempts: 4 });
+      for (let k = 0; k < slice.length; k++) {
+        const nv = normalize(vecs[k]);
+        out[slice[k].i] = nv;
+        cache.put(slice[k].h, nv);
+      }
+      if (onProgress) onProgress(Math.min(s + batch, todo.length), todo.length);
     }
-    if (onProgress) onProgress(Math.min(s + batch, todo.length), todo.length);
+  } finally {
+    // 途中で失敗しても、取得できたところまでは索引 (index.json) に確定させる。
+    // ここを通らないとベクトル本体は書けていても対応表が失われ、次回 sync がゼロからになる。
+    await cache.close();
   }
-  await cache.close();
   return out;
 }
 
 export async function embedQuery(text, cfg) {
   if (cfg.provider === 'none') return null;
-  const [v] = await retry(() => callEmbeddingApi(cfg, [text.slice(0, 8000)]), { attempts: 3 });
+  const [v] = await retry(() => callEmbeddingApi(cfg, [text.slice(0, 8000)], { inputType: 'query' }), { attempts: 3 });
   return normalize(v);
 }
