@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 
 import { redactText, redactMessage } from '../src/util/redact.js';
 import { isSensitivePath, isInside } from '../src/util/sensitive.js';
@@ -255,7 +256,8 @@ test('契約に資料内指示への追従を禁じる条項が含まれる', ()
 
 // ------------------------------------------------------------ 構造的保証
 test('構造: src/ 内に egress ゲートを迂回する直接 fetch / child_process が無い', async () => {
-  const root = new URL('../src/', import.meta.url).pathname;
+  // Windows では URL.pathname が /D:/... を返し、path.join で D:\D:\... になってしまう
+  const root = fileURLToPath(new URL('../src/', import.meta.url));
   const files = [];
   const walk = async (d) => {
     for (const e of await fsp.readdir(d, { withFileTypes: true })) {
@@ -268,7 +270,8 @@ test('構造: src/ 内に egress ゲートを迂回する直接 fetch / child_pr
   const offenders = { fetch: [], proc: [] };
   for (const f of files) {
     const src = await fsp.readFile(f, 'utf8');
-    const rel = path.relative(root, f);
+    // 除外判定を '/' 区切りで書いているので、Windows の \\ を揃える
+    const rel = path.relative(root, f).split(path.sep).join('/');
     if (rel !== 'util/egress.js' && /(?<!guarded)\bfetch\s*\(/.test(src.replace(/guardedFetch\s*\(/g, 'G('))) {
       // 静的解析ルールの正規表現リテラル内は除外
       if (!/analysis\//.test(rel)) offenders.fetch.push(rel);
