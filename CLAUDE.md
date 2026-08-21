@@ -62,7 +62,7 @@ test/                    unit / e2e / security
 
 ## 現状
 
-- **テスト37件すべて成功**（2026-08-09 に `node --test test/` で確認、Node v20.15.1）
+- **テスト40件すべて成功**（2026-08-21 に `node --test test/` で確認、Node v20.15.1）
 - 依存パッケージゼロ。`npm install` 不要
 - ~~`schema/` は空ディレクトリ~~ 2026-08-10 削除済み（経緯不明のまま package.json の files から除去。理由は下記）
 
@@ -142,9 +142,10 @@ Confluence の HTML 変換より簡単。
 - ~~埋め込みプロバイダを有効にした状態での動作が未検証~~ 2026-08-10 検証済み。ローカル Ollama（nomic-embed-text, 768次元, openai-compat 経由）で sync→embedding API 実呼び出し→egress.log記録→ベクトル索引構築→2回目syncでキャッシュ全ヒット、を一通り確認。ただし RRF 融合の効果は一様ではなく、クエリによってはBM25単体の方が正解ファイルの順位が高いケースもあった（言い換え耐性は効く場合とそうでない場合がある）。2026-08-10 OpenAI/Voyage 実APIでも検証済み。
   - OpenAI (text-embedding-3-small, dimensions:512): sync/cache reuse/検索まで完全に成功。`dimensions` 指定時に実際に返るベクトル長も一致することを確認（キャッシュ破損リスクは杞憂だった）
   - Voyage (voyage-3-lite): 単独API呼び出しは成功するが、無料枠のレート制限(3RPM/10K TPM)に対し`retry()`のバックオフ(最大5秒程度)が短すぎ、実際の`sync`では埋め込み取得が継続的に失敗。ただし例外を握りつぶさずBM25のみへグレースフルデグレードする設計は正しく機能した（src/index/ingest.js）
-  - **要修正候補**: `embed.js`の`embedQuery()`が`embedChunks()`と同じ経路を通るため、Voyageのクエリでも`input_type:"document"`が固定送信される。実測で正解/無関係文書の分離度が本来の`query`指定時0.418 → 現状のbug挙動0.294と、約30%低下することを確認
-  - **要修正候補**: Voyage分岐だけ`data[].index`でソートしていない（openai/openai-compatはソートあり）。レスポンス順を無条件に信頼している
-  - **要修正候補**: 埋め込み取得が失敗すると`EmbedCache.close()`未到達のため、途中まで成功した分も含めて次回`sync`時にゼロからやり直しになる（部分キャッシュが永続化されない）
+  - ~~**要修正候補**: `embed.js`の`embedQuery()`が`embedChunks()`と同じ経路を通るため、Voyageのクエリでも`input_type:"document"`が固定送信される。実測で正解/無関係文書の分離度が本来の`query`指定時0.418 → 現状のbug挙動0.294と、約30%低下することを確認~~ 2026-08-21 修正
+  - ~~**要修正候補**: Voyage分岐だけ`data[].index`でソートしていない（openai/openai-compatはソートあり）。レスポンス順を無条件に信頼している~~ 2026-08-21 修正
+  - ~~**要修正候補**: 埋め込み取得が失敗すると`EmbedCache.close()`未到達のため、途中まで成功した分も含めて次回`sync`時にゼロからやり直しになる（部分キャッシュが永続化されない）~~ 2026-08-21 修正
+- **未対応（Voyage 実運用の残課題）**: `embedChunks` のリトライは `attempts:4` / `baseMs:600` が固定で、最大待機は約 4.2 秒。Voyage 無料枠（3RPM）のような分単位のレート制限には届かないため、`sync` の失敗自体は解消していない。設定可能にするかはコストと相談
 
 ## 履歴
 
@@ -164,3 +165,11 @@ Confluence の HTML 変換より簡単。
   発生し、GitHub の制限（未認証60/時・認証済み5,000/時）に直接影響するため大規模リポでは非推奨
   （コード内コメントにも明記あり）。issues/pulls 取り込みも同じ REST エンドポイントを使う。
 - 2026-08-19 配布先での実運用フィードバックを反映（baseUrl のページURL誤指定・pageUrls の文字列指定・includeDescendants 未指定・コマンド名前のフラグ・漢字1文字クエリを修正）。ask の指示文の書き方を実測値つきでドキュメント化。README に他ツールとの違いと向き不向きを追加。setup.sh / setup.ps1 を削除し初期設定を npm install -g → init の1通りに統一。コネクタ拡張（Slack / Google Drive ほか）を調査（上記）
+- 2026-08-21 埋め込み周りの要修正候補 3 件を修正（`src/index/embed.js`）。
+  1. `embedQuery()` に `inputType: 'query'` を渡すようにし、Voyage のクエリ側が `document` で送られないようにした
+  2. レスポンスの並べ直しを全プロバイダ共通にし、入力数と応答数の不一致も例外にした
+  3. バッチループを `try/finally` で囲い、途中失敗でも `EmbedCache.close()` が必ず走るようにした（部分キャッシュの永続化と fd リーク防止）
+  合わせて、リクエスト組み立て（`buildEmbeddingRequest`）とレスポンス解釈（`parseEmbeddingResponse`）を
+  純関数として分離・export し、ネットワークなしで検証できるようにした。
+  テスト 3 件追加（計 40 件、全件成功）。うち 1 件は `127.0.0.1` に立てたダミーサーバへ openai-compat で
+  実際に接続し、「1 バッチ目成功 → 中断 → 再実行で 2 件キャッシュヒット」を検証する（外部 API 不要）。
