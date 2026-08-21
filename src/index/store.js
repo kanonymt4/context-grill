@@ -215,6 +215,8 @@ export async function writeVectors(dir, vectors, dims) {
   try {
     for (const v of vectors) {
       const f = Float32Array.from(v);
+      // 読み出しは dims 固定ストライドなので、長さの違うベクトルを混ぜると以降全部がずれる
+      if (f.length !== dims) throw new Error(`ベクトルの次元数が不揃いです (期待 ${dims} / 実際 ${f.length})`);
       fs.writeSync(fd, Buffer.from(f.buffer, f.byteOffset, f.byteLength));
     }
   } finally { fs.closeSync(fd); }
