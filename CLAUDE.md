@@ -62,7 +62,7 @@ test/                    unit / e2e / security
 
 ## 現状
 
-- **テスト40件すべて成功**（2026-08-21 に `node --test test/` で確認、Node v20.15.1）
+- **テスト42件すべて成功**（2026-08-21 に `node --test test/` で確認、Node v20.15.1）
 - 依存パッケージゼロ。`npm install` 不要
 - ~~`schema/` は空ディレクトリ~~ 2026-08-10 削除済み（経緯不明のまま package.json の files から除去。理由は下記）
 
@@ -173,3 +173,16 @@ Confluence の HTML 変換より簡単。
   純関数として分離・export し、ネットワークなしで検証できるようにした。
   テスト 3 件追加（計 40 件、全件成功）。うち 1 件は `127.0.0.1` に立てたダミーサーバへ openai-compat で
   実際に接続し、「1 バッチ目成功 → 中断 → 再実行で 2 件キャッシュヒット」を検証する（外部 API 不要）。
+- 2026-08-21 上記の受けとして、ドキュメントとコードコメントの齟齬を全件確認。記述の矛盾はなかったが（件数だけ更新）、
+  その過程でコード側の穴を 2 件見つけて修正した。
+  1. **埋め込みキャッシュのキーに provider が入っていなかった**。`config.js` の `indexKey` は provider を含むのに
+     `embed.js` は `model|dimensions|chunk.hash` だけで、同じ model 名・次元数で openai と openai-compat を
+     切り替えると別サーバのベクトルを流用してしまっていた。`embedCacheKey()` / `embedCacheNamespace()` に切り出し、
+     キャッシュディレクトリ名も `<provider>-<model>-<dims>` にした。
+     **既存の `.context-grill/cache/embed/<model>-<dims>/` は参照されなくなるため、初回の sync だけ再埋め込みが発生する**（旧ディレクトリは手動削除でよい）。
+  2. **返ってきたベクトルの長さを誰も検証していなかった**。`EmbedCache` も `store.js` の `writeVectors()` も
+     `dims` 固定ストライドで読み書きするので、API が `dimensions` と違う長さを返すとエラーも警告もなく
+     vectors.bin がずれる。`parseEmbeddingResponse()` で noRetry 例外にし、`writeVectors()` にも最終ゲートを置いた。
+     `openai-compat`（Ollama 等）は API 側に次元数を指定できないため、既定の 512 のまま nomic-embed-text（768）を
+     使うとこれを踏む。README 7 章にも記載。
+  テスト 2 件追加（計 42 件、全件成功）。

@@ -16,7 +16,7 @@ import { verify } from '../src/verify/gate.js';
 import { envelopeSchema, planQueries, TASKS } from '../src/tasks/index.js';
 import { scanDocument } from '../src/analysis/rules.js';
 import { htmlToText, adfToText } from '../src/util/html.js';
-import { buildEmbeddingRequest, parseEmbeddingResponse, embedChunks } from '../src/index/embed.js';
+import { buildEmbeddingRequest, parseEmbeddingResponse, embedChunks, embedCacheKey, embedCacheNamespace } from '../src/index/embed.js';
 import { initEgress } from '../src/util/egress.js';
 
 test('glob: 代表的なパターン', () => {
@@ -236,6 +236,27 @@ test('埋め込み: レスポンスを data[].index の順に並べ直す', () =
   // 数が合わない応答を黙って受け入れるとチャンクとベクトルの対応がずれる
   assert.throws(() => parseEmbeddingResponse({ data: [{ index: 0, embedding: [1] }] }, 2), /応答数/);
   assert.throws(() => parseEmbeddingResponse({}, 1), /data 配列/);
+});
+
+test('埋め込み: 設定と違う次元数のベクトルを受け入れない', () => {
+  const body = { data: [{ index: 0, embedding: [1, 2, 3] }] };
+  assert.deepEqual(parseEmbeddingResponse(body, 1, 3), [[1, 2, 3]]);
+  // vectors.bin は dims 固定ストライドなので、黙って通すと以降の読み出しが全部ずれる
+  let caught;
+  try { parseEmbeddingResponse(body, 1, 512); } catch (err) { caught = err; }
+  assert.match(caught.message, /dimensions=512/);
+  assert.equal(caught.noRetry, true, '設定ミスなのでリトライさせない');
+});
+
+test('埋め込み: キャッシュは provider まで含めて区別する', () => {
+  const base = { provider: 'openai', model: 'text-embedding-3-small', dimensions: 512 };
+  const compat = { ...base, provider: 'openai-compat' };
+  // model 名と次元数が同じでも、別のサーバが返したベクトルを流用してはいけない
+  assert.notEqual(embedCacheKey(base, 'chunk-hash'), embedCacheKey(compat, 'chunk-hash'));
+  assert.notEqual(embedCacheNamespace(base), embedCacheNamespace(compat));
+  assert.equal(embedCacheKey(base, 'chunk-hash'), embedCacheKey({ ...base }, 'chunk-hash'), '同じ設定なら同じキー');
+  assert.notEqual(embedCacheKey(base, 'a'), embedCacheKey({ ...base, dimensions: 256 }, 'a'));
+  assert.ok(!/[^\w.-]/.test(embedCacheNamespace(compat)), 'ディレクトリ名として安全な文字だけになる');
 });
 
 test('埋め込み: 途中で失敗しても成功分はキャッシュに残る', async () => {
