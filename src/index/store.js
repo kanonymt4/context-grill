@@ -88,9 +88,19 @@ export class IndexStore {
    */
   static openHandles = 0;
 
+  /**
+   * open された累計回数。**減らない。**
+   *
+   * close() は _fd を null に戻すだけで、次の読み取りが遅延オープンで開き直す。
+   * そのため openHandles では「途中で閉じられたか」を検知できない。
+   * この累計値が増えていなければ、開き直しが起きていない = 閉じられていない、と言える。
+   */
+  static openCount = 0;
+
   static _openFd(p) {
     const fd = fs.openSync(p, 'r');
     IndexStore.openHandles++;
+    IndexStore.openCount++;
     return fd;
   }
 

@@ -10,10 +10,10 @@ import { redactText, redactMessage } from '../src/util/redact.js';
 import { isSensitivePath, isInside } from '../src/util/sensitive.js';
 import { initEgress, assertAllowed, guardedFetch, egressPlan } from '../src/util/egress.js';
 import { assertGitSubcommand, assertManagedClone, gitEnv } from '../src/connectors/github.js';
-import { loadConfig } from '../src/config.js';
+import { loadConfig, paths } from '../src/config.js';
 import { syncSources, buildIndex } from '../src/index/ingest.js';
 import { IndexStore } from '../src/index/store.js';
-import { runTask } from '../src/llm/pipeline.js';
+import { runTask, runTaskWithStore } from '../src/llm/pipeline.js';
 import { buildEvidencePack } from '../src/index/pack.js';
 import { scanDocument } from '../src/analysis/rules.js';
 import { SYSTEM_CONTRACT } from '../src/tasks/index.js';
@@ -262,6 +262,39 @@ test('runTask は例外パスでも索引の fd を解放する（fd リーク�
 
   await assert.rejects(() => runTask(config, { ...ask, taskId: '存在しないタスク' }), /未知のタスク/);
   assert.equal(IndexStore.openHandles, baseline, 'タスク名不正の早期 return で fd が残っている');
+
+  delete process.env.TEST_LLM_KEY;
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+test('runTaskWithStore は渡されたストアを閉じない（所有権は呼び出し側）', async () => {
+  // MCP サーバーは常駐プロセスでストアを 1 つキャッシュし、それを渡して呼ぶ。
+  // ここで close() されると、以後の search / evidence_pack が壊れた fd を使うことになる。
+  const dir = await secureFixture({ llm: { provider: 'anthropic', model: 'm', apiKeyEnv: 'TEST_LLM_KEY' } });
+  process.env.TEST_LLM_KEY = 'dummy';
+  const config = await loadConfig(path.join(dir, 'context-grill.config.json'));
+  await syncSources(config, {});
+  await buildIndex(config, { embed: false });
+
+  const store = await IndexStore.open(paths(config).index);
+  const ask = { taskId: 'spec', instruction: 'app.js の main 関数の仕様', effort: 'low', save: false, dryRun: true };
+
+  // 1 回目で docs.txt の fd を開かせておく（遅延オープンのウォームアップ）
+  const r1 = await runTaskWithStore(store, config, ask);
+  assert.ok(r1.pack.items.length > 0, '証拠が取れていないと検証にならない');
+  assert.ok(store._fd !== null, '本文を読んだなら fd が開いているはず');
+
+  // close() されても次の読み取りが黙って開き直すため、「使えるか」では検知できない。
+  // 開いた累計回数が増えないことを見る。
+  const opensBefore = IndexStore.openCount;
+  const r2 = await runTaskWithStore(store, config, ask);
+  assert.ok(r2.pack.items.length > 0, '2 回目で証拠が取れない');
+  assert.equal(IndexStore.openCount, opensBefore,
+    'fd が開き直された = runTaskWithStore がストアを閉じている（所有権違反）');
+
+  const handlesBefore = IndexStore.openHandles;
+  await store.close();
+  assert.ok(IndexStore.openHandles < handlesBefore, '呼び出し側の close() で fd が解放されるべき');
 
   delete process.env.TEST_LLM_KEY;
   await fsp.rm(dir, { recursive: true, force: true });

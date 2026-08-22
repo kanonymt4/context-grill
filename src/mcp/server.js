@@ -9,7 +9,7 @@ import { allDocs, syncSources, buildIndex } from '../index/ingest.js';
 import { scanAll, summarize, projectFacts, extractEndpoints } from '../analysis/static.js';
 import { TASKS, SYSTEM_CONTRACT, envelopeSchema, planQueries, taskPromptHash, listTasks } from '../tasks/index.js';
 import { verify } from '../verify/gate.js';
-import { runTask } from '../llm/pipeline.js';
+import { runTaskWithStore } from '../llm/pipeline.js';
 import { shortHash } from '../util/misc.js';
 import { initEgress, egressPlan } from '../util/egress.js';
 import { redactText } from '../util/redact.js';
@@ -125,10 +125,54 @@ export async function startMcpServer({ configPath } = {}) {
   const packDir = path.join(p.runs, 'packs');
   await fsp.mkdir(packDir, { recursive: true });
 
+  // 索引ストアは 1 つだけ開いて使い回す。
+  //
+  // 注意: 下の handle(msg) は await されていないため、ツール呼び出しは並行実行され得る。
+  // 一方 context_grill_sync は索引を作り直した後にストアを閉じる。
+  //
+  // このとき壊れ方は「fd が無効になってエラーになる」ではない。textOf は _fd が null なら
+  // 黙って開き直すし、JS は単一スレッドで null チェックと readSync の間に await が無いので
+  // EBADF にはならない。実際の被害はもっと悪い。docs.txt は docs.txt.tmp から rename で
+  // 置き換えられるため、close 後の開き直しは**新しいファイル**を指す一方、this.meta の
+  // オフセットは**古いまま**。結果、エラーも出さずに見当違いのバイト列を証拠として返す。
+  //
+  // そこで参照カウントを持ち、使用中のストアは「最後の利用者が終わってから」閉じる。
+  // fd を開いたまま保てば POSIX では rename されても古い inode を参照し続けるので、
+  // 実行中の読み取りは一貫した内容を見る。
+  // （Windows で開いているファイルへの rename がどう振る舞うかは未検証）
   let store = null;
+  const inUse = new Map(); // IndexStore -> 参照数
+
   const getStore = async () => {
     if (!store) store = await IndexStore.open(p.index);
     return store;
+  };
+
+  /** 索引を読む処理は必ずこれで包む。使用中は sync に閉じられない。 */
+  const withStore = async (fn) => {
+    const s = await getStore();
+    inUse.set(s, (inUse.get(s) || 0) + 1);
+    try {
+      return await fn(s);
+    } finally {
+      const n = (inUse.get(s) || 1) - 1;
+      if (n > 0) {
+        inUse.set(s, n);
+      } else {
+        inUse.delete(s);
+        // 既に切り離されている（sync が走った）なら、最後の利用者である自分が閉じる
+        if (s !== store) await s.close();
+      }
+    }
+  };
+
+  /** 索引を作り直した後に呼ぶ。使用中なら閉じずに切り離すだけにする。 */
+  const invalidateStore = async () => {
+    const old = store;
+    store = null;
+    if (!old) return;
+    if (!inUse.has(old)) await old.close();
+    // 使用中の場合は withStore の finally 側が閉じる
   };
 
   const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
@@ -137,6 +181,20 @@ export async function startMcpServer({ configPath } = {}) {
   const doRedact = config.security?.redactSecrets !== false;
   const safe = (t) => (doRedact ? redactText(t ?? '').text : (t ?? ''));
   const textResult = (obj) => ({ content: [{ type: 'text', text: typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2) }] });
+
+  /**
+   * 索引ファイルを fd 経由で読むツール。これらは withStore で包んで呼ぶ。
+   *
+   * context_grill_status は含めない。理由は 2 つある。
+   * - stats() は this.meta / this.manifest しか見ないので fd を使わない
+   * - status は索引未作成時に getStore() を呼ばずに案内を返す。withStore で包むと
+   *   先に IndexStore.open() が走って throw し、この分岐が壊れる
+   */
+  const STORE_TOOLS = new Set([
+    'context_grill_search',
+    'context_grill_evidence_pack',
+    'context_grill_run_task',
+  ]);
 
   async function callTool(name, args = {}) {
     switch (name) {
@@ -254,7 +312,10 @@ export async function startMcpServer({ configPath } = {}) {
         });
       }
       case 'context_grill_run_task': {
-        const res = await runTask(config, {
+        // 自前で索引を開かず、キャッシュ済みストアを渡す（二重オープンの回避）。
+        // ストアの所有権はこちらにあるので、runTaskWithStore は close() しない。
+        const s = await getStore();
+        const res = await runTaskWithStore(s, config, {
           taskId: args.task || 'spec', instruction: args.instruction,
           effort: args.effort || 'normal', sourceIds: args.sources?.length ? args.sources : null,
           dryRun: Boolean(args.dry_run),
@@ -264,7 +325,7 @@ export async function startMcpServer({ configPath } = {}) {
       case 'context_grill_sync': {
         const report = await syncSources(config, { only: args.sources?.length ? args.sources : null, force: Boolean(args.full) });
         const manifest = await buildIndex(config, {});
-        if (store) { await store.close(); store = null; }
+        await invalidateStore();
         return textResult({ sources: report, index: { chunks: manifest.N, indexKey: manifest.indexKey } });
       }
       default:
@@ -310,7 +371,13 @@ export async function startMcpServer({ configPath } = {}) {
       if (method === 'resources/list') return ok(id, { resources: [] });
       if (method === 'prompts/list') return ok(id, { prompts: [] });
       if (method === 'tools/call') {
-        const result = await callTool(params?.name, params?.arguments || {});
+        const name = params?.name;
+        const args = params?.arguments || {};
+        // 索引を読むツールは参照を確保してから実行する。実行中に sync が来ても
+        // ストアは切り離されるだけで閉じられない。
+        const result = STORE_TOOLS.has(name)
+          ? await withStore(() => callTool(name, args))
+          : await callTool(name, args);
         return ok(id, result);
       }
       if (id !== undefined) err(id, -32601, `Method not found: ${method}`);

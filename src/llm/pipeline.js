@@ -15,14 +15,24 @@ import { shortHash } from '../util/misc.js';
 import { log } from '../util/log.js';
 import { initEgress, egressSummary } from '../util/egress.js';
 
+function resolveTask(taskId) {
+  const task = TASKS[taskId];
+  if (!task) throw new Error(`未知のタスク: ${taskId}（利用可能: ${Object.keys(TASKS).join(', ')}）`);
+  return task;
+}
+
 /**
  * 実行の骨格。ステージ 1〜4（証拠の決定）は LLM に一切依存しない。
  * LLM が担うのはステージ 5（証拠の解釈）だけで、その出力はステージ 6 で機械検証される。
  * → モデルや実行回数が変わっても、根拠と検証基準は不変。
+ *
+ * 索引を自前で開いて閉じる。既にストアを持っている呼び出し側（MCP サーバーなど）は
+ * runTaskWithStore() を直接使うこと。
  */
 export async function runTask(config, opts) {
-  const task = TASKS[opts.taskId];
-  if (!task) throw new Error(`未知のタスク: ${opts.taskId}（利用可能: ${Object.keys(TASKS).join(', ')}）`);
+  // 索引を開く前にタスク名を検証する。逆にすると、索引が無い環境で
+  // タスク名を間違えた場合に「索引がありません」という無関係なエラーになる。
+  resolveTask(opts.taskId);
 
   // --- 1. 索引を開く -------------------------------------------------
   // 本体を try/finally の内側に置き、例外パスでも fd を必ず解放する。
@@ -32,13 +42,21 @@ export async function runTask(config, opts) {
   // run_task が毎回確実に失敗し、毎回確実に漏れることになる。
   const store = await IndexStore.open(paths(config).index);
   try {
-    return await runTaskWithStore(store, task, config, opts);
+    return await runTaskWithStore(store, config, opts);
   } finally {
     await store.close();
   }
 }
 
-async function runTaskWithStore(store, task, config, opts) {
+/**
+ * 既存のストアを使って実行する。**ストアの所有権は呼び出し側にあり、
+ * この関数は store.close() を呼ばない。**
+ *
+ * MCP サーバーは常駐プロセスでストアを 1 つキャッシュしているため、
+ * こちらを使って二重オープンを避ける。
+ */
+export async function runTaskWithStore(store, config, opts) {
+  const task = resolveTask(opts.taskId);
   const {
     taskId, instruction, effort = 'normal', sourceIds = null,
     dryRun = false, save = true, modelOverride = null, extraQueries = [],
