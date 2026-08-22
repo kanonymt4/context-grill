@@ -79,6 +79,26 @@ export class IndexBuilder {
 }
 
 export class IndexStore {
+  /**
+   * IndexStore が保持している fd の数。**close() 後に 0 に戻ることを不変条件とする。**
+   *
+   * 例外パスで close() を通らないと 0 に戻らないため、fd リークの回帰テストに使う。
+   * POSIX は開いているファイルでも unlink できるため、リークは Windows でしか
+   * 症状（rmdir の ENOTEMPTY）として現れない。OS に依らず検知するための計測点。
+   */
+  static openHandles = 0;
+
+  static _openFd(p) {
+    const fd = fs.openSync(p, 'r');
+    IndexStore.openHandles++;
+    return fd;
+  }
+
+  static _closeFd(fd) {
+    fs.closeSync(fd);
+    IndexStore.openHandles--;
+  }
+
   constructor(dir) { this.dir = dir; this._shards = new Map(); this._fd = null; this._vfd = null; }
 
   static exists(dir) { return fs.existsSync(path.join(dir, 'manifest.json')); }
@@ -97,8 +117,8 @@ export class IndexStore {
   }
 
   async close() {
-    if (this._fd !== null) { fs.closeSync(this._fd); this._fd = null; }
-    if (this._vfd !== null) { fs.closeSync(this._vfd); this._vfd = null; }
+    if (this._fd !== null) { IndexStore._closeFd(this._fd); this._fd = null; }
+    if (this._vfd !== null) { IndexStore._closeFd(this._vfd); this._vfd = null; }
   }
 
   _shard(i) {
@@ -112,7 +132,7 @@ export class IndexStore {
   textOf(i) {
     const m = this.meta[i];
     if (!m) return '';
-    if (this._fd === null) this._fd = fs.openSync(path.join(this.dir, 'docs.txt'), 'r');
+    if (this._fd === null) this._fd = IndexStore._openFd(path.join(this.dir, 'docs.txt'));
     const buf = Buffer.allocUnsafe(m.len);
     fs.readSync(this._fd, buf, 0, m.len, m.off);
     return buf.toString('utf8');
@@ -148,7 +168,7 @@ export class IndexStore {
     if (this._vfd === null) {
       const p = path.join(this.dir, 'vectors.bin');
       if (!fs.existsSync(p)) return null;
-      this._vfd = fs.openSync(p, 'r');
+      this._vfd = IndexStore._openFd(p);
     }
     const bytes = this.dims * 4;
     const buf = Buffer.allocUnsafe(bytes);
@@ -161,7 +181,7 @@ export class IndexStore {
     if (!this.dims) return [];
     const p = path.join(this.dir, 'vectors.bin');
     if (!fs.existsSync(p)) return [];
-    const fd = fs.openSync(p, 'r');
+    const fd = IndexStore._openFd(p);
     try {
       const dims = this.dims, rowBytes = dims * 4, block = 2048;
       const buf = Buffer.allocUnsafe(rowBytes * block);
@@ -182,7 +202,7 @@ export class IndexStore {
         }
       }
       return topN(scores, topK);
-    } finally { fs.closeSync(fd); }
+    } finally { IndexStore._closeFd(fd); }
   }
 
   stats() {

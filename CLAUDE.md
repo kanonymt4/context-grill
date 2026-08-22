@@ -62,7 +62,7 @@ test/                    unit / e2e / security
 
 ## 現状
 
-- **テスト42件すべて成功**（2026-08-21 に `node --test test/` で確認、Node v20.15.1）
+- **テスト43件すべて成功**（2026-08-22 に `npm test` で確認、Node v20）
 - 依存パッケージゼロ。`npm install` 不要
 - CI は GitHub Actions で 3 OS（ubuntu / macOS / windows）× 3 Node（20.10 / 22 / 24）の 9 ジョブ
   （`.github/workflows/test.yml`）。依存パッケージがないため `npm install` ステップ自体が存在しない。
@@ -182,19 +182,15 @@ Confluence の HTML 変換より簡単。
   - ~~**要修正候補**: Voyage分岐だけ`data[].index`でソートしていない（openai/openai-compatはソートあり）。レスポンス順を無条件に信頼している~~ 2026-08-21 修正
   - ~~**要修正候補**: 埋め込み取得が失敗すると`EmbedCache.close()`未到達のため、途中まで成功した分も含めて次回`sync`時にゼロからやり直しになる（部分キャッシュが永続化されない）~~ 2026-08-21 修正
 - **未対応（Voyage 実運用の残課題）**: `embedChunks` のリトライは `attempts:4` / `baseMs:600` が固定で、最大待機は約 4.2 秒。Voyage 無料枠（3RPM）のような分単位のレート制限には届かないため、`sync` の失敗自体は解消していない。設定可能にするかはコストと相談
-- **未対応（Windows CI の残件）**: `windows-latest` の一部 Node 版で、`test/security.test.js` の
-  「allowLlmUpload=false なら ask は送信前にブロックされる」の後始末
-  （`fsp.rm(dir, { recursive: true, force: true })`）が `ENOTEMPTY` で失敗する。
-  ubuntu / macOS では再現しない。
-  **仮説**: このテストは `runTask` が送信前に例外を投げるため、`IndexStore` が遅延オープンした
-  読み取り fd（`src/index/store.js` の `_fd` / `_vfd`。`close()` でのみ解放される）が
-  解放されないまま残り、ハンドルを掴んだままのディレクトリを Windows が削除できない。
-  POSIX は開いているファイルでも unlink できるので、OS 差として辻褄は合う。
-  **切り分け手順**: (1) 例外パスで `store.close()` に到達しているかを確認する →
-  (2) 到達していなければ `runTask` 側を `try/finally` で囲う（**プロダクトコードの fd リーク修正**）→
-  (3) 到達しているならテスト側の後始末の問題として `rm` に `maxRetries` を付ける。
-  **(2) と (3) は原因も影響範囲もまったく違う。** リトライで黙らせる前に必ず (1) を確認すること
-  （(2) が真なら、CI だけでなく実運用でも ask 失敗のたびに fd が漏れていることになる）
+- ~~**未対応（Windows CI の残件）**: `windows-latest` の一部 Node 版で、`test/security.test.js` の
+  「allowLlmUpload=false なら ask は送信前にブロックされる」の後始末が `ENOTEMPTY` で失敗する~~
+  **2026-08-22 修正。切り分け手順の (2)、つまりプロダクトコードの fd リークだった。**
+  `rm` に `maxRetries` を付けて黙らせなくて正解だった件（詳細は履歴）。
+- **未対応（MCP サーバーの二重オープン）**: `src/mcp/server.js` は `getStore()` でストアを
+  1 つキャッシュして使い回すが、`context_grill_run_task` が呼ぶ `runTask()` は毎回自前で
+  別の `IndexStore` を開く。fd リークは修正済みなので実害はないが、常駐プロセスで
+  毎回索引メタを読み直すのは無駄。`runTask` に store を注入できるようにするのが筋だが、
+  ライフサイクルの所有者が変わるので別テーマとして分離した
 
 ## 履歴
 
@@ -245,3 +241,33 @@ Confluence の HTML 変換より簡単。
   `.context-grill/` `node_modules/` `*.log` `.DS_Store` を網羅）。`.env` は git 履歴に一度も
   入っていない（`git log --all -- .env` が空）。後者は public 化の前提条件が1つ満たされていることを意味する。
   この時点でテストは 42 件全成功（ローカル、Node v20）。
+- 2026-08-22 **`IndexStore` の fd リークを修正**。上記の Windows `ENOTEMPTY` の原因で、
+  切り分け手順の (2)、つまりテスト側ではなくプロダクトコードの欠陥だった。
+
+  **なぜ壊れていたか**: `runTask` は冒頭で `IndexStore.open()` しながら、`store.close()` を
+  成功パス 2 箇所（dry-run の return と通常の return）にしか置いていなかった。
+  `allowLlmUpload=false` / トークン上限超過の throw、`provider.complete()` や `verify()` の
+  任意の失敗で `docs.txt` の fd が漏れる。POSIX は開いているファイルでも unlink できるため
+  症状が出ず、Windows の rmdir だけが失敗していた。Node 22 / 24 で通っていたのは直っていたのではなく、
+  `fsp.rm` の内部リトライがたまたま間に合っていただけと見られる。
+
+  **CI だけの問題ではなかった**のが重要。`src/mcp/server.js` は常駐プロセスで、
+  `context_grill_run_task` が失敗するたびに fd が 1 つずつ累積し、いずれ EMFILE に至る。
+  しかも `allowLlmUpload=false` は設定で固定される方針なので、その配布先では
+  毎回確実に失敗し、毎回確実に漏れる。フレークではなく決定的な累積。
+
+  **何を変えたか**:
+  1. `runTask` を薄いラッパに分け、本体を `runTaskWithStore()` に切り出して `try/finally` で
+     `store.close()` を保証した（180 行を字下げし直さないため。差分が読める）。
+     タスク名の検証は open の前に置き、未知タスク時のエラーメッセージを変えていない
+  2. `src/cli.js` の `cmdStatus` / `cmdSearch` も同じ形だったので `try/finally` にした
+     （短命プロセスなので実害は小さいが同じバグの種類）
+  3. `IndexStore.openHandles`（静的カウンタ）を追加し、fd の open/close を `_openFd()` /
+     `_closeFd()` に集約した。**close() 後に 0 に戻ること**を不変条件として表明できる
+
+  テスト 1 件追加（計 43 件、全件成功）。Windows の ENOTEMPTY は OS 依存の症状なので
+  それ自体はテストにできない。代わりに `openHandles` が元に戻ることを全 OS で検査する。
+  証拠が 0 件だと fd がそもそも開かずテストが空転するため、先に dry-run を走らせて
+  `pack.items.length > 0` を前提確認している。
+  **このテストが本当にバグを捕まえることを、`pipeline.js` だけ修正前に戻して実測確認済み**
+  （期待どおり `not ok 19` で失敗した）。

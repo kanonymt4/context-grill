@@ -21,19 +21,33 @@ import { initEgress, egressSummary } from '../util/egress.js';
  * → モデルや実行回数が変わっても、根拠と検証基準は不変。
  */
 export async function runTask(config, opts) {
+  const task = TASKS[opts.taskId];
+  if (!task) throw new Error(`未知のタスク: ${opts.taskId}（利用可能: ${Object.keys(TASKS).join(', ')}）`);
+
+  // --- 1. 索引を開く -------------------------------------------------
+  // 本体を try/finally の内側に置き、例外パスでも fd を必ず解放する。
+  // ここを成功パスだけの close() に戻すと、MCP サーバー（常駐プロセス）で
+  // run_task が失敗するたびに fd が漏れ、いずれ EMFILE に至る。
+  // 特に allowLlmUpload=false は設定で固定される方針なので、その配布先では
+  // run_task が毎回確実に失敗し、毎回確実に漏れることになる。
+  const store = await IndexStore.open(paths(config).index);
+  try {
+    return await runTaskWithStore(store, task, config, opts);
+  } finally {
+    await store.close();
+  }
+}
+
+async function runTaskWithStore(store, task, config, opts) {
   const {
     taskId, instruction, effort = 'normal', sourceIds = null,
     dryRun = false, save = true, modelOverride = null, extraQueries = [],
   } = opts;
-  const task = TASKS[taskId];
-  if (!task) throw new Error(`未知のタスク: ${taskId}（利用可能: ${Object.keys(TASKS).join(', ')}）`);
   const preset = config.effortPresets[effort] || config.effortPresets.normal;
   const startedAt = new Date().toISOString();
   const p = paths(config);
   initEgress(config);
 
-  // --- 1. 索引を開く -------------------------------------------------
-  const store = await IndexStore.open(p.index);
   const filter = sourceIds ? (m) => sourceIds.includes(m.sourceId) : null;
 
   // --- 2. 決定的クエリ計画 -------------------------------------------
@@ -139,7 +153,6 @@ export async function runTask(config, opts) {
       await fsp.writeFile(path.join(runDir, 'evidence.json'), JSON.stringify(pack, null, 2));
       await fsp.writeFile(path.join(runDir, 'meta.json'), JSON.stringify(meta, null, 2));
     }
-    await store.close();
     return { dryRun: true, runId, runDir, pack, meta, prompt, staticSummary, markdown: renderBundle(run) };
   }
 
@@ -195,6 +208,5 @@ export async function runTask(config, opts) {
       fsp.writeFile(path.join(runDir, 'static.json'), JSON.stringify({ summary: staticSummary, findings }, null, 2)),
     ]);
   }
-  await store.close();
   return { dryRun: false, runId, runDir, markdown, result, pack, meta, verification: lastVerification, staticSummary };
 }

@@ -429,8 +429,12 @@ async function cmdStatus(flags) {
     return 1;
   }
   const store = await IndexStore.open(p.index);
-  const stats = store.stats();
-  await store.close();
+  let stats;
+  try {
+    stats = store.stats();
+  } finally {
+    await store.close();
+  }
   if (flags.json) { process.stdout.write(JSON.stringify(stats, null, 2) + '\n'); return 0; }
   process.stdout.write(`プロジェクト: ${config.project}\n索引: ${stats.chunks} チャンク / ${stats.terms} 語 / ベクトル次元 ${stats.dims || 'なし(BM25のみ)'}\n構築: ${stats.builtAt}\n索引キー: ${stats.indexKey}\n\n`);
   for (const [id, s] of Object.entries(stats.sources)) {
@@ -447,12 +451,16 @@ async function cmdSearch(query, flags) {
   const store = await IndexStore.open(p.index);
   const only = listOf(flags.source);
   const k = Number(flags.top || 20);
-  const results = await hybridSearch(store, {
-    queries: [query], config, k,
-    filter: only ? (m) => only.includes(m.sourceId) : null,
-    kindPriors: {}, sourcePriority: {},
-  });
-  await store.close();
+  let results;
+  try {
+    results = await hybridSearch(store, {
+      queries: [query], config, k,
+      filter: only ? (m) => only.includes(m.sourceId) : null,
+      kindPriors: {}, sourcePriority: {},
+    });
+  } finally {
+    await store.close();
+  }
   // 既定で墨消し（出力をチケットやチャットに貼っても認証情報が漏れないようにする）
   const doRedact = config.security?.redactSecrets !== false && !flags.raw;
   const view = (t) => (doRedact ? redactText(t).text : t);
