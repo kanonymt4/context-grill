@@ -12,6 +12,7 @@ import { initEgress, assertAllowed, guardedFetch, egressPlan } from '../src/util
 import { assertGitSubcommand, assertManagedClone, gitEnv } from '../src/connectors/github.js';
 import { loadConfig } from '../src/config.js';
 import { syncSources, buildIndex } from '../src/index/ingest.js';
+import { IndexStore } from '../src/index/store.js';
 import { runTask } from '../src/llm/pipeline.js';
 import { buildEvidencePack } from '../src/index/pack.js';
 import { scanDocument } from '../src/analysis/rules.js';
@@ -230,6 +231,38 @@ test('allowLlmUpload=false なら ask は送信前にブロックされる', asy
   // dry-run は外部送信が無いので許可される
   const dry = await runTask(config, { taskId: 'spec', instruction: 'x', effort: 'low', dryRun: true, save: false });
   assert.equal(dry.dryRun, true);
+  delete process.env.TEST_LLM_KEY;
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+test('runTask は例外パスでも索引の fd を解放する（fd リーク回帰）', async () => {
+  // 成功パスだけで close() すると、例外で抜けたときに docs.txt の fd が残る。
+  // POSIX では開いたままでも unlink できるため症状が出ず、Windows でだけ
+  // 後始末の rmdir が ENOTEMPTY で失敗していた。OS に依らず検知するため、
+  // IndexStore.openHandles が元の値に戻ることを直接表明する。
+  // 実害は CI だけではない: MCP サーバーは常駐プロセスなので、run_task が
+  // 失敗するたびに fd が累積し、いずれ EMFILE に至る。
+  const dir = await secureFixture({ llm: { provider: 'anthropic', model: 'm', apiKeyEnv: 'TEST_LLM_KEY' }, security: { allowLlmUpload: false } });
+  process.env.TEST_LLM_KEY = 'dummy';
+  const config = await loadConfig(path.join(dir, 'context-grill.config.json'));
+  await syncSources(config, {});
+  await buildIndex(config, { embed: false });
+
+  const baseline = IndexStore.openHandles;
+  const ask = { taskId: 'spec', instruction: 'app.js の main 関数の仕様', effort: 'low', save: false };
+
+  // 前提確認: この入力で実際に本文が読まれる（= docs.txt の fd が開く）こと。
+  // 証拠が 0 件だと fd が開かず、テストがリークを見逃す。
+  const dry = await runTask(config, { ...ask, dryRun: true });
+  assert.ok(dry.pack.items.length > 0, '証拠が取れていないと fd リークを検出できない');
+  assert.equal(IndexStore.openHandles, baseline, '成功パス（dry-run）で fd が残っている');
+
+  await assert.rejects(() => runTask(config, ask), /allowLlmUpload=false/);
+  assert.equal(IndexStore.openHandles, baseline, '例外パスで fd が残っている（Windows では rmdir が ENOTEMPTY で失敗する）');
+
+  await assert.rejects(() => runTask(config, { ...ask, taskId: '存在しないタスク' }), /未知のタスク/);
+  assert.equal(IndexStore.openHandles, baseline, 'タスク名不正の早期 return で fd が残っている');
+
   delete process.env.TEST_LLM_KEY;
   await fsp.rm(dir, { recursive: true, force: true });
 });
