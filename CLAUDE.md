@@ -64,6 +64,9 @@ test/                    unit / e2e / security
 
 - **テスト42件すべて成功**（2026-08-21 に `node --test test/` で確認、Node v20.15.1）
 - 依存パッケージゼロ。`npm install` 不要
+- CI は GitHub Actions で 3 OS（ubuntu / macOS / windows）× 3 Node（20.10 / 22 / 24）の 9 ジョブ
+  （`.github/workflows/test.yml`）。依存パッケージがないため `npm install` ステップ自体が存在しない。
+  テストに加えて `--help` の起動確認と `init` の生成物確認まで行う
 - ~~`schema/` は空ディレクトリ~~ 2026-08-10 削除済み（経緯不明のまま package.json の files から除去。理由は下記）
 
 ## 注意点
@@ -74,6 +77,39 @@ test/                    unit / e2e / security
 - `test/security.test.js` にはダミートークン（`ghp_ABCDEF…` 等）が意図的に含まれる。
   秘密情報検出のテストなので、スキャナが反応しても正常
 - `.context-grill/` はインデックスのキャッシュ置き場。git 管理しない
+
+## 開発フロー / ブランチ戦略（2026-08-22 決定）
+
+**GitHub Flow + タグリリース。** git-flow は採らない（実質1人開発で develop に滞留する
+変更がなく、管理コストだけが残るため）。
+
+- `main` は常にリリース可能な状態を保つ。作業は `main` から短命ブランチを切る
+- ブランチ名は `feat/` `fix/` `docs/` `chore/` + 内容（例: `fix/bool-flags-parsing`）
+- コミットは Conventional Commits。本文は「なぜ壊れていたか」と「何を変えたか」を分けて書く
+- PR は1人でも立てる（差分を俯瞰する場になる）。**Squash merge** で `main` へ入れ、
+  `main` の履歴を「1テーマ＝1コミット」に保つ。`git log v0.1.0..v0.2.0 --oneline` が
+  そのまま配布先向けの変更点一覧になる
+- リリースは `npm version <patch|minor>` → `git push --follow-tags` → `npm pack`。
+  0.x の間は「設定スキーマ・CLI 互換を壊す変更＝minor / それ以外＝patch」
+- `release/x.y` ブランチは**必要になるまで作らない**。配布先が複数バージョンに分かれ、
+  旧系統へのバックポートが必要になった時点で初めてタグから切る
+
+### main の保護はサーバ側ではなくローカルで行っている
+
+GitHub のルールセットは**無料プラン × プライベートリポジトリでは適用されない**。
+UI 上は Active に見えるが force push も削除も素通りする。公式ドキュメントは Pro なら
+利用可と書いているが、実際には Pro でも Team への移行を促す警告が出るという報告があり、
+記述と挙動が食い違っている（課金しても解決する保証がない）。
+
+代替として `.githooks/pre-push` を置き、`main` の削除と non-fast-forward push を
+クライアント側で拒否している。意図的に破るときは `git push --no-verify`。
+
+- **`git config core.hooksPath .githooks` は `.git/config` に入るためコミットされない。**
+  別マシンで clone したら再実行が必要
+- リモートの `main` がローカルに無いと祖先判定ができないため、その場合は通過させず
+  `git fetch` を促して止める（判定不能を「安全」と誤認しないこと）
+- public 化すればルールセットは無料で有効になる。その後も hook は残してよい
+  （サーバに弾かれる前にローカルで止まるので往復が減る）
 
 ## コネクタ拡張の調査（2026-08-19 / 実装はまだ）
 
@@ -146,6 +182,19 @@ Confluence の HTML 変換より簡単。
   - ~~**要修正候補**: Voyage分岐だけ`data[].index`でソートしていない（openai/openai-compatはソートあり）。レスポンス順を無条件に信頼している~~ 2026-08-21 修正
   - ~~**要修正候補**: 埋め込み取得が失敗すると`EmbedCache.close()`未到達のため、途中まで成功した分も含めて次回`sync`時にゼロからやり直しになる（部分キャッシュが永続化されない）~~ 2026-08-21 修正
 - **未対応（Voyage 実運用の残課題）**: `embedChunks` のリトライは `attempts:4` / `baseMs:600` が固定で、最大待機は約 4.2 秒。Voyage 無料枠（3RPM）のような分単位のレート制限には届かないため、`sync` の失敗自体は解消していない。設定可能にするかはコストと相談
+- **未対応（Windows CI の残件）**: `windows-latest` の一部 Node 版で、`test/security.test.js` の
+  「allowLlmUpload=false なら ask は送信前にブロックされる」の後始末
+  （`fsp.rm(dir, { recursive: true, force: true })`）が `ENOTEMPTY` で失敗する。
+  ubuntu / macOS では再現しない。
+  **仮説**: このテストは `runTask` が送信前に例外を投げるため、`IndexStore` が遅延オープンした
+  読み取り fd（`src/index/store.js` の `_fd` / `_vfd`。`close()` でのみ解放される）が
+  解放されないまま残り、ハンドルを掴んだままのディレクトリを Windows が削除できない。
+  POSIX は開いているファイルでも unlink できるので、OS 差として辻褄は合う。
+  **切り分け手順**: (1) 例外パスで `store.close()` に到達しているかを確認する →
+  (2) 到達していなければ `runTask` 側を `try/finally` で囲う（**プロダクトコードの fd リーク修正**）→
+  (3) 到達しているならテスト側の後始末の問題として `rm` に `maxRetries` を付ける。
+  **(2) と (3) は原因も影響範囲もまったく違う。** リトライで黙らせる前に必ず (1) を確認すること
+  （(2) が真なら、CI だけでなく実運用でも ask 失敗のたびに fd が漏れていることになる）
 
 ## 履歴
 
@@ -186,3 +235,13 @@ Confluence の HTML 変換より簡単。
      `openai-compat`（Ollama 等）は API 側に次元数を指定できないため、既定の 512 のまま nomic-embed-text（768）を
      使うとこれを踏む。README 7 章にも記載。
   テスト 2 件追加（計 42 件、全件成功）。
+- 2026-08-22 ブランチ戦略を GitHub Flow + タグリリースに決定し、上記の通り記録。あわせて
+  `.githooks/pre-push` を追加し（`main` の削除と履歴書き換えを拒否）、`core.hooksPath` を
+  `.githooks` に設定した。hook に直接 stdin を流す形で4パターン（削除 / 通常の fast-forward /
+  non-fast-forward / 対象外ブランチ）の終了コードを確認済み。
+  GitHub のルールセットが無料プラン × プライベートリポジトリでは適用されないと判明したため、
+  その代替という位置づけ（詳細は「開発フロー / ブランチ戦略」）。
+  副産物として次の2点を確認した。`.gitignore` は既に必要十分で追加不要（`.env` `*.tgz`
+  `.context-grill/` `node_modules/` `*.log` `.DS_Store` を網羅）。`.env` は git 履歴に一度も
+  入っていない（`git log --all -- .env` が空）。後者は public 化の前提条件が1つ満たされていることを意味する。
+  この時点でテストは 42 件全成功（ローカル、Node v20）。
