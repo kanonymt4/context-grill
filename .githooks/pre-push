@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# pre-push: main ブランチへの破壊的な push を拒否する。
+#
+# GitHub の無料プラン × プライベートリポジトリではルールセットが
+# 適用されないため、その代替としてローカル側で最低限の防御を行う。
+# public 化してサーバ側ルールセットが有効になった後も、無駄な往復を
+# 減らせるので残しておいてよい。
+#
+# 意図的に破りたい場合は `git push --no-verify` を使う。
+
+protected="main"
+zero="0000000000000000000000000000000000000000"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+	[ "$remote_ref" = "refs/heads/$protected" ] || continue
+
+	# ブランチ削除 (git push origin :main / --delete) を拒否
+	if [ "$local_sha" = "$zero" ]; then
+		echo "pre-push: $protected の削除を拒否しました" >&2
+		exit 1
+	fi
+
+	# 新規作成時は remote_sha が zero。比較不要。
+	[ "$remote_sha" != "$zero" ] || continue
+
+	# remote_sha がローカルに無い場合は判定できないので fetch を促す
+	if ! git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+		echo "pre-push: リモートの $protected ($remote_sha) がローカルに存在しません" >&2
+		echo "          git fetch origin $protected を実行してから再試行してください" >&2
+		exit 1
+	fi
+
+	# non-fast-forward (履歴の書き換え) を拒否
+	if ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
+		echo "pre-push: $protected への non-fast-forward push を拒否しました" >&2
+		echo "          履歴を書き換えています。意図的なら --no-verify を付けてください" >&2
+		exit 1
+	fi
+done
+
+exit 0
