@@ -11,6 +11,9 @@ import { syncSources, buildIndex } from '../src/index/ingest.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+/** probe が IndexStore.open() 1 回につき stderr に出す印。 */
+const OPEN_MARK = '__CONTEXT_GRILL_OPEN__';
+
 /**
  * MCP サーバーを子プロセスで起動する。
  *
@@ -21,12 +24,19 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
  */
 async function writeProbe(dir, configPath) {
   const probe = path.join(dir, 'probe.mjs');
+  // 終了処理に依存せず、open() のたびに stderr へ印を出す。
+  //
+  // 最初は SIGTERM ハンドラで最後に集計値を出していたが、**Windows には SIGTERM が無く**、
+  // child.kill('SIGTERM') はハンドラを走らせずにプロセスを強制終了するため、印が出ないまま
+  // 終わっていた（windows-latest の 3 ジョブだけが「実際: null 回」で落ちた）。
+  // 番兵行を stdin で送る案も駄目だった。**stdin は最初の 'data' リスナが付いた時点で流れ始める**ため、
+  // probe 側でリスナを付けると、server が自分のリスナを付ける前に最初のチャンクを取りこぼす。
+  // 出力側だけで完結させるのが唯一 OS にもタイミングにも依存しない形。
   await fsp.writeFile(probe, `
 import { IndexStore } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'src/index/store.js')).href)};
 const orig = IndexStore.open.bind(IndexStore);
 let opens = 0;
-IndexStore.open = async (d) => { opens++; return orig(d); };
-process.on('SIGTERM', () => { process.stderr.write('\\nOPENS=' + opens + '\\n'); process.exit(0); });
+IndexStore.open = async (d) => { opens++; process.stderr.write('\\n' + ${JSON.stringify(OPEN_MARK)} + '\\n'); return orig(d); };
 const { startMcpServer } = await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'src/mcp/server.js')).href)});
 startMcpServer({ configPath: ${JSON.stringify(configPath)} });
 `);
@@ -38,6 +48,7 @@ function rpc(probe, lines, expected) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [probe], { stdio: ['pipe', 'pipe', 'pipe'] });
     const responses = [];
+    let done = false;
     let out = '';
     let errText = '';
     const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('タイムアウト: ' + out + errText)); }, 20000);
@@ -50,13 +61,18 @@ function rpc(probe, lines, expected) {
         if (!line) continue;
         try { responses.push(JSON.parse(line)); } catch { /* ignore */ }
       }
-      if (responses.length >= expected) child.kill('SIGTERM');
+      // 応答が揃ったら停止する。SIGKILL はハンドラを介さないので Windows でも同じ挙動になる。
+      // stderr が届き切るよう少しだけ待つ（印は応答より前に出ているので取りこぼしはない）。
+      if (responses.length >= expected && !done) {
+        done = true;
+        setTimeout(() => child.kill('SIGKILL'), 100);
+      }
     });
     child.stderr.on('data', (c) => { errText += c; });
     child.on('close', () => {
       clearTimeout(timer);
-      const m = errText.match(/OPENS=(\d+)/);
-      resolve({ responses, opens: m ? Number(m[1]) : null, stderr: errText });
+      const opens = (errText.match(new RegExp(OPEN_MARK, 'g')) || []).length;
+      resolve({ responses, opens, stderr: errText });
     });
     child.on('error', reject);
     // 1 チャンクにまとめて送る（server.js の stdin 'data' ハンドラは await されない）
