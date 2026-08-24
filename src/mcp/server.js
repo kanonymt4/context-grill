@@ -9,7 +9,7 @@ import { allDocs, syncSources, buildIndex } from '../index/ingest.js';
 import { scanAll, summarize, projectFacts, extractEndpoints } from '../analysis/static.js';
 import { TASKS, SYSTEM_CONTRACT, envelopeSchema, planQueries, taskPromptHash, listTasks } from '../tasks/index.js';
 import { verify } from '../verify/gate.js';
-import { runTaskWithStore } from '../llm/pipeline.js';
+import { runTaskWithStore, resolveTask } from '../llm/pipeline.js';
 import { shortHash } from '../util/misc.js';
 import { initEgress, egressPlan } from '../util/egress.js';
 import { redactText } from '../util/redact.js';
@@ -141,38 +141,91 @@ export async function startMcpServer({ configPath } = {}) {
   // 実行中の読み取りは一貫した内容を見る。
   // （Windows で開いているファイルへの rename がどう振る舞うかは未検証）
   let store = null;
+  let opening = null; // IndexStore.open() の実行中 promise
   const inUse = new Map(); // IndexStore -> 参照数
 
-  const getStore = async () => {
-    if (!store) store = await IndexStore.open(p.index);
-    return store;
+  const openStore = async () => {
+    if (store) return store;
+    // `if (!store) store = await open()` と書くと、null チェックと代入の間に await が挟まる。
+    // handle(msg) は await されないので同一チャンクの複数リクエストがここに同時到達し、
+    // 双方が store === null を見て open() を二重に走らせる（索引ファイルの無駄な再読み込み）。
+    // そこで「開く処理そのもの」を共有し、判定と代入の間に await 境界を作らない。
+    if (!opening) opening = IndexStore.open(p.index).finally(() => { opening = null; });
+    const s = await opening; // 失敗時は opening が解放されるので次の呼び出しで再試行される
+    store = s;
+    return s;
   };
 
-  /** 索引を読む処理は必ずこれで包む。使用中は sync に閉じられない。 */
-  const withStore = async (fn) => {
-    const s = await getStore();
-    inUse.set(s, (inUse.get(s) || 0) + 1);
+  const release = async (s) => {
+    const n = (inUse.get(s) || 1) - 1;
+    if (n > 0) {
+      inUse.set(s, n);
+      return;
+    }
+    inUse.delete(s);
+    // 既に切り離されている（sync が走った）なら、最後の利用者である自分が閉じる
+    if (s !== store) await s.close();
+  };
+
+  /**
+   * リクエスト 1 件を、ストアの参照を確保した状態で実行する。
+   *
+   * ストアの取得口をリクエストスコープの getStore に限定するのが要点。
+   * 「索引を読むツール」の手動 allowlist を置くと、将来 getStore を使うツールを
+   * 追加したときに登録漏れが起き、参照カウントの外で fd 経由の読み取りが走る
+   * （sync と競合して、rename 後の docs.txt から見当違いのバイト列を返す）。
+   * ここで渡した getStore を呼んだ時点で必ず参照が確保されるので、登録漏れが起き得ない。
+   *
+   * 取得は遅延なので、索引未作成時に getStore を呼ばずに案内を返すツール
+   * （context_grill_status）もそのまま書ける。
+   */
+  const runRequest = async (fn) => {
+    let held = null; // ストア取得の promise（リクエスト内で 1 回だけ確保する）
+    const getStore = () => {
+      if (!held) held = openStore().then((s) => { inUse.set(s, (inUse.get(s) || 0) + 1); return s; });
+      return held;
+    };
     try {
-      return await fn(s);
+      return await fn(getStore);
     } finally {
-      const n = (inUse.get(s) || 1) - 1;
-      if (n > 0) {
-        inUse.set(s, n);
-      } else {
-        inUse.delete(s);
-        // 既に切り離されている（sync が走った）なら、最後の利用者である自分が閉じる
-        if (s !== store) await s.close();
+      if (held) {
+        const s = await held.catch(() => null); // 取得に失敗したなら解放するものは無い
+        if (s) await release(s);
       }
     }
   };
 
-  /** 索引を作り直した後に呼ぶ。使用中なら閉じずに切り離すだけにする。 */
+  /**
+   * ストアを取得する前に走らせる引数検証。
+   *
+   * ツール本体より前に置くことで、ストア取得より先に必ず走ることを保証する。
+   * 逆順にすると、索引が無い環境でタスク名を間違えたときに「索引がありません」という
+   * 無関係なエラーが先に出る。CLI 側の runTask() は「タスク名検証 → 索引オープン」の
+   * 順を守っているので、そこと挙動を揃える。
+   */
+  const preflight = (name, args) => {
+    if (name === 'context_grill_run_task' || name === 'context_grill_evidence_pack') {
+      resolveTask(args.task || 'spec');
+    }
+  };
+
+  /**
+   * 索引を作り直した後に呼ぶ。使用中なら閉じずに切り離すだけにする。
+   *
+   * 既知の隙（未対応）: openStore() の実行中に sync が入ると、store = null にした後で
+   * in-flight の open() が解決し、古いストアが store に代入され得る。そのストアは
+   * 「切り離されていない」と判定されるため、次の invalidateStore() まで居座る。
+   * ただし fd は rename 前の inode を指し続けるので、meta のオフセットと docs.txt の
+   * 内容がずれることはない。実害は「一世代古い証拠を返し得る」までで、見当違いの
+   * バイト列は返らない。直すなら索引に世代番号を持たせ、世代が変わっていたら
+   * openStore() 側で代入を捨てる形になる。
+   */
   const invalidateStore = async () => {
     const old = store;
     store = null;
     if (!old) return;
     if (!inUse.has(old)) await old.close();
-    // 使用中の場合は withStore の finally 側が閉じる
+    // 使用中の場合は runRequest の finally 側が閉じる
   };
 
   const send = (msg) => process.stdout.write(JSON.stringify(msg) + '\n');
@@ -183,20 +236,11 @@ export async function startMcpServer({ configPath } = {}) {
   const textResult = (obj) => ({ content: [{ type: 'text', text: typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2) }] });
 
   /**
-   * 索引ファイルを fd 経由で読むツール。これらは withStore で包んで呼ぶ。
-   *
-   * context_grill_status は含めない。理由は 2 つある。
-   * - stats() は this.meta / this.manifest しか見ないので fd を使わない
-   * - status は索引未作成時に getStore() を呼ばずに案内を返す。withStore で包むと
-   *   先に IndexStore.open() が走って throw し、この分岐が壊れる
+   * ツールの実体。索引が要るものは引数の getStore() で取得する。
+   * getStore() は runRequest がリクエストごとに用意し、呼んだ時点で参照を確保するので、
+   * 「どのツールが索引を読むか」を別途列挙して管理する必要はない。
    */
-  const STORE_TOOLS = new Set([
-    'context_grill_search',
-    'context_grill_evidence_pack',
-    'context_grill_run_task',
-  ]);
-
-  async function callTool(name, args = {}) {
+  async function callTool(name, args = {}, getStore) {
     switch (name) {
       case 'context_grill_status': {
         const exists = IndexStore.exists(p.index);
@@ -373,11 +417,10 @@ export async function startMcpServer({ configPath } = {}) {
       if (method === 'tools/call') {
         const name = params?.name;
         const args = params?.arguments || {};
-        // 索引を読むツールは参照を確保してから実行する。実行中に sync が来ても
+        preflight(name, args);
+        // ストアを使ったなら参照が確保された状態で実行される。実行中に sync が来ても
         // ストアは切り離されるだけで閉じられない。
-        const result = STORE_TOOLS.has(name)
-          ? await withStore(() => callTool(name, args))
-          : await callTool(name, args);
+        const result = await runRequest((getStore) => callTool(name, args, getStore));
         return ok(id, result);
       }
       if (id !== undefined) err(id, -32601, `Method not found: ${method}`);

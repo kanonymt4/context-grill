@@ -15,7 +15,7 @@ import { shortHash } from '../util/misc.js';
 import { log } from '../util/log.js';
 import { initEgress, egressSummary } from '../util/egress.js';
 
-function resolveTask(taskId) {
+export function resolveTask(taskId) {
   const task = TASKS[taskId];
   if (!task) throw new Error(`未知のタスク: ${taskId}（利用可能: ${Object.keys(TASKS).join(', ')}）`);
   return task;

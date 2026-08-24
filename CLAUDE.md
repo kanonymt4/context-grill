@@ -62,7 +62,7 @@ test/                    unit / e2e / security
 
 ## 現状
 
-- **テスト43件すべて成功**（2026-08-22 に `npm test` で確認、Node v20）
+- **テスト48件すべて成功**（2026-08-24 に `npm test` で確認、Node v20）
 - 依存パッケージゼロ。`npm install` 不要
 - CI は GitHub Actions で 3 OS（ubuntu / macOS / windows）× 3 Node（20.10 / 22 / 24）の 9 ジョブ
   （`.github/workflows/test.yml`）。依存パッケージがないため `npm install` ステップ自体が存在しない。
@@ -295,6 +295,10 @@ Confluence の HTML 変換より簡単。
   `this.meta` / `this.manifest` しか見ず fd を使わない上に、包むと索引未作成時に
   `IndexStore.open()` が先に throw して案内の分岐が壊れるため。
 
+  > **この段落の実装は 2026-08-24 に置き換え済み。** `withStore(fn)` と手動 allowlist
+  > （`STORE_TOOLS`）は削除され、`runRequest(fn)` に一本化された。`context_grill_status` の
+  > 特例扱いも不要になっている。現在の形は下の 2026-08-24 のエントリを参照。
+
   テスト 1 件追加（計 44 件）。**最初に書いたテストは無効だった。** `close()` は `_fd` を null に
   戻すだけで次の読み取りが開き直すため、「使えるか」や `openHandles` では所有権違反を
   検知できない。`IndexStore.openCount`（**減らない**累計オープン回数）を追加し、
@@ -304,3 +308,48 @@ Confluence の HTML 変換より簡単。
   実行されておらず、そもそも注入が起きていなかったのに「遅延オープンのせいで検知不能」と
   誤った結論を出しかけた。**注入後に実際の差分と構文チェックを確認すること。**
   `sed` で確実に注入し直したところ、テストは期待どおり `not ok 20` で失敗した。
+
+- 2026-08-24 **MCP サーバーのレビュー指摘 3 件を検証し、修正**。
+
+  外部レビューで挙がった 3 件を実コードで確認し、いずれも妥当と判断した上で対応した。
+  **ただし finding 1 の原因の帰属は誤っていた。** レビューは「`withStore()` ラップが
+  MCP 側だけ順序を壊した」としていたが、`withStore` を外しても直らない。
+  `callTool` の `context_grill_run_task` ケース自体が `await getStore()` を
+  `runTaskWithStore()` より先に呼んでおり、順序の崩れは共有ストア方式にした時点で
+  入っていた。**レビューの指摘が正しくても、原因の帰属まで正しいとは限らない。**
+
+  **何を変えたか**:
+  1. `resolveTask()` を `pipeline.js` から export し、ディスパッチ側の `preflight(name, args)`
+     でストア取得より前に走らせる。CLI 側 `runTask()` の「タスク名検証 → 索引オープン」の
+     順序と揃った。`context_grill_evidence_pack` も `TASKS[taskId]` 直引きで
+     `label` の TypeError になっていたので同じ経路に載せた
+  2. `getStore()` の check-then-act を解消。`if (!store) store = await open()` は null チェックと
+     代入の間に await が挟まるため、`handle(msg)` が await されない以上、同一 stdin チャンクの
+     複数リクエストが双方 `store === null` を見て open() を二重に走らせる。「開く処理そのもの」
+     （in-flight promise）を共有する形に変え、判定と代入の間に await 境界を作らないようにした。
+     致命的破損はなく被害は索引ファイルの無駄な再読み込みだけだが、テストで再現できる
+  3. 手動 allowlist `STORE_TOOLS` を廃止し、`runRequest(fn)` に一本化。参照カウントの確保を
+     リクエストスコープの `getStore` の内側に移したので、**新しいツールを足しても登録漏れが
+     起き得ない**（呼んだ時点で必ず参照が確保される）。取得が遅延になったことで
+     `context_grill_status` の特例扱いも消えた
+
+  **既知の隙（未対応）**: `openStore()` の実行中に `sync` が入ると、`store = null` の後に
+  in-flight の open() が解決して古いストアが `store` に代入され得る。fd は rename 前の
+  inode を指し続けるので見当違いのバイト列は返らず、実害は「一世代古い証拠を返し得る」
+  までに留まる。直すなら索引に世代番号を持たせる。`invalidateStore()` の doc コメントにも
+  同じ内容を残した。
+
+  テスト 4 件追加（計 48 件）。MCP サーバーを子プロセスで起動し stdio に JSON-RPC を流す
+  ハーネスを `test/mcp.test.js` に新設した。並行性の再現には **2 リクエストを 1 回の
+  `stdin.write` で送る**必要がある（`handle(msg)` が await されない条件そのもの）。
+  `IndexStore.open()` の呼び出し回数は既存の `openCount` / `openHandles` では数えられない
+  ことに注意。**あれは fd の開閉カウンタで、`open()` 自体は manifest / docs.meta / df / lens の
+  JSON を読むだけで fd を使わない。** そのため `IndexStore.open` を包んで数える probe
+  スクリプトを一時生成して起動している。
+
+  **finding 3 だけは実行時テストにできなかった。** 失敗モードが「将来ツールを追加したとき
+  登録を忘れる」であり、現時点で登録漏れしているツールが存在しないため。
+  （`context_grill_status` は `getStore()` 直呼びだが、取得と `stats()` の間に await が無く
+  `stats()` は fd も触らないので実際には壊れない。）代わりに「登録漏れが起こり得ない構造で
+  あること」をソース文字列で表明する **lint 相当の構造ガード** にした。**この 4 件目が落ちた
+  ときは、まず実装ではなくテストの正規表現を疑うこと。**

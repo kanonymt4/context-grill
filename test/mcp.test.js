@@ -1,0 +1,135 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import os from 'node:os';
+import path from 'node:path';
+import fsp from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+import { loadConfig } from '../src/config.js';
+import { syncSources, buildIndex } from '../src/index/ingest.js';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * MCP サーバーを子プロセスで起動する。
+ *
+ * IndexStore.open() の呼び出し回数を数えたいので bin/ ではなく専用の probe を使う。
+ * openCount / openHandles は fd の開閉を数えるカウンタで、IndexStore.open() 自体
+ * （manifest / docs.meta / df / lens の JSON 読み込み）は fd を使わないため、
+ * 既存カウンタでは二重オープンを検知できない。
+ */
+async function writeProbe(dir, configPath) {
+  const probe = path.join(dir, 'probe.mjs');
+  await fsp.writeFile(probe, `
+import { IndexStore } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'src/index/store.js')).href)};
+const orig = IndexStore.open.bind(IndexStore);
+let opens = 0;
+IndexStore.open = async (d) => { opens++; return orig(d); };
+process.on('SIGTERM', () => { process.stderr.write('\\nOPENS=' + opens + '\\n'); process.exit(0); });
+const { startMcpServer } = await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'src/mcp/server.js')).href)});
+startMcpServer({ configPath: ${JSON.stringify(configPath)} });
+`);
+  return probe;
+}
+
+/** リクエスト行をまとめて 1 回の write で送り、指定件数の応答を待つ。 */
+function rpc(probe, lines, expected) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [probe], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const responses = [];
+    let out = '';
+    let errText = '';
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('タイムアウト: ' + out + errText)); }, 20000);
+    child.stdout.on('data', (c) => {
+      out += c;
+      let nl;
+      while ((nl = out.indexOf('\n')) >= 0) {
+        const line = out.slice(0, nl).trim();
+        out = out.slice(nl + 1);
+        if (!line) continue;
+        try { responses.push(JSON.parse(line)); } catch { /* ignore */ }
+      }
+      if (responses.length >= expected) child.kill('SIGTERM');
+    });
+    child.stderr.on('data', (c) => { errText += c; });
+    child.on('close', () => {
+      clearTimeout(timer);
+      const m = errText.match(/OPENS=(\d+)/);
+      resolve({ responses, opens: m ? Number(m[1]) : null, stderr: errText });
+    });
+    child.on('error', reject);
+    // 1 チャンクにまとめて送る（server.js の stdin 'data' ハンドラは await されない）
+    child.stdin.write(lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  });
+}
+
+async function fixture({ build }) {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-mcp-'));
+  await fsp.mkdir(path.join(dir, 'src'), { recursive: true });
+  await fsp.writeFile(path.join(dir, 'src', 'payment.js'),
+    'const MAX_RETRY = 3;\nfunction refundPayment(id) { return id; }\nmodule.exports = { refundPayment, MAX_RETRY };\n');
+  const configPath = path.join(dir, 'context-grill.config.json');
+  await fsp.writeFile(configPath, JSON.stringify({
+    project: 'mcp-test',
+    sources: [{ id: 'repo', type: 'local', path: dir, include: ['src/**'] }],
+    llm: { provider: 'dry', model: 'dry' },
+  }));
+  if (build) {
+    const config = await loadConfig(configPath);
+    await syncSources(config, {});
+    await buildIndex(config, { embed: false });
+  }
+  return { dir, configPath };
+}
+
+const call = (id, name, args) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });
+
+test('MCP: 索引が無くても不正なタスク名は「未知のタスク」を返す（索引エラーより先に検証する）', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const { responses } = await rpc(probe, [call(1, 'context_grill_run_task', { instruction: 'x', task: 'nope' })], 1);
+  const text = responses[0]?.result?.content?.[0]?.text ?? JSON.stringify(responses[0]);
+  assert.match(text, /未知のタスク/, `索引の有無より先にタスク名を検証すべき。実際の応答: ${text}`);
+});
+
+test('MCP: 同一チャンクの並行リクエストで IndexStore.open() が二重に走らない', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const { responses, opens } = await rpc(probe, [
+    call(1, 'context_grill_search', { query: 'refund' }),
+    call(2, 'context_grill_search', { query: 'retry' }),
+  ], 2);
+  assert.equal(responses.length, 2, '2 件とも応答が返る');
+  assert.equal(opens, 1, `キャッシュされたストアは 1 回だけ開かれるべき（実際: ${opens} 回）`);
+});
+
+test('MCP: evidence_pack も不正なタスク名で「未知のタスク」を返す', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const { responses } = await rpc(probe, [call(1, 'context_grill_evidence_pack', { instruction: 'x', task: 'nope' })], 1);
+  const text = responses[0]?.result?.content?.[0]?.text ?? JSON.stringify(responses[0]);
+  assert.match(text, /未知のタスク/, `TASKS を直接引かず resolveTask で検証すべき。実際の応答: ${text}`);
+});
+
+/**
+ * finding 3 の構造ガード。
+ *
+ * 「将来 getStore() を使うツールを追加したとき allowlist への登録を忘れる」という失敗は、
+ * 現在のツール群には該当例が無いため実行時テストでは再現できない（登録漏れしている
+ * ツールが今は存在しない）。そこで登録漏れが起こり得ない構造になっていること自体を
+ * 表明する。ストア取得はリクエストスコープの getStore を引数で受け取る形に限定し、
+ * 手動の allowlist を残さない。
+ *
+ * 注意: この表明はソース文字列に依存する。callTool のシグネチャや getStore の定義位置を
+ * 変えたら、ここの正規表現も一緒に更新すること。**このテストが落ちたときは、まず実装では
+ * なくこのテストを疑う。**
+ */
+test('MCP: ストア保護が手動 allowlist ではなく構造で担保されている', async () => {
+  const src = await fsp.readFile(path.join(ROOT, 'src/mcp/server.js'), 'utf8');
+  assert.ok(!/STORE_TOOLS/.test(src), '手動 allowlist（STORE_TOOLS）が残っている');
+  assert.match(src, /async function callTool\(name, args = \{\}, getStore\)/,
+    'callTool はリクエストスコープの getStore を引数で受け取るべき');
+  assert.ok(!/^  const getStore = /m.test(src),
+    '参照カウントの外側から呼べるモジュールスコープの getStore が残っている');
+});
