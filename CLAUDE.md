@@ -62,7 +62,7 @@ test/                    unit / e2e / security
 
 ## 現状
 
-- **テスト43件すべて成功**（2026-08-22 に `npm test` で確認、Node v20）
+- **テスト48件すべて成功**（2026-08-24 に `npm test` で確認、Node v20）
 - 依存パッケージゼロ。`npm install` 不要
 - CI は GitHub Actions で 3 OS（ubuntu / macOS / windows）× 3 Node（20.10 / 22 / 24）の 9 ジョブ
   （`.github/workflows/test.yml`）。依存パッケージがないため `npm install` ステップ自体が存在しない。
@@ -186,11 +186,7 @@ Confluence の HTML 変換より簡単。
   「allowLlmUpload=false なら ask は送信前にブロックされる」の後始末が `ENOTEMPTY` で失敗する~~
   **2026-08-22 修正。切り分け手順の (2)、つまりプロダクトコードの fd リークだった。**
   `rm` に `maxRetries` を付けて黙らせなくて正解だった件（詳細は履歴）。
-- **未対応（MCP サーバーの二重オープン）**: `src/mcp/server.js` は `getStore()` でストアを
-  1 つキャッシュして使い回すが、`context_grill_run_task` が呼ぶ `runTask()` は毎回自前で
-  別の `IndexStore` を開く。fd リークは修正済みなので実害はないが、常駐プロセスで
-  毎回索引メタを読み直すのは無駄。`runTask` に store を注入できるようにするのが筋だが、
-  ライフサイクルの所有者が変わるので別テーマとして分離した
+- ~~**未対応（MCP サーバーの二重オープン）**~~ 2026-08-22 修正（詳細は履歴）。
 
 ## 履歴
 
@@ -271,3 +267,107 @@ Confluence の HTML 変換より簡単。
   `pack.items.length > 0` を前提確認している。
   **このテストが本当にバグを捕まえることを、`pipeline.js` だけ修正前に戻して実測確認済み**
   （期待どおり `not ok 19` で失敗した）。
+- 2026-08-22 **MCP サーバーの二重オープンと、sync の競合を修正**。
+
+  `context_grill_run_task` だけが `runTask()` 経由で自前の `IndexStore` を開いていた。
+  `pipeline.js` から `runTaskWithStore(store, config, opts)` を公開し、server 側は
+  キャッシュ済みストアを渡す。**ストアの所有権は呼び出し側にあり、`runTaskWithStore` は
+  `close()` を呼ばない。** タスク名の検証は `resolveTask()` に切り出して共有し、
+  索引を開く前に検証する順序を維持している。
+
+  **付随する競合を先に潰した。** `handle(msg)` は await されておらずツール呼び出しは並行し得るのに、
+  `context_grill_sync` は索引再構築後にストアを閉じていた（`search` / `evidence_pack` にとっては
+  既存のバグ。run_task は独立ストアだったため偶然守られていた）。今回の変更は
+  run_task を共有ストア側に移すため、先に直さないと最長の処理を競合にさらすことになる。
+
+  **壊れ方を一度誤って記録したので正しい形を残す。** 「読み取り中の fd が閉じられて
+  エラーになる」のではない。`textOf` は `_fd` が null なら黙って開き直すし、JS は単一
+  スレッドで null チェックと `readSync` の間に await が無いので EBADF にはならない。
+  実際の被害はもっと悪い。`docs.txt` は `docs.txt.tmp` から rename で置き換えられるため
+  （store.js 30 / 54 行）、close 後の開き直しは**新しいファイル**を指す一方、`this.meta` の
+  オフセットは**古いまま**になる。結果、エラーも出さずに見当違いのバイト列を証拠として返す。
+  参照カウントで fd を開いたまま保てば、POSIX では rename されても古い inode を参照し続ける。
+  （Windows で開いているファイルへの rename がどう振る舞うかは**未検証**）
+
+  実装は `withStore(fn)` （参照を確保して実行）と `invalidateStore()` （使用中なら閉じずに
+  切り離し、最後の利用者に閉じるのを委ねる）の 2 つ。ディスパッチ側で包む形にし、
+  ケース本体の字下げは変えていない。`context_grill_status` は対象外にした。`stats()` は
+  `this.meta` / `this.manifest` しか見ず fd を使わない上に、包むと索引未作成時に
+  `IndexStore.open()` が先に throw して案内の分岐が壊れるため。
+
+  > **この段落の実装は 2026-08-24 に置き換え済み。** `withStore(fn)` と手動 allowlist
+  > （`STORE_TOOLS`）は削除され、`runRequest(fn)` に一本化された。`context_grill_status` の
+  > 特例扱いも不要になっている。現在の形は下の 2026-08-24 のエントリを参照。
+
+  テスト 1 件追加（計 44 件）。**最初に書いたテストは無効だった。** `close()` は `_fd` を null に
+  戻すだけで次の読み取りが開き直すため、「使えるか」や `openHandles` では所有権違反を
+  検知できない。`IndexStore.openCount`（**減らない**累計オープン回数）を追加し、
+  呼び出し前後で増えないことを表明する形に作り直した。
+
+  **実験の前提を検証せずに結論を出しかけた。** 最初の注入実験は `python3` のヒアドキュメントが
+  実行されておらず、そもそも注入が起きていなかったのに「遅延オープンのせいで検知不能」と
+  誤った結論を出しかけた。**注入後に実際の差分と構文チェックを確認すること。**
+  `sed` で確実に注入し直したところ、テストは期待どおり `not ok 20` で失敗した。
+
+- 2026-08-24 **MCP サーバーのレビュー指摘 3 件を検証し、修正**。
+
+  外部レビューで挙がった 3 件を実コードで確認し、いずれも妥当と判断した上で対応した。
+  **ただし finding 1 の原因の帰属は誤っていた。** レビューは「`withStore()` ラップが
+  MCP 側だけ順序を壊した」としていたが、`withStore` を外しても直らない。
+  `callTool` の `context_grill_run_task` ケース自体が `await getStore()` を
+  `runTaskWithStore()` より先に呼んでおり、順序の崩れは共有ストア方式にした時点で
+  入っていた。**レビューの指摘が正しくても、原因の帰属まで正しいとは限らない。**
+
+  **何を変えたか**:
+  1. `resolveTask()` を `pipeline.js` から export し、ディスパッチ側の `preflight(name, args)`
+     でストア取得より前に走らせる。CLI 側 `runTask()` の「タスク名検証 → 索引オープン」の
+     順序と揃った。`context_grill_evidence_pack` も `TASKS[taskId]` 直引きで
+     `label` の TypeError になっていたので同じ経路に載せた
+  2. `getStore()` の check-then-act を解消。`if (!store) store = await open()` は null チェックと
+     代入の間に await が挟まるため、`handle(msg)` が await されない以上、同一 stdin チャンクの
+     複数リクエストが双方 `store === null` を見て open() を二重に走らせる。「開く処理そのもの」
+     （in-flight promise）を共有する形に変え、判定と代入の間に await 境界を作らないようにした。
+     致命的破損はなく被害は索引ファイルの無駄な再読み込みだけだが、テストで再現できる
+  3. 手動 allowlist `STORE_TOOLS` を廃止し、`runRequest(fn)` に一本化。参照カウントの確保を
+     リクエストスコープの `getStore` の内側に移したので、**新しいツールを足しても登録漏れが
+     起き得ない**（呼んだ時点で必ず参照が確保される）。取得が遅延になったことで
+     `context_grill_status` の特例扱いも消えた
+
+  **既知の隙（未対応）**: `openStore()` の実行中に `sync` が入ると、`store = null` の後に
+  in-flight の open() が解決して古いストアが `store` に代入され得る。fd は rename 前の
+  inode を指し続けるので見当違いのバイト列は返らず、実害は「一世代古い証拠を返し得る」
+  までに留まる。直すなら索引に世代番号を持たせる。`invalidateStore()` の doc コメントにも
+  同じ内容を残した。
+
+  テスト 4 件追加（計 48 件）。MCP サーバーを子プロセスで起動し stdio に JSON-RPC を流す
+  ハーネスを `test/mcp.test.js` に新設した。並行性の再現には **2 リクエストを 1 回の
+  `stdin.write` で送る**必要がある（`handle(msg)` が await されない条件そのもの）。
+  `IndexStore.open()` の呼び出し回数は既存の `openCount` / `openHandles` では数えられない
+  ことに注意。**あれは fd の開閉カウンタで、`open()` 自体は manifest / docs.meta / df / lens の
+  JSON を読むだけで fd を使わない。** そのため `IndexStore.open` を包んで数える probe
+  スクリプトを一時生成して起動している。
+
+  **finding 3 だけは実行時テストにできなかった。** 失敗モードが「将来ツールを追加したとき
+  登録を忘れる」であり、現時点で登録漏れしているツールが存在しないため。
+  （`context_grill_status` は `getStore()` 直呼びだが、取得と `stats()` の間に await が無く
+  `stats()` は fd も触らないので実際には壊れない。）代わりに「登録漏れが起こり得ない構造で
+  あること」をソース文字列で表明する **lint 相当の構造ガード** にした。**この 4 件目が落ちた
+  ときは、まず実装ではなくテストの正規表現を疑うこと。**
+
+  **CI が windows-latest の 3 ジョブだけで落ちた。原因はテストの後始末で、プロダクトコードは
+  無実だった。** 47 pass / 1 fail、落ちたのは追加した並行性テストのみ。しかもエラーは
+  「実際: 2 回」ではなく **「実際: null 回」** — 二重オープンが起きたのではなく、計測値が
+  取れていなかった。probe の集計を `process.on('SIGTERM')` で出していたが、**Windows には
+  SIGTERM が無く**、`child.kill('SIGTERM')` はハンドラを走らせずにプロセスを強制終了する。
+
+  代案として「終了用の番兵行を stdin で送る」を試したが**これも駄目だった**。
+  **stdin は最初の 'data' リスナが付いた時点で流れ始める**ため、probe 側でリスナを付けると
+  server が自分のリスナを付ける前に最初のチャンクを取りこぼし、応答が 1 件も返らなくなる。
+
+  最終形は「`IndexStore.open()` のたびに stderr へ印を出し、親が印の数を数える」。出力側だけで
+  完結するので OS にもリスナ登録のタイミングにも依存しない。停止は `SIGKILL`（ハンドラを
+  介さないので Windows でも同じ）。**前回の PR でも Windows の fd 挙動で踏んでおり、
+  OS 依存の後始末で二度同じ踏み方をした。子プロセスの後始末はシグナルに頼らないこと。**
+
+  この修正後も、`getStore()` を check-then-act に戻す注入で「実際: 2 回」で落ちることを
+  再確認済み（印を数える方式が常に 1 を返すだけの空テストになっていないことの確認）。
