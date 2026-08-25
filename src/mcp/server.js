@@ -141,7 +141,8 @@ export async function startMcpServer({ configPath } = {}) {
   // 実行中の読み取りは一貫した内容を見る。
   // （Windows で開いているファイルへの rename がどう振る舞うかは未検証）
   let store = null;
-  let opening = null; // IndexStore.open() の実行中 promise
+  let opening = null; // { gen, promise } — IndexStore.open() の実行中
+  let generation = 0; // invalidateStore() のたびに進む索引の世代
   const inUse = new Map(); // IndexStore -> 参照数
 
   const openStore = async () => {
@@ -150,9 +151,20 @@ export async function startMcpServer({ configPath } = {}) {
     // handle(msg) は await されないので同一チャンクの複数リクエストがここに同時到達し、
     // 双方が store === null を見て open() を二重に走らせる（索引ファイルの無駄な再読み込み）。
     // そこで「開く処理そのもの」を共有し、判定と代入の間に await 境界を作らない。
-    if (!opening) opening = IndexStore.open(p.index).finally(() => { opening = null; });
-    const s = await opening; // 失敗時は opening が解放されるので次の呼び出しで再試行される
-    store = s;
+    //
+    // さらに、await の前後で世代が変わっていないかを見る。open() の実行中に sync が
+    // 入ると、invalidateStore() が store = null にした後で古いストアが再代入され、
+    // 次の sync まで居座って一世代前の索引を引き続けてしまう。
+    if (!opening || opening.gen !== generation) {
+      const rec = { gen: generation, promise: null };
+      rec.promise = IndexStore.open(p.index).finally(() => { if (opening === rec) opening = null; });
+      opening = rec;
+    }
+    const rec = opening;
+    const s = await rec.promise; // 失敗時は opening が解放されるので次の呼び出しで再試行される
+    // 世代が変わっていたら代入しない。呼び出し元は返り値をそのまま使い、
+    // release() が s !== store と判定して閉じる。
+    if (rec.gen === generation) store = s;
     return s;
   };
 
@@ -212,17 +224,15 @@ export async function startMcpServer({ configPath } = {}) {
   /**
    * 索引を作り直した後に呼ぶ。使用中なら閉じずに切り離すだけにする。
    *
-   * 既知の隙（未対応）: openStore() の実行中に sync が入ると、store = null にした後で
-   * in-flight の open() が解決し、古いストアが store に代入され得る。そのストアは
-   * 「切り離されていない」と判定されるため、次の invalidateStore() まで居座る。
-   * ただし fd は rename 前の inode を指し続けるので、meta のオフセットと docs.txt の
-   * 内容がずれることはない。実害は「一世代古い証拠を返し得る」までで、見当違いの
-   * バイト列は返らない。直すなら索引に世代番号を持たせ、世代が変わっていたら
-   * openStore() 側で代入を捨てる形になる。
+   * 世代を進めることで、実行中の openStore() が解決したときの再代入を防ぐ。これが無いと
+   * store = null にした後で in-flight の open() が解決し、古いストアが居座って次の sync まで
+   * 一世代前の索引を引き続ける（IndexStore は開いた時点のスナップショットなので例外には
+   * ならず、正常な形のまま古い結果を返すため気づきにくい）。
    */
   const invalidateStore = async () => {
     const old = store;
     store = null;
+    generation++;
     if (!old) return;
     if (!inUse.has(old)) await old.close();
     // 使用中の場合は runRequest の finally 側が閉じる

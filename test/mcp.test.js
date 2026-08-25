@@ -22,7 +22,7 @@ const OPEN_MARK = '__CONTEXT_GRILL_OPEN__';
  * （manifest / docs.meta / df / lens の JSON 読み込み）は fd を使わないため、
  * 既存カウンタでは二重オープンを検知できない。
  */
-async function writeProbe(dir, configPath) {
+async function writeProbe(dir, configPath, { openDelayMs = 0 } = {}) {
   const probe = path.join(dir, 'probe.mjs');
   // 終了処理に依存せず、open() のたびに stderr へ印を出す。
   //
@@ -36,7 +36,7 @@ async function writeProbe(dir, configPath) {
 import { IndexStore } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'src/index/store.js')).href)};
 const orig = IndexStore.open.bind(IndexStore);
 let opens = 0;
-IndexStore.open = async (d) => { opens++; process.stderr.write('\\n' + ${JSON.stringify(OPEN_MARK)} + '\\n'); return orig(d); };
+IndexStore.open = async (d) => { opens++; process.stderr.write('\\n' + ${JSON.stringify(OPEN_MARK)} + '\\n'); const s = await orig(d); if (opens === 1 && ${Number(openDelayMs)} > 0) await new Promise((r) => setTimeout(r, ${Number(openDelayMs)})); return s; };
 const { startMcpServer } = await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'src/mcp/server.js')).href)});
 startMcpServer({ configPath: ${JSON.stringify(configPath)} });
 `);
@@ -44,11 +44,16 @@ startMcpServer({ configPath: ${JSON.stringify(configPath)} });
 }
 
 /** リクエスト行をまとめて 1 回の write で送り、指定件数の応答を待つ。 */
-function rpc(probe, lines, expected) {
+function rpc(probe, lines, expected, opts = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [probe], { stdio: ['pipe', 'pipe', 'pipe'] });
     const responses = [];
     let done = false;
+    // opts.then を渡すと、最初の expected 件が返ってから第 2 チャンクを送る。
+    // 「sync 完了後に改めて検索する」という並びを 1 プロセス内で作るために要る。
+    let sentThen = false;
+    const firstExpected = expected;
+    let target = expected;
     let out = '';
     let errText = '';
     const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('タイムアウト: ' + out + errText)); }, 20000);
@@ -63,7 +68,12 @@ function rpc(probe, lines, expected) {
       }
       // 応答が揃ったら停止する。SIGKILL はハンドラを介さないので Windows でも同じ挙動になる。
       // stderr が届き切るよう少しだけ待つ（印は応答より前に出ているので取りこぼしはない）。
-      if (responses.length >= expected && !done) {
+      if (responses.length >= firstExpected && opts.then && !sentThen) {
+        sentThen = true;
+        target = firstExpected + (opts.thenExpected ?? opts.then.length);
+        child.stdin.write(opts.then.map((l) => JSON.stringify(l)).join('\n') + '\n');
+      }
+      if (responses.length >= target && !done) {
         done = true;
         setTimeout(() => child.kill('SIGKILL'), 100);
       }
@@ -148,4 +158,38 @@ test('MCP: ストア保護が手動 allowlist ではなく構造で担保され�
     'callTool はリクエストスコープの getStore を引数で受け取るべき');
   assert.ok(!/^  const getStore = /m.test(src),
     '参照カウントの外側から呼べるモジュールスコープの getStore が残っている');
+});
+
+/**
+ * 古いストアが store に居座るケース。
+ *
+ * openStore() は await の後で無条件に store = s と代入するため、その間に
+ * invalidateStore() が store = null にしても、解決した古いストアが再代入されて居座る。
+ * 結果、sync が索引を作り直した後も、次のリクエストが一世代前の索引を引く。
+ *
+ * IndexStore は開いた時点のスナップショットなので（#5）、古いストアを引いても例外には
+ * ならず、検索は正常な形のまま「古い結果」を返す。1 段目の assert はその #5 の回帰検出
+ * として残してある（再び TypeError が出るならスナップショット化が壊れている）。
+ */
+test('MCP: 索引オープン中に sync が入っても、次の検索は新しい索引を見る', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  // 索引作成後に追加する = sync するまで索引に存在しないファイル
+  await fsp.writeFile(path.join(dir, 'src', 'refund_v2.js'),
+    'function refundV2() { return "ZZTOPSECRETMARKER"; }\nmodule.exports = { refundV2 };\n');
+  // 1 件目の open() を遅らせ、sync が先に完了する状況を確定的に作る
+  const probe = await writeProbe(dir, configPath, { openDelayMs: 1500 });
+
+  const { responses, opens } = await rpc(probe, [
+    call(1, 'context_grill_search', { query: 'refund' }),
+    call(2, 'context_grill_sync', {}),
+  ], 2, { then: [call(3, 'context_grill_search', { query: 'ZZTOPSECRETMARKER refundV2' })] });
+
+  const text = responses.find((r) => r.id === 3)?.result?.content?.[0]?.text ?? JSON.stringify(responses);
+  const detail = `opens=${opens} 応答=${text.slice(0, 400)}`;
+  // #5 の回帰検出。ここが落ちるなら IndexStore のスナップショット化が壊れている
+  assert.doesNotMatch(text, /^エラー:/,
+    `検索が例外で落ちている（IndexStore が開いた時点に固定されていない）。${detail}`);
+  // 例外にならなくても、古い索引なら sync で追加された資料は引けない
+  assert.match(text, /refund_v2\.js/,
+    `sync 後の検索が古い索引を引いている（新しい資料が見えていない）。${detail}`);
 });
