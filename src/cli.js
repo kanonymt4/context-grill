@@ -428,7 +428,8 @@ async function cmdStatus(flags) {
     process.stdout.write('索引がまだありません。`context-grill sync` を実行してください。\n');
     return 1;
   }
-  const store = await IndexStore.open(p.index);
+  // status は postings を見ないので読まない（検索しないコマンドで postings 分のコストを払わない）
+  const store = await IndexStore.open(p.index, { postings: false });
   let stats;
   try {
     stats = store.stats();
