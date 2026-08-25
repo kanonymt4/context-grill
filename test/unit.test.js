@@ -87,6 +87,64 @@ test('索引: BM25 で該当チャンクが上位に来る', async (t) => {
   await fsp.rm(dir, { recursive: true, force: true });
 });
 
+
+test('索引: 開いたストアは作り直しの影響を受けない（スナップショット）', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-'));
+  const mk = (i, text, p) => ({ id: `s:${p}#0`, docId: `s:${p}`, sourceId: 's', sourceType: 'local', path: p, title: p, kind: 'code', lang: 'js', url: null, version: '1', meta: {}, start: 1, end: 3, hash: String(i), ntok: 10, text });
+  const build = async (chunks) => {
+    const b = new IndexBuilder(dir);
+    await b.start();
+    for (const c of chunks) b.add(c);
+    await b.finish({ indexKey: 'k' });
+  };
+
+  await build([
+    mk(0, 'function refundPayment(orderId) { return retryWithBackoff(orderId); }', 'refund.js'),
+    mk(1, 'const colors = ["red", "green"];', 'colors.js'),
+  ]);
+  const store = await IndexStore.open(dir);
+
+  // 開いたまま索引を作り直す（チャンク数も内容も変わる）
+  await build([
+    mk(0, 'function refundPayment(orderId) { return retryWithBackoff(orderId); }', 'refund.js'),
+    mk(1, 'const colors = ["red", "green"];', 'colors.js'),
+    mk(2, 'function refundV2() { return "ZZTOPSECRETMARKER"; }', 'refund_v2.js'),
+  ]);
+
+  // docs.txt は fd 保持で古い実体を読むが、postings はパス指定で新しい中身を読む。
+  // この非対称のため store.meta（2 件）に無い doc id が postings から返り、
+  // store.meta[idx] が undefined になる。
+  const hits = store.bm25(queryTerms('refundPayment retry'), 3);
+  for (const h of hits) {
+    assert.ok(store.meta[h.idx], `postings が meta に無い doc id ${h.idx} を返した（meta は ${store.meta.length} 件）`);
+  }
+  assert.equal(store.meta[hits[0].idx].path, 'refund.js');
+  assert.equal(store.textOf(hits[0].idx).includes('refundPayment'), true);
+
+  // 開いた時点の索引に無い語は、作り直し後も引けない（スナップショットである）
+  assert.equal(store.bm25(queryTerms('ZZTOPSECRETMARKER'), 3).length, 0,
+    '作り直し後に追加された語が、開いたままのストアから引けている');
+
+  await store.close();
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+test('索引: シャードが欠けた索引は open() の時点で原因の分かる例外になる', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-'));
+  const b = new IndexBuilder(dir);
+  await b.start();
+  b.add({ id: 's:a.js#0', docId: 's:a.js', sourceId: 's', sourceType: 'local', path: 'a.js', title: 'a.js', kind: 'code', lang: 'js', url: null, version: '1', meta: {}, start: 1, end: 3, hash: '0', ntok: 10, text: 'function refundPayment() {}' });
+  await b.finish({ indexKey: 'k' });
+
+  // 欠損したシャードを黙って空として扱うと、その語だけ静かに 0 ヒットになる
+  await fsp.rm(path.join(dir, 'postings', '3.json'));
+  await assert.rejects(
+    () => IndexStore.open(dir),
+    (e) => /索引が壊れています/.test(e.message) && /postings.3\.json/.test(e.message),
+    'シャード欠損が、原因の分かるメッセージで報告されていない');
+
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
 test('証拠パック: トークン予算を超えない / ID が連番', () => {
   const mk = (i) => ({ docId: `d${i}`, sourceId: 's', sourceType: 'github', kind: 'code', path: `f${i}.js`, title: `f${i}`, start: 1, end: 10, version: 'abc', url: 'https://example.com/f', score: 10 - i, text: 'x'.repeat(2000) });
   const pack = buildEvidencePack([mk(0), mk(1), mk(2), mk(3)], { budgetTokens: 800 });

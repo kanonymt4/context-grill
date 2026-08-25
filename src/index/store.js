@@ -120,6 +120,18 @@ export class IndexStore {
     s.meta = JSON.parse(await fsp.readFile(path.join(dir, 'docs.meta.json'), 'utf8'));
     s.df = JSON.parse(await fsp.readFile(path.join(dir, 'df.json'), 'utf8'));
     s.lens = JSON.parse(await fsp.readFile(path.join(dir, 'lens.json'), 'utf8'));
+    // postings も open() 時に読み切る。docs.txt は fd 保持で古い実体を読み続けるのに対し、
+    // 遅延読み込みの postings はパス指定で新しい実体を読む。この非対称のため、索引を
+    // 作り直すと meta と doc id の世代がずれ、store.meta[idx] が undefined になる。
+    s._shards = new Map(await Promise.all(Array.from({ length: SHARDS }, async (_, i) => {
+      const f = path.join(dir, 'postings', `${i}.json`);
+      try {
+        return [i, JSON.parse(await fsp.readFile(f, 'utf8'))];
+      } catch (e) {
+        // 欠損や破損を黙って空シャードとして扱うと、その語だけ静かに 0 ヒットになる。
+        throw new Error(`索引が壊れています (${dir})。postings/${i}.json を読めません: ${e.message}\n\`context-grill sync\` で作り直してください。`);
+      }
+    })));
     s.N = s.manifest.N;
     s.avgdl = s.manifest.avgdl || 1;
     s.dims = s.manifest.dims || 0;
@@ -131,12 +143,7 @@ export class IndexStore {
     if (this._vfd !== null) { IndexStore._closeFd(this._vfd); this._vfd = null; }
   }
 
-  _shard(i) {
-    if (!this._shards.has(i)) {
-      this._shards.set(i, JSON.parse(fs.readFileSync(path.join(this.dir, 'postings', `${i}.json`), 'utf8')));
-    }
-    return this._shards.get(i);
-  }
+  _shard(i) { return this._shards.get(i); }
   postings(term) { return this._shard(shardOf(term))[term] || null; }
 
   textOf(i) {
