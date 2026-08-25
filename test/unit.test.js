@@ -145,6 +145,29 @@ test('索引: シャードが欠けた索引は open() の時点で原因の分�
   await fsp.rm(dir, { recursive: true, force: true });
 });
 
+test('索引: open(dir, { postings: false }) は postings を読まず stats() は動く', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-'));
+  const b = new IndexBuilder(dir);
+  await b.start();
+  b.add({ id: 's:a.js#0', docId: 's:a.js', sourceId: 's', sourceType: 'local', path: 'a.js', title: 'a.js', kind: 'code', lang: 'js', url: null, version: '1', meta: {}, start: 1, end: 3, hash: '0', ntok: 10, text: 'function refundPayment() {}' });
+  await b.finish({ indexKey: 'k' });
+
+  const store = await IndexStore.open(dir, { postings: false });
+  assert.equal(store._shards, null, 'postings: false でも _shards が読み込まれている');
+
+  const stats = store.stats();
+  assert.equal(stats.chunks, 1, 'postings なしで stats() が動いていない');
+
+  assert.throws(
+    () => store.bm25(queryTerms('refundPayment'), 3),
+    /postings.*未ロード|postings.*読み込/,
+    'postings 未ロードで bm25 を呼んでも TypeError 以外の分かるエラーにならない'
+  );
+
+  await store.close();
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
 test('証拠パック: トークン予算を超えない / ID が連番', () => {
   const mk = (i) => ({ docId: `d${i}`, sourceId: 's', sourceType: 'github', kind: 'code', path: `f${i}.js`, title: `f${i}`, start: 1, end: 10, version: 'abc', url: 'https://example.com/f', score: 10 - i, text: 'x'.repeat(2000) });
   const pack = buildEvidencePack([mk(0), mk(1), mk(2), mk(3)], { budgetTokens: 800 });
