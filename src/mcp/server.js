@@ -378,8 +378,12 @@ export async function startMcpServer({ configPath } = {}) {
       }
       case 'context_grill_sync': {
         const report = await syncSources(config, { only: args.sources?.length ? args.sources : null, force: Boolean(args.full) });
-        const manifest = await buildIndex(config, {});
+        // 索引を作り直す前にストアを手放して docs.txt の fd を解放する。
+        // finish() は docs.txt.tmp を rename で置き換えるが、Windows では開いている
+        // ファイルを rename の宛先にできず EPERM になる。作り直した索引を publish する
+        // 側が自分で握っているハンドルに阻まれる形なので、リトライしても回復しない。
         await invalidateStore();
+        const manifest = await buildIndex(config, {});
         return textResult({ sources: report, index: { chunks: manifest.N, indexKey: manifest.indexKey } });
       }
       default:
