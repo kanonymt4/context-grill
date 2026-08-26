@@ -6,6 +6,28 @@ import { tokenize } from './tokenize.js';
 const SHARDS = 32;
 const FORMAT_VERSION = 1;
 
+/**
+ * 索引ファイルの置き場所。パスの組み立てをここ 1 箇所に集約する。
+ *
+ * finish() が「rename 1 回 + writeFile 6 回」に分かれているため、書き込みの途中に open()
+ * すると新旧の世代が混ざる（CLAUDE.md の実測を参照）。これを直すにはファイル名に世代番号を
+ * 持たせる必要があるが、その前段としてパスの組み立てを 1 箇所にまとめておく。
+ * 現時点では世代を持たせておらず、返すパスはこれまでと同一。
+ */
+export function layout(dir) {
+  return {
+    manifest: path.join(dir, 'manifest.json'),
+    meta: path.join(dir, 'docs.meta.json'),
+    df: path.join(dir, 'df.json'),
+    lens: path.join(dir, 'lens.json'),
+    docs: path.join(dir, 'docs.txt'),
+    docsTmp: path.join(dir, 'docs.txt.tmp'),
+    vectors: path.join(dir, 'vectors.bin'),
+    postingsDir: path.join(dir, 'postings'),
+    postings: (i) => path.join(dir, 'postings', `${i}.json`),
+  };
+}
+
 function shardOf(term) {
   let h = 2166136261;
   for (let i = 0; i < term.length; i++) { h ^= term.charCodeAt(i); h = Math.imul(h, 16777619); }
@@ -19,6 +41,7 @@ function shardOf(term) {
 export class IndexBuilder {
   constructor(dir) {
     this.dir = dir;
+    this.L = layout(dir);
     this.meta = [];
     this.postings = new Map();
     this.lens = [];
@@ -26,8 +49,8 @@ export class IndexBuilder {
     this.fd = null;
   }
   async start() {
-    await fsp.mkdir(path.join(this.dir, 'postings'), { recursive: true });
-    this.fd = fs.openSync(path.join(this.dir, 'docs.txt.tmp'), 'w');
+    await fsp.mkdir(this.L.postingsDir, { recursive: true });
+    this.fd = fs.openSync(this.L.docsTmp, 'w');
   }
   add(chunk) {
     const idx = this.meta.length;
@@ -51,17 +74,17 @@ export class IndexBuilder {
   }
   async finish(extra = {}) {
     fs.closeSync(this.fd);
-    await fsp.rename(path.join(this.dir, 'docs.txt.tmp'), path.join(this.dir, 'docs.txt'));
+    await fsp.rename(this.L.docsTmp, this.L.docs);
     const shards = Array.from({ length: SHARDS }, () => ({}));
     const df = {};
     for (const [term, arr] of this.postings) {
       shards[shardOf(term)][term] = arr;
       df[term] = arr.length / 2;
     }
-    await Promise.all(shards.map((s, i) => fsp.writeFile(path.join(this.dir, 'postings', `${i}.json`), JSON.stringify(s))));
-    await fsp.writeFile(path.join(this.dir, 'df.json'), JSON.stringify(df));
-    await fsp.writeFile(path.join(this.dir, 'lens.json'), JSON.stringify(this.lens));
-    await fsp.writeFile(path.join(this.dir, 'docs.meta.json'), JSON.stringify(this.meta));
+    await Promise.all(shards.map((s, i) => fsp.writeFile(this.L.postings(i), JSON.stringify(s))));
+    await fsp.writeFile(this.L.df, JSON.stringify(df));
+    await fsp.writeFile(this.L.lens, JSON.stringify(this.lens));
+    await fsp.writeFile(this.L.meta, JSON.stringify(this.meta));
     const N = this.meta.length;
     const manifest = {
       formatVersion: FORMAT_VERSION,
@@ -72,7 +95,7 @@ export class IndexBuilder {
       dims: 0,
       ...extra,
     };
-    await fsp.writeFile(path.join(this.dir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+    await fsp.writeFile(this.L.manifest, JSON.stringify(manifest, null, 2));
     this.postings.clear();
     return manifest;
   }
@@ -109,24 +132,24 @@ export class IndexStore {
     IndexStore.openHandles--;
   }
 
-  constructor(dir) { this.dir = dir; this._shards = new Map(); this._fd = null; this._vfd = null; }
+  constructor(dir) { this.dir = dir; this.L = layout(dir); this._shards = new Map(); this._fd = null; this._vfd = null; }
 
-  static exists(dir) { return fs.existsSync(path.join(dir, 'manifest.json')); }
+  static exists(dir) { return fs.existsSync(layout(dir).manifest); }
 
   static async open(dir, opts = {}) {
     const { postings: loadPostings = true } = opts;
     const s = new IndexStore(dir);
     if (!IndexStore.exists(dir)) throw new Error(`索引がありません (${dir})。先に \`context-grill sync\` を実行してください。`);
-    s.manifest = JSON.parse(await fsp.readFile(path.join(dir, 'manifest.json'), 'utf8'));
-    s.meta = JSON.parse(await fsp.readFile(path.join(dir, 'docs.meta.json'), 'utf8'));
-    s.df = JSON.parse(await fsp.readFile(path.join(dir, 'df.json'), 'utf8'));
-    s.lens = JSON.parse(await fsp.readFile(path.join(dir, 'lens.json'), 'utf8'));
+    s.manifest = JSON.parse(await fsp.readFile(s.L.manifest, 'utf8'));
+    s.meta = JSON.parse(await fsp.readFile(s.L.meta, 'utf8'));
+    s.df = JSON.parse(await fsp.readFile(s.L.df, 'utf8'));
+    s.lens = JSON.parse(await fsp.readFile(s.L.lens, 'utf8'));
     if (loadPostings) {
       // postings も open() 時に読み切る。docs.txt は fd 保持で古い実体を読み続けるのに対し、
       // 遅延読み込みの postings はパス指定で新しい実体を読む。この非対称のため、索引を
       // 作り直すと meta と doc id の世代がずれ、store.meta[idx] が undefined になる。
       s._shards = new Map(await Promise.all(Array.from({ length: SHARDS }, async (_, i) => {
-        const f = path.join(dir, 'postings', `${i}.json`);
+        const f = s.L.postings(i);
         try {
           return [i, JSON.parse(await fsp.readFile(f, 'utf8'))];
         } catch (e) {
@@ -158,7 +181,7 @@ export class IndexStore {
   textOf(i) {
     const m = this.meta[i];
     if (!m) return '';
-    if (this._fd === null) this._fd = IndexStore._openFd(path.join(this.dir, 'docs.txt'));
+    if (this._fd === null) this._fd = IndexStore._openFd(this.L.docs);
     const buf = Buffer.allocUnsafe(m.len);
     fs.readSync(this._fd, buf, 0, m.len, m.off);
     return buf.toString('utf8');
@@ -192,7 +215,7 @@ export class IndexStore {
   vecAt(i) {
     if (!this.dims) return null;
     if (this._vfd === null) {
-      const p = path.join(this.dir, 'vectors.bin');
+      const p = this.L.vectors;
       if (!fs.existsSync(p)) return null;
       this._vfd = IndexStore._openFd(p);
     }
@@ -205,7 +228,7 @@ export class IndexStore {
   /** 正規化済みベクトル前提のコサイン類似度検索。ブロック読みでメモリを一定に保つ。 */
   vectorSearch(query, topK = 100, filter = null) {
     if (!this.dims) return [];
-    const p = path.join(this.dir, 'vectors.bin');
+    const p = this.L.vectors;
     if (!fs.existsSync(p)) return [];
     const fd = IndexStore._openFd(p);
     try {
@@ -257,7 +280,8 @@ function topN(scores, k) {
 }
 
 export async function writeVectors(dir, vectors, dims) {
-  const fd = fs.openSync(path.join(dir, 'vectors.bin'), 'w');
+  const L = layout(dir);
+  const fd = fs.openSync(L.vectors, 'w');
   try {
     for (const v of vectors) {
       const f = Float32Array.from(v);
@@ -266,7 +290,7 @@ export async function writeVectors(dir, vectors, dims) {
       fs.writeSync(fd, Buffer.from(f.buffer, f.byteOffset, f.byteLength));
     }
   } finally { fs.closeSync(fd); }
-  const mp = path.join(dir, 'manifest.json');
+  const mp = L.manifest;
   const m = JSON.parse(await fsp.readFile(mp, 'utf8'));
   m.dims = dims;
   await fsp.writeFile(mp, JSON.stringify(m, null, 2));

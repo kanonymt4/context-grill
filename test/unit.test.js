@@ -9,7 +9,7 @@ import { matchGlob, isIncluded, stableStringify } from '../src/util/misc.js';
 import { estimateTokens, truncateToTokens } from '../src/util/tokens.js';
 import { tokenize, queryTerms, splitIdentifier } from '../src/index/tokenize.js';
 import { chunkCode, chunkText } from '../src/index/chunk.js';
-import { IndexBuilder, IndexStore } from '../src/index/store.js';
+import { IndexBuilder, IndexStore, layout } from '../src/index/store.js';
 import { buildEvidencePack, renderEvidenceBlock } from '../src/index/pack.js';
 import { validate, extractJson } from '../src/llm/jsonschema.js';
 import { verify } from '../src/verify/gate.js';
@@ -136,7 +136,7 @@ test('索引: シャードが欠けた索引は open() の時点で原因の分�
   await b.finish({ indexKey: 'k' });
 
   // 欠損したシャードを黙って空として扱うと、その語だけ静かに 0 ヒットになる
-  await fsp.rm(path.join(dir, 'postings', '3.json'));
+  await fsp.rm(layout(dir).postings(3));
   await assert.rejects(
     () => IndexStore.open(dir),
     (e) => /索引が壊れています/.test(e.message) && /postings.3\.json/.test(e.message),
