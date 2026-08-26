@@ -193,3 +193,54 @@ test('MCP: 索引オープン中に sync が入っても、次の検索は新し
   assert.match(text, /refund_v2\.js/,
     `sync 後の検索が古い索引を引いている（新しい資料が見えていない）。${detail}`);
 });
+
+/** rename の瞬間に開いたままのストアが何個あるかを stderr に出す印。 */
+const LIVE_MARK = '__CONTEXT_GRILL_LIVE__';
+
+/**
+ * docs.txt の rename 時点で開いているストアの数を報告する probe を書く。
+ *
+ * Windows では開いているファイルを rename で置き換えられず EPERM になるため、
+ * この数が 0 でないと sync が落ちる。ただし macOS / Linux では rename が成功して
+ * しまい症状が出ないので、OS に依存しない「開いたままのストアの数」で検証する。
+ *
+ * 印は改行で挟む。writeProbe と同じ理由で、stdin の番兵行や SIGTERM ハンドラには
+ * 頼れない（Windows に SIGTERM が無く、stdin は最初のリスナで流れ始めてしまう）。
+ */
+async function writeRenameProbe(dir, configPath) {
+  const probe = path.join(dir, 'probe-rename.mjs');
+  const NL = 'String.fromCharCode(10)';
+  await fsp.writeFile(probe, `
+import fsp from 'node:fs/promises';
+import { IndexStore } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'src/index/store.js')).href)};
+let live = 0;
+const origOpen = IndexStore.open.bind(IndexStore);
+IndexStore.open = async (d) => { const s = await origOpen(d); live++; return s; };
+const origClose = IndexStore.prototype.close;
+IndexStore.prototype.close = async function () { live--; return origClose.call(this); };
+const origRename = fsp.rename.bind(fsp);
+fsp.rename = async (a, b) => { if (String(b).endsWith('docs.txt')) process.stderr.write(${NL} + ${JSON.stringify(LIVE_MARK)} + live + ${NL}); return origRename(a, b); };
+const { startMcpServer } = await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'src/mcp/server.js')).href)});
+startMcpServer({ configPath: ${JSON.stringify(configPath)} });
+`);
+  return probe;
+}
+
+test('MCP: sync は索引を作り直す前にストアを手放す', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const probe = await writeRenameProbe(dir, configPath);
+  // 検索でストアを開かせてから sync する（実際の利用順序）
+  const res = await rpc(probe, [call(1, 'context_grill_search', { query: 'refundPayment' })], 1, {
+    then: [call(2, 'context_grill_sync', {})],
+    thenExpected: 1,
+  });
+  const sync = res.responses.find((r) => r.id === 2);
+  assert.ok(sync, 'sync の応答が無い: ' + res.stderr.slice(-300));
+  assert.notEqual(sync.result?.isError, true, 'sync がエラーになった: ' + JSON.stringify(sync.result).slice(0, 300));
+  const marks = (res.stderr.match(new RegExp(LIVE_MARK + '(-?[0-9]+)', 'g')) || [])
+    .map((m) => Number(m.slice(LIVE_MARK.length)));
+  assert.ok(marks.length > 0, 'docs.txt の rename が観測できていない: ' + res.stderr.slice(-300));
+  for (const n of marks) {
+    assert.ok(n <= 0, `rename の時点で ${n} 個のストアが開いたままだった（Windows ではここで EPERM になる）`);
+  }
+});
