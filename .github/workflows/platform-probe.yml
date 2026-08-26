@@ -33,3 +33,6 @@ jobs:
 
       - name: 5. 世代番号つきファイル名の unlink 積み残し
         run: node scripts/platform-probe5.mjs
+
+      - name: 6. 世代番号つきファイル名での公開（未使用の名前への rename）
+        run: node scripts/platform-probe6.mjs
