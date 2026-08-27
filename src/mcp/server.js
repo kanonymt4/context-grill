@@ -139,7 +139,11 @@ export async function startMcpServer({ configPath } = {}) {
   // そこで参照カウントを持ち、使用中のストアは「最後の利用者が終わってから」閉じる。
   // fd を開いたまま保てば POSIX では rename されても古い inode を参照し続けるので、
   // 実行中の読み取りは一貫した内容を見る。
-  // （Windows で開いているファイルへの rename がどう振る舞うかは未検証）
+  //
+  // ただし Windows では成立しない（2026-08-26 実測）。開いているファイルは rename の
+  // 宛先にできず EPERM になるため、古い inode を参照する以前に publish 自体が失敗する。
+  // 同一プロセス内は context_grill_sync が invalidateStore() を先に呼んで回避しているが、
+  // 別プロセスの CLI sync は回避できない（CLAUDE.md の UNVERIFIED-015）。
   let store = null;
   let opening = null; // { gen, promise } — IndexStore.open() の実行中
   let generation = 0; // invalidateStore() のたびに進む索引の世代
