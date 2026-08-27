@@ -279,22 +279,24 @@ test('runTaskWithStore は渡されたストアを閉じない（所有権は呼
   const store = await IndexStore.open(paths(config).index);
   const ask = { taskId: 'spec', instruction: 'app.js の main 関数の仕様', effort: 'low', save: false, dryRun: true };
 
-  // 1 回目で docs.txt の fd を開かせておく（遅延オープンのウォームアップ）
+  // 1 回目で本文を読ませる（open() で fd を確保済みなので、ここは確認の意味）
   const r1 = await runTaskWithStore(store, config, ask);
   assert.ok(r1.pack.items.length > 0, '証拠が取れていないと検証にならない');
   assert.ok(store._fd !== null, '本文を読んだなら fd が開いているはず');
 
-  // close() されても次の読み取りが黙って開き直すため、「使えるか」では検知できない。
-  // 開いた累計回数が増えないことを見る。
-  const opensBefore = IndexStore.openCount;
+  // close() されると次の読み取りは開き直さずに失敗する（open() で fd を確保するため）。
+  // なので「読めること」がそのまま「閉じられていないこと」の表明になる。
   const r2 = await runTaskWithStore(store, config, ask);
   assert.ok(r2.pack.items.length > 0, '2 回目で証拠が取れない');
-  assert.equal(IndexStore.openCount, opensBefore,
-    'fd が開き直された = runTaskWithStore がストアを閉じている（所有権違反）');
+  assert.ok(store._fd !== null, 'runTaskWithStore がストアを閉じている（所有権違反）');
+  assert.doesNotThrow(() => store.textOf(0), 'close() 済みの fd で読もうとしている（所有権違反）');
 
   const handlesBefore = IndexStore.openHandles;
   await store.close();
   assert.ok(IndexStore.openHandles < handlesBefore, '呼び出し側の close() で fd が解放されるべき');
+  // 上の doesNotThrow が空の表明になっていないことをここで示す。遅延オープンを
+  // 戻すと close() 後も黙って読めてしまい、所有権違反を検知できなくなる。
+  assert.throws(() => store.textOf(0), 'close() 後も読めてしまう＝この検知は機能していない');
 
   delete process.env.TEST_LLM_KEY;
   await fsp.rm(dir, { recursive: true, force: true });

@@ -9,7 +9,7 @@ import { matchGlob, isIncluded, stableStringify } from '../src/util/misc.js';
 import { estimateTokens, truncateToTokens } from '../src/util/tokens.js';
 import { tokenize, queryTerms, splitIdentifier } from '../src/index/tokenize.js';
 import { chunkCode, chunkText } from '../src/index/chunk.js';
-import { IndexBuilder, IndexStore, layout } from '../src/index/store.js';
+import { IndexBuilder, IndexStore, layout, writeVectors, latestGen } from '../src/index/store.js';
 import { buildEvidencePack, renderEvidenceBlock } from '../src/index/pack.js';
 import { validate, extractJson } from '../src/llm/jsonschema.js';
 import { verify } from '../src/verify/gate.js';
@@ -128,6 +128,180 @@ test('索引: 開いたストアは作り直しの影響を受けない（スナ
   await store.close();
   await fsp.rm(dir, { recursive: true, force: true });
 });
+/**
+ * 索引を作り直している最中に開いたストアが、単一世代の一貫した内容を返すことを確かめる。
+ *
+ * finish() は複数回の書き込みに分かれるので、その途中で open() すると新旧が混ざり得る。
+ * 特定の書き込み順に依存したくないので、書き込み 1 回ごとに必ず止めて、そのたびに
+ * 開いて中身を検査する。書き方を変えてもこのテストの意味は変わらない。
+ *
+ * 混ざり方は 3 通りある。件数のずれ（manifest.N / meta / lens）、meta に無い doc id が
+ * postings から出てくる、meta の世代と docs.txt の世代が食い違って別文書の本文が返る。
+ * どれも例外にならず静かに起きるので、個別に見る。
+ */
+test('索引: 作り直しの最中に開いたストアが単一世代の内容を返す', async () => {
+  const mk = (i, text, p) => ({ id: `s:${p}#0`, docId: `s:${p}`, sourceId: 's', sourceType: 'local', path: p, title: p, kind: 'code', lang: 'js', url: null, version: '1', meta: {}, start: 1, end: 3, hash: String(i), ntok: 10, text });
+  const OLD0 = 'function refundPayment(orderId) { return retryWithBackoff(orderId); }';
+  const NEW0 = 'function refundV2(orderId) { return SECRET_ZZTOP; }';
+  const V1 = [mk(0, OLD0, 'refund.js'), mk(1, 'const colors = [red, green];', 'colors.js'), mk(2, 'const a = 1;', 'a.js')];
+  const V2 = [mk(0, NEW0, 'refund.js'), ...Array.from({ length: 7 }, (_, i) => mk(i + 1, `const v2_${i} = ${i};`, `v2_${i}.js`))];
+
+  const maxDocIdIn = (store) => {
+    let max = -1;
+    for (let i = 0; i < 32; i++) {
+      const sh = store._shard(i);
+      if (!sh) continue;
+      for (const term of Object.keys(sh)) {
+        const arr = sh[term];
+        for (let j = 0; j < arr.length; j += 2) if (arr[j] > max) max = arr[j];
+      }
+    }
+    return max;
+  };
+
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-'));
+  const build = async (chunks) => {
+    const b = new IndexBuilder(dir);
+    await b.start();
+    for (const c of chunks) b.add(c);
+    await b.finish({ indexKey: 'k' });
+  };
+  await build(V1);
+
+  // 書き込み 1 回ごとに止める。postings の 32 本は Promise.all で同時に呼ばれるので、
+  // 「今来た 1 本だけ待たせる」形だと残りが素通りしてしまう（実測で 37 回中 31 回素通りした）。
+  // 待ち行列に積んで全部ブロックし、テスト側が 1 本ずつ解放する。
+  const waiters = [];
+  let notify = null, armed = true;
+  const gate = async (target) => {
+    if (!armed) return;
+    await new Promise((res) => {
+      waiters.push({ res, target: String(target) });
+      if (notify) { const n = notify; notify = null; n(); }
+    });
+  };
+  const waitForWaiter = () => (waiters.length ? Promise.resolve() : new Promise((res) => { notify = res; }));
+
+  const origWriteFile = fsp.writeFile;
+  const origRename = fsp.rename;
+  fsp.writeFile = async (p, ...rest) => { await gate(p); return origWriteFile.call(fsp, p, ...rest); };
+  fsp.rename = async (a, b) => { await gate(b); return origRename.call(fsp, a, b); };
+
+  const DONE = Symbol('done');
+  const building = build(V2).then(() => DONE, (e) => e);
+  const problems = [];
+  let pauses = 0;
+  try {
+    for (;;) {
+      const hit = await Promise.race([waitForWaiter().then(() => 'waiter'), building]);
+      if (hit !== 'waiter') break;
+      if (!waiters.length) continue;
+      const w = waiters.shift();
+      pauses++;
+      const at = path.basename(w.target);
+      let store = null;
+      try {
+        store = await IndexStore.open(dir);
+      } catch (e) {
+        problems.push(`${at} の直前で open() が失敗した: ${e.message.split(String.fromCharCode(10))[0]}`);
+        w.res();
+        continue;
+      }
+      if (store.N !== store.meta.length) problems.push(`${at} の直前: manifest.N (${store.N}) と meta の件数 (${store.meta.length}) がずれている`);
+      if (store.lens.length !== store.meta.length) problems.push(`${at} の直前: lens (${store.lens.length}) と meta (${store.meta.length}) の件数がずれている`);
+      const max = maxDocIdIn(store);
+      if (max >= store.meta.length) problems.push(`${at} の直前: postings が meta に無い doc id ${max} を含む（meta は ${store.meta.length} 件）`);
+      // どちらの世代かは meta の件数で決まる。その世代の本文が返るはず。
+      const expected = store.meta.length === V1.length ? OLD0 : NEW0;
+      const actual = store.textOf(0);
+      if (actual !== expected) problems.push(`${at} の直前: meta の世代と docs.txt の世代が食い違っている（${JSON.stringify(actual.slice(0, 40))}）`);
+      await store.close();
+      w.res();
+    }
+  } finally {
+    armed = false;
+    for (const w of waiters.splice(0)) w.res();
+    await building;
+    fsp.writeFile = origWriteFile;
+    fsp.rename = origRename;
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+
+  assert.ok(pauses >= 30, `書き込みを取りこぼしている（止まった回数 ${pauses}。finish() は rename 1 + postings 32 + 4 で 37 回書く）`);
+  assert.deepEqual(problems, [], `作り直しの最中に新旧が混ざった:${String.fromCharCode(10)}  ` + problems.join(String.fromCharCode(10) + '  '));
+});
+
+test('索引: 開いたストアのベクトルも作り直しの影響を受けない（スナップショット）', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-'));
+  const DIMS = 4;
+  const mk = (i, text, p) => ({ id: `s:${p}#0`, docId: `s:${p}`, sourceId: 's', sourceType: 'local', path: p, title: p, kind: 'code', lang: 'js', url: null, version: '1', meta: {}, start: 1, end: 3, hash: String(i), ntok: 10, text });
+  // ベクトルは finish() の公開前に書く必要があるため publish: false で作る
+  const build = async (chunks, vectors) => {
+    const b = new IndexBuilder(dir);
+    await b.start();
+    for (const c of chunks) b.add(c);
+    await b.finish({ indexKey: 'k', dims: DIMS }, { publish: false });
+    await writeVectors(dir, b.L.gen, vectors, DIMS);
+    await b.publish();
+  };
+
+  await build(
+    [mk(0, 'function refundPayment() {}', 'refund.js')],
+    [[1, 0, 0, 0]],
+  );
+
+  const store = await IndexStore.open(dir);
+  assert.deepEqual(Array.from(store.vecAt(0)), [1, 0, 0, 0], '前提: 開いた直後は第 1 世代のベクトルが読める');
+
+  // 開いたまま、違うベクトルで作り直す
+  await build(
+    [mk(0, 'function refundPayment() {}', 'refund.js')],
+    [[0, 1, 0, 0]],
+  );
+
+  // 旧世代の vectors.NNNN.bin は prune で消える。fd を保持していなければ
+  // vecAt() は existsSync に阻まれて **例外を出さず null を返す**（静かなデグレード）。
+  const v = store.vecAt(0);
+  assert.ok(v, '作り直し後に vecAt() が null を返した（旧世代の fd を保持していない）');
+  assert.deepEqual(Array.from(v), [1, 0, 0, 0], '開いた時点の世代ではなく別世代のベクトルを読んでいる');
+
+  await store.close();
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
+test('索引: 作り直し後に初めて触ってもベクトルはスナップショットのまま', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-'));
+  const DIMS = 4;
+  const mk = (i, text, p) => ({ id: `s:${p}#0`, docId: `s:${p}`, sourceId: 's', sourceType: 'local', path: p, title: p, kind: 'code', lang: 'js', url: null, version: '1', meta: {}, start: 1, end: 3, hash: String(i), ntok: 10, text });
+  const build = async (chunks, vectors) => {
+    const b = new IndexBuilder(dir);
+    await b.start();
+    for (const c of chunks) b.add(c);
+    await b.finish({ indexKey: 'k', dims: DIMS }, { publish: false });
+    await writeVectors(dir, b.L.gen, vectors, DIMS);
+    await b.publish();
+  };
+  await build([mk(0, 'function refundPayment() {}', 'refund.js')], [[1, 0, 0, 0]]);
+
+  const store = await IndexStore.open(dir);
+  // ここでは意図的にベクトルを読まない。直前のテストは開いた直後に vecAt() を
+  // 呼ぶため _vfd が確保され、prune 後も POSIX の inode 保持で通ってしまう。
+  await build([mk(0, 'function refundPayment() {}', 'refund.js')], [[0, 1, 0, 0]]);
+
+  // vectorSearch() は毎回パス指定で開き直すため、旧世代が prune で消えていると
+  // 例外を出さずに空配列を返す（静かなデグレード）。
+  const hits = store.vectorSearch([1, 0, 0, 0], 5);
+  assert.equal(hits.length, 1, '作り直し後に vectorSearch() が 0 件になった（旧世代の fd を保持していない）');
+  assert.ok(hits[0].score > 0.99, `開いた時点の世代のベクトルを読めていない (score=${hits[0] && hits[0].score})`);
+
+  const v = store.vecAt(0);
+  assert.ok(v, '作り直し後に初めて呼んだ vecAt() が null を返した');
+  assert.deepEqual(Array.from(v), [1, 0, 0, 0], '開いた時点ではなく別世代のベクトルを読んでいる');
+
+  await store.close();
+  await fsp.rm(dir, { recursive: true, force: true });
+});
+
 test('索引: シャードが欠けた索引は open() の時点で原因の分かる例外になる', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-'));
   const b = new IndexBuilder(dir);
@@ -135,11 +309,18 @@ test('索引: シャードが欠けた索引は open() の時点で原因の分�
   b.add({ id: 's:a.js#0', docId: 's:a.js', sourceId: 's', sourceType: 'local', path: 'a.js', title: 'a.js', kind: 'code', lang: 'js', url: null, version: '1', meta: {}, start: 1, end: 3, hash: '0', ntok: 10, text: 'function refundPayment() {}' });
   await b.finish({ indexKey: 'k' });
 
-  // 欠損したシャードを黙って空として扱うと、その語だけ静かに 0 ヒットになる
-  await fsp.rm(layout(dir).postings(3));
+  // 欠損したシャードを黙って空として扱うと、その語だけ静かに 0 ヒットになる。
+  // layout() は世代を受け取るので、公開済みの最新世代を渡す（渡さないと
+  // pad(undefined) が "undefined" になり、存在しないパスを黙って組み立てる）。
+  const gen = latestGen(dir);
+  assert.ok(gen !== null, '世代が見つからない＝公開されていない');
+  const shard = layout(dir, gen).postings(3);
+  await fsp.rm(shard);
   await assert.rejects(
     () => IndexStore.open(dir),
-    (e) => /索引が壊れています/.test(e.message) && /postings.3\.json/.test(e.message),
+    // ファイル名を直書きせず、削った当のものと照合する。世代番号のように
+    // 命名規則が変わっても、テストの意図（どのシャードかが分かること）は保たれる。
+    (e) => /索引が壊れています/.test(e.message) && e.message.includes(path.basename(shard)),
     'シャード欠損が、原因の分かるメッセージで報告されていない');
 
   await fsp.rm(dir, { recursive: true, force: true });

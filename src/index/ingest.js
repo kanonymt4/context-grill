@@ -57,7 +57,9 @@ export async function buildIndex(config, { embed = true } = {}) {
     perSource[src.id] = { documents: docs.length, chunks: n };
   }
   for (const c of chunks) builder.add(c);
-  const manifest = await builder.finish({ indexKey: config.indexKey, perSource, project: config.project });
+  // 公開はベクトルまで書き終えてから。公開済みの manifest に dims を書き足すと、
+  // 読み手が中途半端な内容を掴む余地ができる。埋め込みが失敗しても BM25 だけで公開する。
+  const manifest = await builder.finish({ indexKey: config.indexKey, perSource, project: config.project }, { publish: false });
   log.info(`索引構築: ${chunks.length} チャンク / ${manifest.terms} 語`);
 
   const embCfg = config.retrieval.embedding;
@@ -68,14 +70,16 @@ export async function buildIndex(config, { embed = true } = {}) {
         security: config.security,
       });
       if (vectors) {
-        await writeVectors(indexDir, vectors, embCfg.dimensions);
+        await writeVectors(indexDir, builder.L.gen, vectors, embCfg.dimensions);
+        manifest.dims = embCfg.dimensions;
         log.info(`ベクトル索引: ${vectors.length} × ${embCfg.dimensions} 次元`);
       }
     } catch (e) {
-      if (e.noRetry) throw e;   // 同意不足・宛先ブロックは黙って握り潰さない
+      if (e.noRetry) { await builder.publish(); throw e; }   // 同意不足・宛先ブロックは黙って握り潰さない
       log.warn(`埋め込みに失敗したため BM25 のみで継続します: ${e.message}`);
     }
   }
+  await builder.publish();
   return manifest;
 }
 

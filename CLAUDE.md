@@ -209,6 +209,7 @@ Confluence の HTML 変換より簡単。
   2026-08-26 の修正は MCP 内部の同じ問題を解消したが、プロセス境界をまたぐこちらは、CLI 側から
   サーバーに「ストアを閉じろ」と伝える手段が無いため、`docs.txt` を rename で置き換えるのを
   やめない限り解決しない。
+- **未対応（`writeDocsCache()` は既存名への rename）**: `docs.jsonl.tmp` → `docs.jsonl` と既に存在する名前へ rename している。索引側は世代番号で未使用の名前に公開するようにしたが、こちらは対象外。現状 `readDocsCache()` が `fsp.readFile()` で一括読みして即閉じるため、Windows で EPERM を踏む条件（誰かが fd を保持している）が成立せず実害は無い。**この前提が外れる（ストリーム読み・遅延読みに変える、常駐プロセスがキャッシュを保持する等）と、Windows だけが静かに壊れる。** 2026-08-27 に MCP の rename テストが検出。`src/connectors/base.js`
 - **未対応（`writeVectors()` が truncate 上書き）**: `docs.txt` と違い rename ではなく同じファイルを
   `'w'` で開き直すため、fd を握っていても中身が入れ替わる。ストアを保持したまま作り直すと
   旧 meta と新ベクトルが組み合わさる。`open()` 時点のスナップショットという保証が
