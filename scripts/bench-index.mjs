@@ -23,7 +23,7 @@ if (!target) {
 
 const { loadConfig, paths } = await import(path.join(ROOT, 'src/config.js'));
 const { syncSources, buildIndex } = await import(path.join(ROOT, 'src/index/ingest.js'));
-const { IndexStore, layout } = await import(path.join(ROOT, 'src/index/store.js'));
+const { IndexStore } = await import(path.join(ROOT, 'src/index/store.js'));
 
 const include = (includeArg || 'src/**,*.md').split(',');
 const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cg-bench-'));
@@ -40,11 +40,10 @@ const p = paths(config);
 await syncSources(config, {});
 await buildIndex(config, { embed: false }); // 埋め込みは測定対象外（API も呼ばない）
 
-const L = layout(p.index);
-const size = (f) => fs.statSync(f).size;
-const man = JSON.parse(fs.readFileSync(L.manifest, 'utf8'));
+const size = (f) => fs.statSync(path.join(p.index, f)).size;
+const man = JSON.parse(fs.readFileSync(path.join(p.index, 'manifest.json'), 'utf8'));
 const shards = [];
-for (let i = 0; i < 32; i++) shards.push(size(L.postings(i)));
+for (let i = 0; i < 32; i++) shards.push(size(path.join('postings', `${i}.json`)));
 const postings = shards.reduce((a, b) => a + b, 0);
 
 const t0 = process.hrtime.bigint();
@@ -55,7 +54,7 @@ const openMs = Number(process.hrtime.bigint() - t0) / 1e6;
 const m0 = process.memoryUsage().heapUsed;
 const t1 = process.hrtime.bigint();
 const parsed = [];
-for (let i = 0; i < 32; i++) parsed.push(JSON.parse(fs.readFileSync(L.postings(i), 'utf8')));
+for (let i = 0; i < 32; i++) parsed.push(JSON.parse(fs.readFileSync(path.join(p.index, 'postings', `${i}.json`), 'utf8')));
 const postingsMs = Number(process.hrtime.bigint() - t1) / 1e6;
 const heapKB = Math.round((process.memoryUsage().heapUsed - m0) / 1024);
 
@@ -64,8 +63,8 @@ console.log('');
 console.log(`チャンク数        ${man.N}`);
 console.log(`語彙              ${man.terms}`);
 console.log(`postings 合計     ${kb(postings)}  (1 チャンクあたり ${(postings / man.N).toFixed(0)} B)`);
-console.log(`docs.txt          ${kb(size(L.docs))}`);
-console.log(`docs.meta.json    ${kb(size(L.meta))}`);
+console.log(`docs.txt          ${kb(size('docs.txt'))}`);
+console.log(`docs.meta.json    ${kb(size('docs.meta.json'))}`);
 console.log(`open()            ${openMs.toFixed(1)} ms`);
 const heapText = heapKB > 0 ? kb(heapKB * 1024) : '計測不能(GC)';
 console.log(`  うち postings   ${postingsMs.toFixed(1)} ms / ヒープ ${heapText}`);
