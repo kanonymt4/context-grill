@@ -173,47 +173,239 @@ Confluence の HTML 変換より簡単。
 
 ## 未確認・次にやること
 
-- ~~`schema/` が空~~ 2026-08-10 解消。ITEM_SCHEMA/envelopeSchema (src/tasks/index.js) は「LLM回答の構造契約」であり対象プロジェクト非依存（itemTypes も spec/debug/security/techdebt/design の固定5種）。外部化するとカスタマイズ可能に見えて evidence/quotes の強制が緩められるリスクがあるため、inline のままが妥当と判断し schema/ を削除、package.json の files からも除去
-- ~~実際に GitHub / Confluence / Jira へ接続して動かした記録がない~~ 2026-08-10 GitHub のみ検証済み（private repo kanonymt4/context-grill を対象に mode:clone で実クローン成功、42ドキュメント/130チャンク、パーマリンク生成も正常）。`GITHUB_TOKEN` を用意しなくても `credential.helper=osxkeychain` があれば通ることを確認 （コードが独自 Authorization ヘッダを付けるのはトークンがある場合のみで、無い場合は素の git にフォールバックするため）。Confluence / Jira は未検証のまま
-- ~~埋め込みプロバイダを有効にした状態での動作が未検証~~ 2026-08-10 検証済み。ローカル Ollama（nomic-embed-text, 768次元, openai-compat 経由）で sync→embedding API 実呼び出し→egress.log記録→ベクトル索引構築→2回目syncでキャッシュ全ヒット、を一通り確認。ただし RRF 融合の効果は一様ではなく、クエリによってはBM25単体の方が正解ファイルの順位が高いケースもあった（言い換え耐性は効く場合とそうでない場合がある）。2026-08-10 OpenAI/Voyage 実APIでも検証済み。
-  - OpenAI (text-embedding-3-small, dimensions:512): sync/cache reuse/検索まで完全に成功。`dimensions` 指定時に実際に返るベクトル長も一致することを確認（キャッシュ破損リスクは杞憂だった）
-  - Voyage (voyage-3-lite): 単独API呼び出しは成功するが、無料枠のレート制限(3RPM/10K TPM)に対し`retry()`のバックオフ(最大5秒程度)が短すぎ、実際の`sync`では埋め込み取得が継続的に失敗。ただし例外を握りつぶさずBM25のみへグレースフルデグレードする設計は正しく機能した（src/index/ingest.js）
-  - ~~**要修正候補**: `embed.js`の`embedQuery()`が`embedChunks()`と同じ経路を通るため、Voyageのクエリでも`input_type:"document"`が固定送信される。実測で正解/無関係文書の分離度が本来の`query`指定時0.418 → 現状のbug挙動0.294と、約30%低下することを確認~~ 2026-08-21 修正
-  - ~~**要修正候補**: Voyage分岐だけ`data[].index`でソートしていない（openai/openai-compatはソートあり）。レスポンス順を無条件に信頼している~~ 2026-08-21 修正
-  - ~~**要修正候補**: 埋め込み取得が失敗すると`EmbedCache.close()`未到達のため、途中まで成功した分も含めて次回`sync`時にゼロからやり直しになる（部分キャッシュが永続化されない）~~ 2026-08-21 修正
-- **未対応（Voyage 実運用の残課題）**: `embedChunks` のリトライは `attempts:4` / `baseMs:600` が固定で、最大待機は約 4.2 秒。Voyage 無料枠（3RPM）のような分単位のレート制限には届かないため、`sync` の失敗自体は解消していない。設定可能にするかはコストと相談
-- ~~**未対応（Windows CI の残件）**: `windows-latest` の一部 Node 版で、`test/security.test.js` の
-  「allowLlmUpload=false なら ask は送信前にブロックされる」の後始末が `ENOTEMPTY` で失敗する~~
-  **2026-08-22 修正。切り分け手順の (2)、つまりプロダクトコードの fd リークだった。**
-  `rm` に `maxRetries` を付けて黙らせなくて正解だった件（詳細は履歴）。
-- ~~**未対応（MCP サーバーの二重オープン）**~~ 2026-08-22 修正（詳細は履歴）。
-- ~~**未対応（MCP: 索引オープン中に sync が入ると古いストアが居座る）**~~ 2026-08-25、
-  **記述が誤っていたことを実測で確認**し、根本原因を修正（詳細は履歴）。実害は
-  「一世代古い証拠を返し得る」ではなく **検索が `TypeError` で落ちる**。しかも MCP の
-  競合に限らず、ストアを保持したまま索引を作り直せば必ず再現する。
-- ~~**未対応（MCP: 古いストアが `store` に居座る）**~~ 2026-08-25 に世代番号方式で解消（履歴参照）。
-- ~~**未対応（`open()` が検索しないコマンドでも postings を全部読む）**: スナップショット化の
-  代償。実測 10,541 チャンクで 68ms / 25MB。~~ 2026-08-25、`open(dir, { postings: false })`
-  を実装して解消（詳細は履歴）。`status` コマンドをこれで開くよう変更。
-- **未対応（`finish()` がアトミックでない）**: `rename` 1 回 + `writeFile` 6 回に分かれているため、
-  書き込みの途中に `open()` すると新旧が混ざる。今回の変更は「開いた後」だけを守る。
-  2026-08-26 実測（詳細は履歴）。窓は **313ms**（17,534 チャンク）。この間に開いたストアは
-  **例外を出さず**、旧 meta のオフセットで新しい `docs.txt` を読んで、別々の文書にまたがる
-  バイト列を 1 チャンクの本文として返す。postings だけ新世代になる窓では meta に無い doc id が
-  混ざり、`chunkAt()` が空本文を返す。書き込み中のファイルを読む torn read も起き、世代の違う
-  実データを境界で接合すると **75% が JSON として通ってしまう**（切り詰めだけなら必ず失敗する）。
-  初回構築中は `manifest.json` がまだ無く `exists()` が false になるため混ざらない。
-  **作り直しのときだけ起きる**。
-- **未対応（CLI と MCP をまたぐ Windows の EPERM）**: MCP サーバーが常駐して 1 回でも検索して
-  いると、別プロセスの `context-grill sync` は Windows で必ず失敗する（exit code 1）。
-  2026-08-26 の修正は MCP 内部の同じ問題を解消したが、プロセス境界をまたぐこちらは、CLI 側から
-  サーバーに「ストアを閉じろ」と伝える手段が無いため、`docs.txt` を rename で置き換えるのを
-  やめない限り解決しない。
-- **未対応（`writeDocsCache()` は既存名への rename）**: `docs.jsonl.tmp` → `docs.jsonl` と既に存在する名前へ rename している。索引側は世代番号で未使用の名前に公開するようにしたが、こちらは対象外。現状 `readDocsCache()` が `fsp.readFile()` で一括読みして即閉じるため、Windows で EPERM を踏む条件（誰かが fd を保持している）が成立せず実害は無い。**この前提が外れる（ストリーム読み・遅延読みに変える、常駐プロセスがキャッシュを保持する等）と、Windows だけが静かに壊れる。** 2026-08-27 に MCP の rename テストが検出。`src/connectors/base.js`
-- **未対応（`writeVectors()` が truncate 上書き）**: `docs.txt` と違い rename ではなく同じファイルを
-  `'w'` で開き直すため、fd を握っていても中身が入れ替わる。ストアを保持したまま作り直すと
-  旧 meta と新ベクトルが組み合わさる。`open()` 時点のスナップショットという保証が
-  `vectors.bin` には効いていない。
+<!-- 書式:
+     UNVERIFIED-NNN で採番する。解消しても項目を消さず status: CLOSED にして残す
+     （誤っていた前提の記録そのものが再発防止の材料になるため）。
+     5 欄すべて必須。CLOSED はさらに「解消」欄が要る。
+     検査: node scripts/check-unverified.mjs
+
+     「外れた場合に無効になるもの」が この書式の要。ここを埋められないなら、
+     その前提はまだ理解できていない。実装に進む前に埋めること。 -->
+
+### UNVERIFIED-001 — `schema/` が空
+- status: CLOSED
+- 前提: LLM 回答の構造契約は外部ファイルに切り出したほうがよい
+- 検証方法: `src/tasks/index.js` の ITEM_SCHEMA / envelopeSchema の用途を確認
+- 影響ファイル: src/tasks/index.js, package.json
+- 外れた場合に無効になるもの: `schema/` を配布物に含める判断
+- 解消: 2026-08-10 対象プロジェクト非依存かつ evidence/quotes の強制が緩むリスクがあるため inline のままが妥当と判断。`schema/` を削除し package.json の files からも除去
+
+### UNVERIFIED-002 — 実際に GitHub / Confluence / Jira へ接続して動かした記録がない
+- status: CLOSED
+- 前提: コネクタは実接続でも動く
+- 検証方法: private repo 自身を対象に mode:clone で実クローン
+- 影響ファイル: src/connectors/confluence.js, src/connectors/jira.js
+- 外れた場合に無効になるもの: 「一次資料を取り込む」という製品前提そのもの
+- 解消: 2026-08-10 GitHub のみ検証済み（42 ドキュメント / 130 チャンク、パーマリンク生成も正常。`GITHUB_TOKEN` 無しでも `credential.helper=osxkeychain` があれば通る）。Confluence / Jira は UNVERIFIED-019 へ引き継ぐ
+
+### UNVERIFIED-003 — 埋め込みプロバイダを有効にした状態での動作が未検証
+- status: CLOSED
+- 前提: 埋め込みを有効にすれば検索品質が上がる
+- 検証方法: ローカル Ollama / OpenAI / Voyage の実 API で sync→検索まで通す
+- 影響ファイル: src/index/embed.js
+- 外れた場合に無効になるもの: ハイブリッド検索の RRF 融合を既定にする判断
+- 解消: 2026-08-10 検証済み。ただし RRF の効果は一様ではなく、クエリによっては BM25 単体のほうが正解ファイルの順位が高いケースもある（言い換え耐性は効く場合とそうでない場合がある）
+
+### UNVERIFIED-004 — `embedQuery()` が `input_type:"document"` を固定送信
+- status: CLOSED
+- 前提: クエリ側と文書側で同じ経路を使っても分離度は変わらない
+- 検証方法: 正解／無関係文書の分離度を実測して比較
+- 影響ファイル: src/index/embed.js
+- 外れた場合に無効になるもの: `embedChunks()` と `embedQuery()` の経路共用
+- 解消: 2026-08-21 修正。前提は誤りだった。本来の `query` 指定時 0.418 に対し bug 挙動は 0.294 で、約 30% 低下していた
+
+### UNVERIFIED-005 — Voyage 分岐だけ `data[].index` でソートしていない
+- status: CLOSED
+- 前提: 埋め込み API はリクエスト順にレスポンスを返す
+- 検証方法: openai / openai-compat の実装と突き合わせ
+- 影響ファイル: src/index/embed.js
+- 外れた場合に無効になるもの: レスポンス順を信頼するすべてのプロバイダ分岐
+- 解消: 2026-08-21 修正。並べ直しを全プロバイダ共通にし、入力数と応答数の不一致も例外にした
+
+### UNVERIFIED-006 — 埋め込み取得の失敗で `EmbedCache.close()` が未到達
+- status: CLOSED
+- 前提: 途中まで成功した埋め込みはキャッシュに残る
+- 検証方法: `127.0.0.1` のダミーサーバで「1 バッチ目成功 → 中断 → 再実行」を再現
+- 影響ファイル: src/index/embed.js
+- 外れた場合に無効になるもの: 失敗時に再実行すれば安いという運用前提
+- 解消: 2026-08-21 修正。バッチループを `try/finally` で囲い、部分キャッシュの永続化と fd リーク防止を両立
+
+### UNVERIFIED-007 — `windows-latest` の一部 Node 版で後始末が `ENOTEMPTY` になる
+- status: CLOSED
+- 前提: テスト側の後始末の問題で、`rm` に `maxRetries` を付ければ解決する
+- 検証方法: 切り分け手順 (1)(2)(3) のうち (2) プロダクトコードの fd リークを先に潰す
+- 影響ファイル: src/llm/pipeline.js, src/cli.js
+- 外れた場合に無効になるもの: 「CI 固有のフレーク」という被害範囲の見積もりそのもの
+- 解消: 2026-08-22 修正（#2）。前提は誤りだった。`runTask` の例外パスで fd が漏れており、MCP 常駐プロセスでは `run_task` が失敗するたびに決定的に累積して EMFILE に至る経路だった。リトライで黙らせなくて正解だった
+
+### UNVERIFIED-008 — MCP サーバーが `run_task` 経由で `IndexStore` を二重に開く
+- status: CLOSED
+- 前提: 二重オープンは無駄なだけで実害はない
+- 検証方法: `IndexStore.openCount`（減らない累計）で所有権違反を表明する
+- 影響ファイル: src/mcp/server.js, src/llm/pipeline.js
+- 外れた場合に無効になるもの: `getStore()` によるストア 1 個キャッシュという設計
+- 解消: 2026-08-22 修正（#4）。付随して `handle(msg)` が await されないことによる sync との競合も先に潰した
+
+### UNVERIFIED-009 — Windows で開いているファイルへの rename の挙動
+- status: CLOSED
+- 前提: 参照カウントで fd を開いたまま保てば、POSIX 同様に古い inode を参照し続ける
+- 検証方法: 別プロセスに `docs.txt` を握らせた状態でファイル操作を実測（scripts/platform-probe1〜5）
+- 影響ファイル: src/index/store.js, src/mcp/server.js
+- 外れた場合に無効になるもの: #4 の参照カウント方式そのもの（rename による publish を前提にしている）
+- 解消: 2026-08-26 実測（#10）。前提は誤りだった。Windows では古い inode を参照する以前に **rename 自体が EPERM で失敗する**。4 日間この欄に上がらず履歴の括弧書きにだけ残っていたため、UNVERIFIED-015 として現実化した
+
+### UNVERIFIED-010 — MCP: 索引オープン中に sync が入ると古いストアが居座る
+- status: CLOSED
+- 前提: 実害は「一世代古い証拠を返し得る」までに留まる。MCP の in-flight open との競合が必要
+- 検証方法: MCP もレースも介さない再現スクリプト（開く → 作り直す → 検索）
+- 影響ファイル: src/index/store.js
+- 外れた場合に無効になるもの: 被害の見積もりと、修正の優先度づけ
+- 解消: 2026-08-25 修正（#5）。前提は 3 項目すべて誤りだった。実害は `TypeError` で検索が落ちること、範囲は既存資料へのクエリにも及ぶこと、競合は不要でストアを保持したまま作り直せば必ず起きること
+
+### UNVERIFIED-011 — MCP: 古いストアが `store` に居座る
+- status: CLOSED
+- 前提: `openStore()` が `await` 後に無条件代入しても、`invalidateStore()` が先に走れば消える
+- 検証方法: `writeProbe` の `openDelayMs` で「open() 実行中に sync が入る」状況を確定的に作る
+- 影響ファイル: src/mcp/server.js
+- 外れた場合に無効になるもの: `invalidateStore()` による世代切り替えの正しさ
+- 解消: 2026-08-25 修正（#6）。`generation` カウンタと `opening = { gen, promise }` で解決
+
+### UNVERIFIED-012 — `open()` が検索しないコマンドでも postings を全部読む
+- status: CLOSED
+- 前提: スナップショット化のコストは無視できる
+- 検証方法: scripts/bench-index.mjs で索引規模ごとに実測
+- 影響ファイル: src/index/store.js, src/cli.js
+- 外れた場合に無効になるもの: スナップショット化を全コマンド一律に適用する判断
+- 解消: 2026-08-25 修正（#8）。10,541 チャンクで 68ms / 25MB。`open(dir, { postings: false })` を追加し `status` のみ適用。なお 205 チャンクからの線形外挿は 7.5 倍外した
+
+### UNVERIFIED-013 — `embedChunks` のリトライ設定が固定
+- status: OPEN
+- 前提: `attempts:4` / `baseMs:600`（最大待機 約 4.2 秒）で実運用のレート制限に足りる
+- 検証方法: 未実施。Voyage 無料枠（3RPM / 10K TPM）で `sync` を通す
+- 影響ファイル: src/index/embed.js
+- 外れた場合に無効になるもの: 分単位のレート制限を持つプロバイダのサポート表明
+
+### UNVERIFIED-014 — `finish()` がアトミックでない
+- status: CLOSED
+- 前提: rename 1 回 + writeFile 6 回に分かれた窓で `open()` すると新旧が混ざる
+- 検証方法: scripts/platform-probe6.mjs ほか（2026-08-26 実施）。窓は 313ms、`open()` は 156ms
+- 影響ファイル: src/index/store.js
+- 外れた場合に無効になるもの: 世代番号方式の publish 設計そのもの。窓の存在が前提
+- 解消: 2026-08-27 #13。全ファイルを `layout()` の世代番号つき名前で書き、公開は
+  `manifest.NNNN.json.tmp` → `manifest.NNNN.json` の rename 1 回だけにした（store.js:158-162）。
+  `latestGen()` は `^manifest\.(\d{4})\.json$` の存在しか見ない（store.js:35-49）ため、書きかけの
+  世代は読み手から見えない。窓そのものが消えた。CI 9/9 緑、ローカル 56 pass
+
+### UNVERIFIED-015 — CLI と MCP をまたぐ Windows の EPERM
+- status: CLOSED
+- 前提: `docs.txt` を rename で置き換えるのをやめない限り解決しない
+- 検証方法: scripts/platform-probe4.mjs（MCP 常駐下で別プロセスの CLI sync、exit code 1 を確認済み）
+- 影響ファイル: src/index/store.js, src/mcp/server.js
+- 外れた場合に無効になるもの: 世代番号方式を採る動機の 1 つ。プロセス境界をまたぐ通知手段があるなら別解になる
+- 解消: 2026-08-27 #13。索引側の rename は `publish()` の 1 箇所だけになり、宛先が毎回まだ存在しない
+  名前になった。開いているファイルを rename の宛先にする箇所が `src/index/` から消えたため、MCP が
+  常駐していても別プロセスの CLI sync が EPERM を踏まない。残った Windows 接触点は unlink 側へ移り、
+  UNVERIFIED-024 として起こした
+
+### UNVERIFIED-016 — `writeVectors()` が truncate 上書き
+- status: CLOSED
+- 前提: `open()` 時点のスナップショットという保証が `vectors.bin` には効いていない
+- 検証方法: 未実施。ストアを保持したまま作り直し、旧 meta と新ベクトルの組み合わせを再現する
+- 影響ファイル: src/index/store.js
+- 外れた場合に無効になるもの: 「開いたストアは作り直しの影響を受けない」という #5 の不変条件
+- 解消: 2026-08-27 #13。`vectors.NNNN.bin` と世代ごとに別ファイルになり（store.js:29）、さらに
+  `writeVectors()` は `manifest.NNNN.json.tmp` が無ければ throw する（store.js:374-376）。`'w'` で
+  開くこと自体は変えていないが、対象が未公開の新規ファイルに限定され、公開済み世代への上書きが
+  構造的に禁止された
+
+### UNVERIFIED-017 — `finally` の解放条件がテストで直接検証されていない
+- status: OPEN
+- 前提: `if (opening === rec)` で、世代交代後に古い rec が解決しても新しい方を消さない
+- 検証方法: 未実施。現在のテストはその解決順序を踏んでいない
+- 影響ファイル: src/mcp/server.js
+- 外れた場合に無効になるもの: #6 の世代ガードが守る範囲。設計案に無く実装中に足した箇所
+
+### UNVERIFIED-018 — `invalidateStore()` の doc コメントに誤った記述が残っている
+- status: CLOSED
+- 前提: 誤った実害の記述（「実害は一世代古い証拠を返し得るまで」）がコメントに残っている
+- 検証方法: 該当箇所の目視確認
+- 影響ファイル: src/mcp/server.js
+- 外れた場合に無効になるもの: なし（記述の不整合）
+- 解消: 2026-08-25 #6 で訂正済み。CLAUDE.md 履歴 2026-08-24 の「こちらの訂正は未着手」が翌日には古くなっていたのに更新されず、この欄への移行時に OPEN として起こしてしまった。**記録ではなくソースを見て確認すること**
+
+### UNVERIFIED-019 — Confluence / Jira コネクタが未検証
+- status: OPEN
+- 前提: GitHub と同じ経路を通るので、実接続でも同様に動く
+- 検証方法: 未実施。実テナントへの接続には認証情報の用意が要る
+- 影響ファイル: src/connectors/confluence.js, src/connectors/jira.js
+- 外れた場合に無効になるもの: README とリポジトリ説明の「GitHub / Confluence / Jira を一次資料として」という表明
+
+### UNVERIFIED-020 — seqlock の再試行上限が恣意的なパラメータになる
+- status: CLOSED
+- 前提: 読み手の再試行回数に妥当な既定値が決められる
+- 検証方法: 2026-08-26 一部実施。書き手 100ms 間隔なら読み手 4,498 回成功・再試行は再構築 1 回につき 1 回程度。ただし 11.7ms 間隔では読み手が一度も成功できず（starvation）、500ms 間隔でも再試行 50 回を使い切る事例が 19 回中 1 回
+- 影響ファイル: （設計判断・ファイル未定）
+- 外れた場合に無効になるもの: seqlock（状態ファイル + 読み手の世代再確認）を採用する判断
+- 解消: 2026-08-27 #13。seqlock を採らず、`manifest.NNNN.json` の存在を公開の印にする readdir 方式
+  （`latestGen()`）にしたため、読み手の再試行という概念自体が無くなった。採らなかった根拠は上の
+  検証方法の数字（11.7ms 間隔で starvation）。項目は消さずに残す —— 将来また seqlock を提案する人が
+  測り直さずに済むように
+
+### UNVERIFIED-021 — 参照カウントの説明コメントが Windows について「未検証」のまま
+- status: CLOSED
+- 前提: 「fd を開いたまま保てば実行中の読み取りは一貫した内容を見る」が全 OS で成立する
+- 検証方法: UNVERIFIED-009 で実測済み。Windows では rename が EPERM で失敗し成立しない
+- 影響ファイル: src/mcp/server.js
+- 外れた場合に無効になるもの: なし（記述の不整合。次に読む人が「未検証」を見て再度測り直す、あるいは POSIX の保証を全 OS のものと誤読する）
+- 解消: 2026-08-27 コメントを実測結果に差し替え。UNVERIFIED-015 への参照も入れた
+
+### UNVERIFIED-022 — クラッシュで中断した世代の後始末
+- status: OPEN
+- 前提: `IndexBuilder.start()` が `(latestGen(dir) ?? 0) + 1` で世代を決め、`fs.openSync(this.L.docs, 'w')`
+  で即 truncate する。クラッシュで manifest まで到達しなかった世代 N の残骸は、次回の start() が同じ N を
+  選んで上書きするので害がない —— つまり「同時に 2 つの sync が走らない」ことに依存している
+- 検証方法: 未実施。scripts/platform-probe6.mjs の 9 項目はクラッシュも同時実行も扱っていない
+- 影響ファイル: src/index/store.js
+- 外れた場合に無効になるもの: 「公開済みの世代は二度と変更しない」という不変条件。2 つの sync が同じ
+  世代番号を掴むと、片方の docs を片方の meta で読むことになり、UNVERIFIED-014 の 313ms の窓と同じ
+  症状が窓なしで起きる
+
+### UNVERIFIED-023 — `writeDocsCache()` が既存名へ rename している
+- status: OPEN
+- 前提: `docs.jsonl.tmp` → `docs.jsonl` は既存名への rename だが、`readDocsCache()` が `fsp.readFile()`
+  で一括読みして即閉じる（base.js:68-71）ため、Windows で EPERM を踏む条件——誰かが fd を保持している
+  ——が成立しない
+- 検証方法: 2026-08-27 に MCP の rename テストが経路を検出したのみ。この前提自体は未実測
+- 影響ファイル: src/connectors/base.js
+- 外れた場合に無効になるもの: 「索引側だけ世代番号方式にすれば Windows は安全」という現在の線引き。
+  ストリーム読み・遅延読みへの変更や、常駐プロセスがキャッシュを保持する設計は前提を壊す
+
+### UNVERIFIED-024 — `pruneGenerations()` の消し残しが積み上がらない
+- status: OPEN
+- 前提: unlink 失敗を握り潰して「次回に回す」（store.js:52-71）が成立する。つまり使用中で消せなかった
+  世代は、次の sync までに保持者が閉じており、そのとき回収される
+- 検証方法: 未実施。MCP を常駐させたまま Windows で sync を繰り返し、世代が何個まで残るかを測る
+- 影響ファイル: src/index/store.js
+- 外れた場合に無効になるもの: 1 世代 141.9MB（CLAUDE.md:484-486 実測）を前提にしたディスク使用量の
+  見積もり。常駐 MCP が古い世代を握り続けると、回収は MCP の再起動時にしか起きない
+
+### UNVERIFIED-025 — 参照カウントの説明コメントが #13 以前の publish 方式のまま
+- status: CLOSED
+- 前提: 「`docs.txt` は `docs.txt.tmp` から rename で置き換えられる」（server.js:134-137, 192, 385-388）
+  が現在の実装である
+- 検証方法: 2026-08-28 に該当3箇所を目視。実際には `IndexBuilder.start()` が `docs.NNNN.txt` を
+  `fs.openSync(p, 'w')` で直接開いており（store.js:99-103）、docs の rename は存在しない。索引側で
+  rename するのは `manifest.NNNN.json.tmp` → `manifest.NNNN.json` の 1 箇所だけ（store.js:158-162）
+- 影響ファイル: src/mcp/server.js
+- 外れた場合に無効になるもの: `context_grill_sync` が `buildIndex()` の前に `invalidateStore()` を
+  呼ぶ理由づけ。コメントは「Windows で rename が EPERM になるから」と書いているが、その経路は #13 で
+  消えた。いま残っている理由は UNVERIFIED-010/011 の「古いストアが居座る」ほうで、コメントを信じて
+  この呼び出しを消すと別のバグが戻る。UNVERIFIED-018 / 021 と同じ「記録が実装より古い」の再発
+- 解消: 2026-08-28。該当ブロックは壊れ方・原因・対策の3つとも #13 以前の記述だった。
+  起票時に「3箇所」としたが、`textOf は _fd が null なら黙って開き直す`（旧 server.js:133-134）
+  も古く、4箇所。close() 後の例外は EBADF ではなく TypeError (ERR_INVALID_ARG_TYPE) で、
+  これも一時索引を作って実測して初めて分かった（起票時の推測は外れ）。旧 385-388 には
+  「EPERM が消えたことを理由に invalidateStore() を外すな」を明記した
 
 ## 履歴
 
