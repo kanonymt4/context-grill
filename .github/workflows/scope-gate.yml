@@ -1,0 +1,24 @@
+name: scope-gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+jobs:
+  pr-scope:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        run: |
+          git fetch origin "${{ github.base_ref }}" --depth=1
+
+      - name: Enforce one-root-cause PR scope
+        run: |
+          node scripts/pr-scope-check.mjs \
+            --base "origin/${{ github.base_ref }}" \
+            --max-files 5 \
+            --max-dirs 3
