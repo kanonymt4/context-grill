@@ -130,20 +130,21 @@ export async function startMcpServer({ configPath } = {}) {
   // 注意: 下の handle(msg) は await されていないため、ツール呼び出しは並行実行され得る。
   // 一方 context_grill_sync は索引を作り直した後にストアを閉じる。
   //
-  // このとき壊れ方は「fd が無効になってエラーになる」ではない。textOf は _fd が null なら
-  // 黙って開き直すし、JS は単一スレッドで null チェックと readSync の間に await が無いので
-  // EBADF にはならない。実際の被害はもっと悪い。docs.txt は docs.txt.tmp から rename で
-  // 置き換えられるため、close 後の開き直しは**新しいファイル**を指す一方、this.meta の
-  // オフセットは**古いまま**。結果、エラーも出さずに見当違いのバイト列を証拠として返す。
+  // 閉じたストアを触ると textOf() が null の fd で readSync を呼び、TypeError
+  // (ERR_INVALID_ARG_TYPE) になる（store.js:272-278。2026-08-28 実測）。#13 より前は
+  // fd を遅延オープンしていたため壊れ方が違った。close 後の開き直しは**新しいファイル**を
+  // 指す一方で this.meta のオフセットは**古いまま**になり、エラーも出さずに見当違いの
+  // バイト列を証拠として返していた。いまは開き直さないので、この静かな取り違えは起きない。
+  // 「閉じた後は読めない」ことは所有権違反の検知手段でもある（test/security.test.js）。
   //
-  // そこで参照カウントを持ち、使用中のストアは「最後の利用者が終わってから」閉じる。
-  // fd を開いたまま保てば POSIX では rename されても古い inode を参照し続けるので、
-  // 実行中の読み取りは一貫した内容を見る。
+  // 例外で落ちるのも困るので、参照カウントを持ち、使用中のストアは「最後の利用者が
+  // 終わってから」閉じる。fd を開いたまま保てば unlink された後も実体を読み続けられる
+  // （Windows を含めて実測済み。CLAUDE.md の UNVERIFIED-009）。
   //
-  // ただし Windows では成立しない（2026-08-26 実測）。開いているファイルは rename の
-  // 宛先にできず EPERM になるため、古い inode を参照する以前に publish 自体が失敗する。
-  // 同一プロセス内は context_grill_sync が invalidateStore() を先に呼んで回避しているが、
-  // 別プロセスの CLI sync は回避できない（CLAUDE.md の UNVERIFIED-015）。
+  // 索引ファイルは #13 以降、世代番号つきの名前で公開される。docs.NNNN.txt は直接書かれて
+  // rename されないので（store.js:99-103）、開いているファイルを rename の宛先にできない
+  // Windows でも詰まらない。古い世代の回収は pruneGenerations() の unlink 側に移った
+  // （store.js:52-71、CLAUDE.md の UNVERIFIED-024）。
   let store = null;
   let opening = null; // { gen, promise } — IndexStore.open() の実行中
   let generation = 0; // invalidateStore() のたびに進む索引の世代
@@ -189,7 +190,7 @@ export async function startMcpServer({ configPath } = {}) {
    * ストアの取得口をリクエストスコープの getStore に限定するのが要点。
    * 「索引を読むツール」の手動 allowlist を置くと、将来 getStore を使うツールを
    * 追加したときに登録漏れが起き、参照カウントの外で fd 経由の読み取りが走る
-   * （sync と競合して、rename 後の docs.txt から見当違いのバイト列を返す）。
+   * （sync と競合して、閉じた fd で readSync を呼び TypeError になる）。
    * ここで渡した getStore を呼んだ時点で必ず参照が確保されるので、登録漏れが起き得ない。
    *
    * 取得は遅延なので、索引未作成時に getStore を呼ばずに案内を返すツール
@@ -382,10 +383,11 @@ export async function startMcpServer({ configPath } = {}) {
       }
       case 'context_grill_sync': {
         const report = await syncSources(config, { only: args.sources?.length ? args.sources : null, force: Boolean(args.full) });
-        // 索引を作り直す前にストアを手放して docs.txt の fd を解放する。
-        // finish() は docs.txt.tmp を rename で置き換えるが、Windows では開いている
-        // ファイルを rename の宛先にできず EPERM になる。作り直した索引を publish する
-        // 側が自分で握っているハンドルに阻まれる形なので、リトライしても回復しない。
+        // 索引を作り直す前にストアを手放す。#13 より前は finish() が docs.txt.tmp を rename で
+        // 置き換えており、Windows では開いているファイルを rename の宛先にできず EPERM に
+        // なるため、これが必須だった。その経路はもう無い。それでも手放すのは、古いストアが
+        // store に居座って一世代前の索引を引き続けるのを防ぐため（UNVERIFIED-010 / 011）。
+        // **EPERM が消えたことを理由にこの呼び出しを外すと、そちらのバグが戻る。**
         await invalidateStore();
         const manifest = await buildIndex(config, {});
         return textResult({ sources: report, index: { chunks: manifest.N, indexKey: manifest.indexKey } });

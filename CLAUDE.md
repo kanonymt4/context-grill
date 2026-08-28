@@ -390,7 +390,7 @@ Confluence の HTML 変換より簡単。
   見積もり。常駐 MCP が古い世代を握り続けると、回収は MCP の再起動時にしか起きない
 
 ### UNVERIFIED-025 — 参照カウントの説明コメントが #13 以前の publish 方式のまま
-- status: OPEN
+- status: CLOSED
 - 前提: 「`docs.txt` は `docs.txt.tmp` から rename で置き換えられる」（server.js:134-137, 192, 385-388）
   が現在の実装である
 - 検証方法: 2026-08-28 に該当3箇所を目視。実際には `IndexBuilder.start()` が `docs.NNNN.txt` を
@@ -401,6 +401,11 @@ Confluence の HTML 変換より簡単。
   呼ぶ理由づけ。コメントは「Windows で rename が EPERM になるから」と書いているが、その経路は #13 で
   消えた。いま残っている理由は UNVERIFIED-010/011 の「古いストアが居座る」ほうで、コメントを信じて
   この呼び出しを消すと別のバグが戻る。UNVERIFIED-018 / 021 と同じ「記録が実装より古い」の再発
+- 解消: 2026-08-28。該当ブロックは壊れ方・原因・対策の3つとも #13 以前の記述だった。
+  起票時に「3箇所」としたが、`textOf は _fd が null なら黙って開き直す`（旧 server.js:133-134）
+  も古く、4箇所。close() 後の例外は EBADF ではなく TypeError (ERR_INVALID_ARG_TYPE) で、
+  これも一時索引を作って実測して初めて分かった（起票時の推測は外れ）。旧 385-388 には
+  「EPERM が消えたことを理由に invalidateStore() を外すな」を明記した
 
 ## 履歴
 
