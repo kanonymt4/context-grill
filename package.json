@@ -1,6 +1,6 @@
 {
   "name": "context-grill",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "GitHub + Atlassian(Confluence/Jira) を一次資料として、仕様整理・バグ調査・セキュリティ/静的解析・機能設計を根拠付きで実施する CLI + MCP サーバー",
   "keywords": [
     "llm",
