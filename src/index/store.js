@@ -4,7 +4,75 @@ import path from 'node:path';
 import { tokenize } from './tokenize.js';
 
 const SHARDS = 32;
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 2;   // 2: ファイル名に世代番号を持たせた（1 とは互換性がない）
+
+const pad = (g) => String(g).padStart(4, '0');
+
+/**
+ * 索引ファイルの置き場所。1 世代ぶんのパスをまとめて返す。
+ *
+ * ファイル名に世代番号を入れ、一度書いたファイルは二度と変更しない。読み手が触るのは
+ * 常に公開済みの世代だけなので、書き込みの途中に開いても新旧が混ざらない。
+ * 宛先が毎回まだ存在しない名前になるので、開かれているファイルを rename の宛先にできない
+ * Windows でも詰まらない（CLAUDE.md の実測を参照）。
+ */
+export function layout(dir, gen) {
+  const g = pad(gen);
+  return {
+    gen,
+    manifest: path.join(dir, `manifest.${g}.json`),
+    manifestTmp: path.join(dir, `manifest.${g}.json.tmp`),
+    meta: path.join(dir, `docs.meta.${g}.json`),
+    df: path.join(dir, `df.${g}.json`),
+    lens: path.join(dir, `lens.${g}.json`),
+    docs: path.join(dir, `docs.${g}.txt`),
+    vectors: path.join(dir, `vectors.${g}.bin`),
+    postingsDir: path.join(dir, 'postings'),
+    postings: (i) => path.join(dir, 'postings', `${g}.${i}.json`),
+  };
+}
+
+const MANIFEST_RE = /^manifest\.(\d{4})\.json$/;
+
+/**
+ * 公開済みの最大世代を返す。無ければ null。
+ *
+ * manifest.NNNN.json の存在がその世代の完成を意味する（他のファイルを全部書き終えてから
+ * 未使用の名前へ rename して公開するため）。数を数える必要はない。
+ */
+export function latestGen(dir) {
+  let names;
+  try { names = fs.readdirSync(dir); } catch (e) { return null; }
+  let max = null;
+  for (const n of names) {
+    const m = MANIFEST_RE.exec(n);
+    if (!m) continue;
+    const g = Number(m[1]);
+    if (max === null || g > max) max = g;
+  }
+  return max;
+}
+
+/** 指定した世代以外のファイルを消す。消せなくても致命的ではないので握り潰す。 */
+async function pruneGenerations(dir, keep) {
+  const kill = async (base, name) => {
+    const m = /^(?:manifest|docs\.meta|df|lens)\.(\d{4})\.json(?:\.tmp)?$|^docs\.(\d{4})\.txt$|^vectors\.(\d{4})\.bin$/.exec(name);
+    const g = m && (m[1] ?? m[2] ?? m[3]);
+    if (g === undefined || g === null || Number(g) === keep) return;
+    try { await fsp.unlink(path.join(base, name)); } catch (e) { /* 使用中なら次回に回す */ }
+  };
+  try {
+    await Promise.all((await fsp.readdir(dir)).map((n) => kill(dir, n)));
+  } catch (e) { /* ディレクトリが無い */ }
+  const pd = path.join(dir, 'postings');
+  try {
+    await Promise.all((await fsp.readdir(pd)).map(async (n) => {
+      const m = /^(\d{4})\.\d{1,2}\.json$/.exec(n);
+      if (!m || Number(m[1]) === keep) return;
+      try { await fsp.unlink(path.join(pd, n)); } catch (e) { /* 同上 */ }
+    }));
+  } catch (e) { /* postings が無い */ }
+}
 
 function shardOf(term) {
   let h = 2166136261;
@@ -19,6 +87,7 @@ function shardOf(term) {
 export class IndexBuilder {
   constructor(dir) {
     this.dir = dir;
+    this.L = null;      // 世代が決まる start() で入る
     this.meta = [];
     this.postings = new Map();
     this.lens = [];
@@ -27,7 +96,9 @@ export class IndexBuilder {
   }
   async start() {
     await fsp.mkdir(path.join(this.dir, 'postings'), { recursive: true });
-    this.fd = fs.openSync(path.join(this.dir, 'docs.txt.tmp'), 'w');
+    this.L = layout(this.dir, (latestGen(this.dir) ?? 0) + 1);
+    // 世代番号つきの名前はまだ誰も開いていないので、tmp を経由せず直接書ける
+    this.fd = fs.openSync(this.L.docs, 'w');
   }
   add(chunk) {
     const idx = this.meta.length;
@@ -49,19 +120,25 @@ export class IndexBuilder {
     this.off += buf.length;
     return idx;
   }
-  async finish(extra = {}) {
+  /**
+   * この世代のファイルを全部書く。publish: false なら manifest は .tmp のままにする。
+   *
+   * ベクトルは索引本体より後に決まる（埋め込みは時間もお金もかかる）。公開してから
+   * manifest に dims を書き足すと、公開済みのファイルを上書きすることになり、
+   * 読み手が中途半端な内容を掴む。だから公開を遅らせられるようにしてある。
+   */
+  async finish(extra = {}, { publish = true } = {}) {
     fs.closeSync(this.fd);
-    await fsp.rename(path.join(this.dir, 'docs.txt.tmp'), path.join(this.dir, 'docs.txt'));
     const shards = Array.from({ length: SHARDS }, () => ({}));
     const df = {};
     for (const [term, arr] of this.postings) {
       shards[shardOf(term)][term] = arr;
       df[term] = arr.length / 2;
     }
-    await Promise.all(shards.map((s, i) => fsp.writeFile(path.join(this.dir, 'postings', `${i}.json`), JSON.stringify(s))));
-    await fsp.writeFile(path.join(this.dir, 'df.json'), JSON.stringify(df));
-    await fsp.writeFile(path.join(this.dir, 'lens.json'), JSON.stringify(this.lens));
-    await fsp.writeFile(path.join(this.dir, 'docs.meta.json'), JSON.stringify(this.meta));
+    await Promise.all(shards.map((s, i) => fsp.writeFile(this.L.postings(i), JSON.stringify(s))));
+    await fsp.writeFile(this.L.df, JSON.stringify(df));
+    await fsp.writeFile(this.L.lens, JSON.stringify(this.lens));
+    await fsp.writeFile(this.L.meta, JSON.stringify(this.meta));
     const N = this.meta.length;
     const manifest = {
       formatVersion: FORMAT_VERSION,
@@ -72,9 +149,16 @@ export class IndexBuilder {
       dims: 0,
       ...extra,
     };
-    await fsp.writeFile(path.join(this.dir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+    await fsp.writeFile(this.L.manifestTmp, JSON.stringify(manifest, null, 2));
     this.postings.clear();
+    if (publish) await this.publish();
     return manifest;
+  }
+
+  /** manifest を未使用の名前へ rename して公開する。rename は原子的なので途中が見えない。 */
+  async publish() {
+    await fsp.rename(this.L.manifestTmp, this.L.manifest);
+    await pruneGenerations(this.dir, this.L.gen);
   }
 }
 
@@ -91,9 +175,13 @@ export class IndexStore {
   /**
    * open された累計回数。**減らない。**
    *
-   * close() は _fd を null に戻すだけで、次の読み取りが遅延オープンで開き直す。
-   * そのため openHandles では「途中で閉じられたか」を検知できない。
-   * この累計値が増えていなければ、開き直しが起きていない = 閉じられていない、と言える。
+   * IndexStore.open() が 1 回走るごとに増える。同じストアを開き直していないこと
+   * ——とくに MCP サーバーが run_task 経由でストアを二重に開いていないこと——を
+   * 表明するために使う（UNVERIFIED-008）。
+   *
+   * close() 後の読み取りの検知には使えない。fd は open() の時点で確保しており、
+   * close() 後に読むと開き直さずに例外になるため、この値は増えない。所有権違反は
+   * 「閉じた後は読めない」ことで直接捕まえる（test/security.test.js を参照）。
    */
   static openCount = 0;
 
@@ -109,29 +197,40 @@ export class IndexStore {
     IndexStore.openHandles--;
   }
 
-  constructor(dir) { this.dir = dir; this._shards = new Map(); this._fd = null; this._vfd = null; }
+  constructor(dir) { this.dir = dir; this.L = null; this._shards = new Map(); this._fd = null; this._vfd = null; }
 
-  static exists(dir) { return fs.existsSync(path.join(dir, 'manifest.json')); }
+  static exists(dir) { return latestGen(dir) !== null; }
 
   static async open(dir, opts = {}) {
     const { postings: loadPostings = true } = opts;
     const s = new IndexStore(dir);
-    if (!IndexStore.exists(dir)) throw new Error(`索引がありません (${dir})。先に \`context-grill sync\` を実行してください。`);
-    s.manifest = JSON.parse(await fsp.readFile(path.join(dir, 'manifest.json'), 'utf8'));
-    s.meta = JSON.parse(await fsp.readFile(path.join(dir, 'docs.meta.json'), 'utf8'));
-    s.df = JSON.parse(await fsp.readFile(path.join(dir, 'df.json'), 'utf8'));
-    s.lens = JSON.parse(await fsp.readFile(path.join(dir, 'lens.json'), 'utf8'));
+    const gen = latestGen(dir);
+    if (gen === null) {
+      // 世代番号を持たない古い索引（formatVersion 1）はここに来る。読まずに作り直させる。
+      const old = fs.existsSync(path.join(dir, 'manifest.json'));
+      throw new Error(old
+        ? `索引の形式が変わりました (${dir})。\`context-grill sync\` で作り直してください。`
+        : `索引がありません (${dir})。先に \`context-grill sync\` を実行してください。`);
+    }
+    s.L = layout(dir, gen);
+    s.manifest = JSON.parse(await fsp.readFile(s.L.manifest, 'utf8'));
+    if (s.manifest.formatVersion !== FORMAT_VERSION) {
+      throw new Error(`索引の形式が違います (${dir})。期待 ${FORMAT_VERSION} / 実際 ${s.manifest.formatVersion}。\`context-grill sync\` で作り直してください。`);
+    }
+    s.meta = JSON.parse(await fsp.readFile(s.L.meta, 'utf8'));
+    s.df = JSON.parse(await fsp.readFile(s.L.df, 'utf8'));
+    s.lens = JSON.parse(await fsp.readFile(s.L.lens, 'utf8'));
     if (loadPostings) {
       // postings も open() 時に読み切る。docs.txt は fd 保持で古い実体を読み続けるのに対し、
       // 遅延読み込みの postings はパス指定で新しい実体を読む。この非対称のため、索引を
       // 作り直すと meta と doc id の世代がずれ、store.meta[idx] が undefined になる。
       s._shards = new Map(await Promise.all(Array.from({ length: SHARDS }, async (_, i) => {
-        const f = path.join(dir, 'postings', `${i}.json`);
+        const f = s.L.postings(i);
         try {
           return [i, JSON.parse(await fsp.readFile(f, 'utf8'))];
         } catch (e) {
           // 欠損や破損を黙って空シャードとして扱うと、その語だけ静かに 0 ヒットになる。
-          throw new Error(`索引が壊れています (${dir})。postings/${i}.json を読めません: ${e.message}\n\`context-grill sync\` で作り直してください。`);
+          throw new Error(`索引が壊れています (${dir})。${path.basename(f)} を読めません: ${e.message}\n\`context-grill sync\` で作り直してください。`);
         }
       })));
     } else {
@@ -141,6 +240,22 @@ export class IndexStore {
     s.N = s.manifest.N;
     s.avgdl = s.manifest.avgdl || 1;
     s.dims = s.manifest.dims || 0;
+
+    // docs / vectors の fd は open() の時点で確保する。遅延オープンにすると、索引を
+    // 作り直した後に初めて触った時点では旧世代のファイル名が pruneGenerations() で
+    // もう消えており、docs は ENOENT、vectors は例外を出さずに null / 0 件になる。
+    // fd を握っていれば unlink 後も実体を読み続けられる（Windows も含めて実測済み。
+    // CLAUDE.md の UNVERIFIED-009 を参照）。
+    //
+    // postings: false でも確保する。分岐を増やすと「どの条件でスナップショットが
+    // 保証されるか」が読み手に分からなくなるため、fd 2 本のコストを取る。
+    try {
+      s._fd = IndexStore._openFd(s.L.docs);
+      if (s.dims && fs.existsSync(s.L.vectors)) s._vfd = IndexStore._openFd(s.L.vectors);
+    } catch (e) {
+      await s.close();
+      throw e;
+    }
     return s;
   }
 
@@ -158,7 +273,6 @@ export class IndexStore {
   textOf(i) {
     const m = this.meta[i];
     if (!m) return '';
-    if (this._fd === null) this._fd = IndexStore._openFd(path.join(this.dir, 'docs.txt'));
     const buf = Buffer.allocUnsafe(m.len);
     fs.readSync(this._fd, buf, 0, m.len, m.off);
     return buf.toString('utf8');
@@ -190,12 +304,7 @@ export class IndexStore {
   }
 
   vecAt(i) {
-    if (!this.dims) return null;
-    if (this._vfd === null) {
-      const p = path.join(this.dir, 'vectors.bin');
-      if (!fs.existsSync(p)) return null;
-      this._vfd = IndexStore._openFd(p);
-    }
+    if (!this.dims || this._vfd === null) return null;
     const bytes = this.dims * 4;
     const buf = Buffer.allocUnsafe(bytes);
     fs.readSync(this._vfd, buf, 0, bytes, i * bytes);
@@ -204,11 +313,9 @@ export class IndexStore {
 
   /** 正規化済みベクトル前提のコサイン類似度検索。ブロック読みでメモリを一定に保つ。 */
   vectorSearch(query, topK = 100, filter = null) {
-    if (!this.dims) return [];
-    const p = path.join(this.dir, 'vectors.bin');
-    if (!fs.existsSync(p)) return [];
-    const fd = IndexStore._openFd(p);
-    try {
+    if (!this.dims || this._vfd === null) return [];
+    const fd = this._vfd; // open() で確保した世代固定の fd。ここで開き直さない
+    {
       const dims = this.dims, rowBytes = dims * 4, block = 2048;
       const buf = Buffer.allocUnsafe(rowBytes * block);
       const scores = new Map();
@@ -228,7 +335,7 @@ export class IndexStore {
         }
       }
       return topN(scores, topK);
-    } finally { IndexStore._closeFd(fd); }
+    }
   }
 
   stats() {
@@ -256,8 +363,18 @@ function topN(scores, k) {
   return arr.slice(0, k).map(([idx, score]) => ({ idx, score }));
 }
 
-export async function writeVectors(dir, vectors, dims) {
-  const fd = fs.openSync(path.join(dir, 'vectors.bin'), 'w');
+/**
+ * ベクトルを書き、まだ公開していない manifest に dims を書き足す。
+ *
+ * 公開済みの manifest は書き換えない。公開したファイルを上書きすると、読み手が
+ * 中途半端な内容を掴む余地ができるうえ、Windows では開かれていると書けなくなる。
+ */
+export async function writeVectors(dir, gen, vectors, dims) {
+  const L = layout(dir, gen);
+  if (!fs.existsSync(L.manifestTmp)) {
+    throw new Error(`公開済みの世代にはベクトルを書けません (${L.manifest})。finish(extra, { publish: false }) で公開を遅らせてください。`);
+  }
+  const fd = fs.openSync(L.vectors, 'w');
   try {
     for (const v of vectors) {
       const f = Float32Array.from(v);
@@ -266,7 +383,7 @@ export async function writeVectors(dir, vectors, dims) {
       fs.writeSync(fd, Buffer.from(f.buffer, f.byteOffset, f.byteLength));
     }
   } finally { fs.closeSync(fd); }
-  const mp = path.join(dir, 'manifest.json');
+  const mp = L.manifestTmp;
   const m = JSON.parse(await fsp.readFile(mp, 'utf8'));
   m.dims = dims;
   await fsp.writeFile(mp, JSON.stringify(m, null, 2));

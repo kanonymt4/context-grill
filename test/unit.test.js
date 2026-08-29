@@ -136,10 +136,11 @@ test('索引: シャードが欠けた索引は open() の時点で原因の分�
   await b.finish({ indexKey: 'k' });
 
   // 欠損したシャードを黙って空として扱うと、その語だけ静かに 0 ヒットになる
-  await fsp.rm(path.join(dir, 'postings', '3.json'));
+  const missing = b.L.postings(3);
+  await fsp.rm(missing);
   await assert.rejects(
     () => IndexStore.open(dir),
-    (e) => /索引が壊れています/.test(e.message) && /postings.3\.json/.test(e.message),
+    (e) => /索引が壊れています/.test(e.message) && /3\.json/.test(path.basename(missing)) && /3\.json/.test(e.message),
     'シャード欠損が、原因の分かるメッセージで報告されていない');
 
   await fsp.rm(dir, { recursive: true, force: true });
