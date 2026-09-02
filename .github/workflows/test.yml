@@ -37,3 +37,16 @@ jobs:
           test -f context-grill.config.json
           test -f commands.md
           test -f usage.md
+
+  all-tests:
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Matrix test suite complete
+        run: |
+          echo "All test matrix jobs completed."
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "One or more matrix jobs failed."
+            exit 1
+          fi
