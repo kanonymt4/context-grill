@@ -128,6 +128,72 @@ test('索引: 開いたストアは作り直しの影響を受けない（スナ
   await store.close();
   await fsp.rm(dir, { recursive: true, force: true });
 });
+/**
+ * 同時に走った 2 本のビルドが、互いの本文を壊さないことを確かめる。
+ *
+ * start() は (latestGen(dir) ?? 0) + 1 で世代を決めるが、latestGen() は公開済みの
+ * manifest.NNNN.json しか見ない。進行中のビルドは次の start() から見えないため、
+ * 2 本目が同じ世代番号を選び、docs.NNNN.txt を 'w' で開いて 1 本目の書き込みを
+ * その場で 0 バイトに切り詰める。
+ *
+ * 壊れるかどうかは finish() の順序で変わる。後から finish() した側の meta が公開され、
+ * その meta のオフセットが指す先には先に書いた側のバイトが載っている。例外は出ない。
+ * だから両方の順序を試す。
+ *
+ * **現在このテストは skip している。** 'wx' で世代の奪い合いは解消するが、finish() が
+ * pruneGenerations(dir, 自分の世代) を呼び、「自分の世代以外はゴミ」として他方の
+ * docs.NNNN.txt を消してしまうため、公開された manifest が存在しないファイルを指して
+ * ENOENT になる（2026-09-20 実測）。pruneGenerations() は「他の世代が使用中か」を
+ * 知る手段を持たず、局所修正では閉じない。前提の再設計が要る。
+ */
+test('索引: 同時に走った 2 本のビルドが互いの本文を壊さない',
+  { skip: 'pruneGenerations() が他世代の docs を消すため未解決。issue 化までスキップ' },
+  async () => {
+  const mk = (tag, i) => ({
+    id: `${tag}:${i}#0`, docId: `${tag}${i}`, sourceId: tag, sourceType: 'local',
+    path: `${tag}/${i}.js`, title: `${tag} ${i}`, kind: 'code', lang: 'js', url: null,
+    version: '1', meta: {}, start: 1, end: 3, hash: String(i), ntok: 10,
+    text: `${tag}${i}:` + tag.repeat(40),
+  });
+
+  for (const order of [['A', 'B'], ['B', 'A']]) {
+    const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-'));
+    try {
+      const a = new IndexBuilder(dir);
+      await a.start();
+      for (let i = 0; i < 5; i++) a.add(mk('A', i));
+
+      // ここで 2 本目が始まる。1 本目はまだ finish() していない。
+      const b = new IndexBuilder(dir);
+      await b.start();
+      for (let i = 0; i < 5; i++) b.add(mk('B', i));
+
+      assert.notEqual(a.L.gen, b.L.gen,
+        `同時に走った 2 本が同じ世代番号 ${a.L.gen} を選んだ（docs.NNNN.txt を奪い合う）`);
+
+      for (const who of order) await (who === 'A' ? a : b).finish({ indexKey: 'k' });
+
+      const store = await IndexStore.open(dir);
+      try {
+        const bad = [];
+        for (let i = 0; i < store.N; i++) {
+          const m = store.meta[i];
+          const got = store.textOf(i);
+          if (!got.startsWith(`${m.docId}:`)) {
+            bad.push(`${m.docId} (off=${m.off}) の本文が ${JSON.stringify(got.slice(0, 12))}`);
+          }
+        }
+        assert.deepEqual(bad, [],
+          `finish 順 ${order.join('→')}: meta と docs.NNNN.txt が食い違っている`);
+      } finally {
+        await store.close();
+      }
+    } finally {
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('索引: シャードが欠けた索引は open() の時点で原因の分かる例外になる', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-'));
   const b = new IndexBuilder(dir);
