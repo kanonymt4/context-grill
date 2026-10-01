@@ -174,8 +174,10 @@ function validate(c) {
     // 連結した先が 404 になるため、実際に叩く前にここで弾く。
     if ((s.type === 'confluence' || s.type === 'jira') && s.baseUrl) {
       const bad = String(s.baseUrl).match(/\/(spaces|pages|display|browse|wiki\/spaces)\//);
+      // Jira の API はサイトのルート直下にあり、/wiki は Confluence 側のパス
+      const jiraWiki = s.type === 'jira' && String(s.baseUrl).match(/^(https?:\/\/[^/?#]+)\/wiki(?:[/?#]|$)/i);
       if (bad) {
-        const m = String(s.baseUrl).match(/^(https?:\/\/[^/]+(?:\/wiki)?)/);
+        const m = String(s.baseUrl).match(s.type === 'jira' ? /^(https?:\/\/[^/]+)/ : /^(https?:\/\/[^/]+(?:\/wiki)?)/);
         const suggest = m ? m[1] : 'https://your-org.atlassian.net' + (s.type === 'confluence' ? '/wiki' : '');
         const field = s.type === 'confluence' ? 'pageUrls / spaceKey' : 'jql / projectKey';
         errs.push(
@@ -183,6 +185,13 @@ function validate(c) {
           `      指定された値: ${s.baseUrl}\n` +
           `      正しい形式  : ${suggest}\n` +
           `      特定のページ・課題を対象にする場合は ${field} で指定してください`
+        );
+      } else if (jiraWiki) {
+        errs.push(
+          `${where}.baseUrl に /wiki が含まれています（Jira の API はサイトのルート直下にあり、/wiki は Confluence 用です）\n` +
+          `      指定された値: ${s.baseUrl}\n` +
+          `      正しい形式  : ${jiraWiki[1]}\n` +
+          `      Confluence と同じサイトでも、Jira の baseUrl には /wiki を付けないでください`
         );
       }
     }

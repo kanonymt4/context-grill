@@ -218,6 +218,12 @@ N が想定より少ない場合はこの設定を確認してください。
 
 チケット URL（`.../browse/ENG-1234`）を `context-grill resolve` に渡すと `key = ENG-1234` の形になります。
 
+### 注意点
+
+- **`baseUrl` はサイトのルート**（Cloud なら `https://xxx.atlassian.net`）にしてください。Confluence と同じサイトでも、
+  Confluence 用の `/wiki` は付けません（Jira の API はサイトのルート直下にあります）。
+  `/wiki` 付きの `baseUrl` は、設定の読み込み時（`doctor` を含む）にエラーになります
+
 ---
 
 ## ローカルディレクトリ
