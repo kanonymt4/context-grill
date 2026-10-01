@@ -455,8 +455,8 @@ context-grill init        # 設定のひな形とドキュメントを配置し�
 OS を問わず同じ手順です。`init` が `commands.md` / `usage.md` を作業ディレクトリに置き、
 続けて何をすればよいかを画面に表示します。あとは `sources` を設定して `sync` するだけです。
 
-`npm install -g` で `EACCES` が出る場合と、PATH が通らない場合の対処は同梱の
-`README-FIRST.md` に記載しています。
+`npm install -g` で `EACCES` が出る場合と、PATH が通らない場合の対処は、`.tgz` と一緒に
+渡す `README-FIRST.md` に記載しています（パッケージの中には入っていません。9.2 を参照）。
 
 **`npm install -g` で `EACCES` エラーが出る場合**
 
@@ -470,7 +470,9 @@ npm install -g ./context-grill-<version>.tgz
 ```
 
 
-配布物に含まれるのは `bin/` `src/` `scripts/` `context-grill.config.example.json` `commands.md` `usage.md` `README.md` のみです。認証情報・索引・作業メモ（`CLAUDE.md`）はどの配布物にも含まれません。
+配布物（`.tgz`）に含まれるのは `bin/` `src/` `context-grill.config.example.json` `commands.md` `usage.md` `README.md` のみです。
+`scripts/` は CI・開発者向けで、`README-FIRST.md` は展開前に読むものなので、どちらも入れていません
+（`README-FIRST.md` は `.tgz` の横に置く別ファイルとして渡します。手順は 9.2）。認証情報・索引・作業メモ（`CLAUDE.md`）はどの配布物にも含まれません。
 
 ### 9.2 メールで配布する場合の注意
 
