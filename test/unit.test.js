@@ -445,3 +445,12 @@ test('埋め込み: 途中で失敗しても成功分はキャッシュに残る
   await new Promise((r) => server.close(r));
   await fsp.rm(dir, { recursive: true, force: true });
 });
+
+test('配布物: package.json の files に scripts/ を含めない', async () => {
+  // scripts/ には CI 用・開発者向けのスクリプトと、tgz の横に置く README-FIRST.md がある。
+  // どれも利用者のインストール先には要らない（README-FIRST は展開前に読むため同梱しない）。
+  // ディレクトリごと指定すると、今後そこに置くファイルまで黙って配布物に入る。
+  const pkg = JSON.parse(await fsp.readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  const shipped = pkg.files.map((f) => f.replace(/\/+$/, ''));
+  assert.ok(!shipped.includes('scripts'), `files に scripts が含まれている: ${JSON.stringify(pkg.files)}`);
+});
