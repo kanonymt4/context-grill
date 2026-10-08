@@ -11,6 +11,7 @@ import { redactText } from './util/redact.js';
 import { scanAll, summarize, projectFacts, extractEndpoints } from './analysis/static.js';
 import { runTask } from './llm/pipeline.js';
 import { TASKS, listTasks } from './tasks/index.js';
+import { validatePresets, listPresets } from './presets.js';
 import { startMcpServer } from './mcp/server.js';
 import { initEgress, egressPlan } from './util/egress.js';
 import { SENSITIVE_DENY } from './util/sensitive.js';
@@ -358,6 +359,17 @@ async function cmdDoctor(flags) {
     catch (e) { checks.push({ name: '設定の妥当性', ok: false, detail: e.message }); }
   }
   if (config) {
+    // loadConfig は preset の形では throw しないので、不正な定義はここで気づけるようにする
+    const presetErrs = validatePresets(config);
+    if (presetErrs.length) checks.push({ name: 'presets の定義', ok: false, detail: presetErrs.join('\n') });
+    for (const p of listPresets(config)) {
+      const argText = p.arguments.length ? p.arguments.map((a) => `${a.name}(${a.required ? '必須' : '任意'})`).join(', ') : 'なし';
+      checks.push({
+        name: `preset "${p.name}"`,
+        ok: true,
+        detail: `task=${p.task} effort=${p.effort} sources=${p.sources ? p.sources.join(',') : '全て'} 引数=${argText}`,
+      });
+    }
     const need = new Set([config.llm.apiKeyEnv]);
     for (const s of config.sources) {
       if (s.auth?.tokenEnv) need.add(s.auth.tokenEnv);
