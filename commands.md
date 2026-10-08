@@ -14,6 +14,9 @@ init / resolve  →  sync  →  search / scan / ask
 
 困ったら `doctor`（環境チェック）と `privacy`（送信先の確認）。
 
+定型の調査は設定の `presets` に登録して `run` で呼び出せます
+→ [run / presets — よく使う調査を登録して呼び出す](#run--presets--よく使う調査を登録して呼び出す)
+
 `ask --dry-run` で作った証拠パックは、他の AI に渡して議論の材料にもできます
 → [証拠パックを他の AI に渡して壁打ちする](#証拠パックを他の-ai-に渡して壁打ちする)
 
@@ -31,12 +34,14 @@ init / resolve  →  sync  →  search / scan / ask
 | `search <クエリ>` | ハイブリッド検索 | 不使用 | なし |
 | `scan` | 静的解析（毎回同じ結果） | 不使用 | なし |
 | `ask <指示>` | 証拠付きで調査・回答を生成 | **使用** | あり |
+| `run <名前> [引数名=値...]` | 設定の `presets` に登録した調査を実行 | **使用** | あり |
+| `presets` | 登録済みの preset を表示 | 不使用 | なし |
 | `tasks` | 利用可能なタスク種別を表示 | 不使用 | なし |
 | `mcp` | MCP サーバーとして起動（stdio） | — | — |
 | `doctor` | 実行環境と設定の健全性チェック | 不使用 | なし |
 | `privacy` | どのデータがどこへ送られるかを表示 | 不使用 | なし |
 
-APIキーが要るのは `ask` だけです（`--dry-run` なら不要）。`sync` は埋め込みを有効にした場合のみ埋め込みAPIを使います。
+APIキーが要るのは `ask` と `run` だけです（どちらも `--dry-run` なら不要）。`sync` は埋め込みを有効にした場合のみ埋め込みAPIを使います。
 
 ---
 
@@ -51,6 +56,8 @@ APIキーが要るのは `ask` だけです（`--dry-run` なら不要）。`syn
 | `--offline` | 一切の外部通信を禁止（`search` / `scan` / `--dry-run` のみ動作） |
 
 `--offline` は、閉じたネットワークで「本当に何も出ていかないこと」を強制したいときに使います。
+
+`run` では `--source` は使えません（対象ソースは preset が決めます）。
 
 ---
 
@@ -290,6 +297,7 @@ context-grill ask 'pipeline.ts の分岐と rag.ts の閾値判定に穴がな�
 ### 上限そのものを変えたい場合
 
 `effortPresets` は設定ファイルで上書きできます。
+（名前を付けた調査テンプレートを登録する `presets` とは別の設定です → [run の節](#run--presets--よく使う調査を登録して呼び出す)）
 
 ```json
 {
@@ -329,6 +337,129 @@ context-grill ask '設計に穴がないか検証して。「状態遷移」「�
 ```
 
 `--out` を付けない場合は `.context-grill/runs/<日時>-<タスク>-<ハッシュ>/bundle.md` に出力され、実行後にパスが表示されます。
+
+---
+
+## run / presets — よく使う調査を登録して呼び出す
+
+「障害の原因調査」のように毎回ほぼ同じ形で頼む調査は、設定ファイルの `presets` に登録しておけます。
+`ask` に毎回 `--task` `--effort` `--source` と指示文を書く代わりに、名前と引数だけで呼び出します。
+
+```json
+{
+  "presets": [
+    {
+      "name": "bug-triage",
+      "description": "障害の原因調査",
+      "task": "bug",
+      "effort": "deep",
+      "sources": ["api", "jira"],
+      "instruction": "{{symptom}} の原因を調べて。「タイムアウト」「リトライ」「{{component}}」まわりを見たい",
+      "arguments": [
+        { "name": "symptom", "description": "症状" },
+        { "name": "component", "description": "対象", "required": false, "default": "エラー処理" }
+      ]
+    }
+  ]
+}
+```
+
+```bash
+context-grill run bug-triage "symptom=決済 API で 504"
+context-grill run bug-triage "symptom=決済 API で 504" component=課金 --dry-run
+```
+
+### 定義のフィールド
+
+| フィールド | 必須 | 内容 |
+| --- | --- | --- |
+| `name` | 必須 | 呼び出す名前。小文字英数字と `-` `_`（先頭は英数字、64 文字まで） |
+| `description` | 任意 | `presets` の一覧に出す説明 |
+| `task` | 必須 | `spec` / `bug` / `security` / `static` / `design` |
+| `effort` | 任意 | `effortPresets` のキー（既定は `low` / `normal` / `deep`。省略時は `normal`） |
+| `sources` | 任意 | 対象ソースの id の配列。省略すると全ソース |
+| `instruction` | 必須 | 指示文のテンプレート。`{{引数名}}` が引数に置き換わる |
+| `arguments[].name` | 必須 | 引数名。小文字英字で始まり、小文字英数字と `_`（32 文字まで） |
+| `arguments[].description` | 任意 | `presets` の一覧に出す説明 |
+| `arguments[].required` | 任意 | 既定は `true`。`false` にすると省略できる |
+| `arguments[].default` | `required: false` のとき必須 | 省略したとき（空文字を渡したときも）に使う値。文字列 |
+
+`instruction` に書いた `{{名前}}` は、すべて `arguments` に宣言する必要があり、宣言した引数はすべて
+`instruction` で使う必要があります（どちらかが欠けると定義が不正になります）。
+
+- 文字としての `{{` は `\{{` と書きます。**JSON の中ではバックスラッシュ自体を重ねて `"\\{{"` と書きます。**
+- 単独の `}}` は、そのまま文字として扱われます。
+- 引数の値の中に `{{…}}` や `$&` があっても、展開されず文字のまま入ります。
+- **`${...}` は環境変数として展開されません。** 他の設定項目とは扱いが異なります。
+  なお、名前に `TOKEN` / `KEY` / `SECRET` / `PASSWORD` などを含む環境変数の値（12 文字以上）が `presets` の中に
+  そのまま書かれていると、設定の読み込み時に拒否されます。
+- 指示文で調べたい概念を「」で囲む書き方は、`run` でも同じように効きます
+  → [指示文の書き方で証拠の集まり方が変わる](#指示文の書き方で証拠の集まり方が変わる)
+
+### 引数の渡し方
+
+`run <名前>` の後ろに、`名前=値` の形で並べます。最初の `=` で分割するので、値の中の `=` はそのまま使えます。
+順序は自由で、`--dry-run` などのオプションは前後どちらにも置けます。`--` より後ろの語はすべて引数として扱われます（オプションとしては解釈されません）。
+
+```bash
+# 空白を含む値は、語全体を引用符で囲む（"symptom=" の後ろだけを囲まない）
+context-grill run bug-triage "symptom=決済 API で 504"
+
+# $ を含む値は、bash / zsh では単引用符で囲む
+context-grill run bug-triage 'symptom=$100 の請求が二重になる'
+
+# 値が - で始まる場合も、名前=値 の形なら問題ない
+context-grill run bug-triage symptom=-1
+```
+
+次の場合はエラーになります（終了コード 1）。
+
+- `=` の無い語（`symptom` だけ）、名前が空の語（`=x`）
+- 同じ名前を 2 回指定した
+- 宣言されていない引数名、必須引数の不足（使い方の行が表示されます）
+
+### 使えないオプション
+
+- `--task` `--effort` `--source` `--sources` は**常にエラー**です。task・effort・対象ソースは preset の
+  定義で決まるためです（省略した effort と `normal` の明示は区別できないので、定義によらず一律に拒否します）。
+  変えたい調査は、別の preset を定義するか、`ask` を使ってください。
+- 上記以外の未知のオプション（`--focus` など）もエラーです。preset の引数は `focus=値` の形で渡します。
+- `--model` は使えます。送信先ホストは変わらず、API リクエストのモデル名だけが変わります。
+  preset の定義に `model` を書くことはできません（モデルは設定の `llm.model` で決まります）。
+
+`--model` `--out` `--log` の直後に引数を置くと、その引数が値として吸われて消えます
+（例: `--model symptom=x`）。宣言された引数名で始まる値は、この誤りとしてエラーにします。引数は先に書くか、`--` の後ろに書いてください。
+
+### 実行の前に確認する
+
+`run` は `ask` と同じ経路で実行します。`security.allowLlmUpload=false` や `--offline` などの送信前のゲートも
+そのまま効くので、`--dry-run` を付ければ LLM へは何も送らずに証拠パックだけを確認できます。
+
+展開結果は stderr に出ます（`--log warn` / `error` / `silent` を指定すると消えます）。
+
+```
+[context-grill] preset "bug-triage": task=bug effort=deep sources=api,jira
+[context-grill] 指示: 決済 API で 504 の原因を調べて。「タイムアウト」「リトライ」「エラー処理」まわりを見たい
+```
+
+`--json` を付けると `ask` の出力に `preset`（`name` / `args` / `task` / `effort` / `sources` / `instruction`）が
+1 キー加わります。実行結果ディレクトリの `meta.json` には preset の名前は残りません。
+
+### presets — 登録済みの preset を確認する
+
+```bash
+context-grill presets          # 名前・説明・task・effort・sources・引数・指示文・呼び出し例
+context-grill presets --json   # {"presets": [...], "errors": [...]}
+```
+
+索引や API キーは不要です。不正な定義があると、`presets` は使えない定義の理由を表示して終了コード 1 になります。
+`doctor` でも確認できます。不正な定義があっても、他の（正しい）preset は使えます。
+
+### effortPresets との違い
+
+`effortPresets` は `low` / `normal` / `deep` それぞれの**検索の深さの上限**（クエリ数・証拠数・トークン数）を
+決める設定で、`--effort` で選びます。`presets` は**調査の依頼そのもの**（task・対象ソース・指示文・引数）に
+名前を付ける設定で、`run` で呼び出します。preset の `effort` は、`effortPresets` のどれを使うかを選ぶだけです。
 
 ---
 
@@ -407,7 +538,7 @@ context-grill ask "pipeline.ts の分岐と rag.ts の閾値判定に穴がな�
 
 ## 実行結果の中身
 
-`ask` を実行すると `.context-grill/runs/<日時>-<タスク>-<ハッシュ>/` に3つのファイルが残ります。
+`ask` / `run` を実行すると `.context-grill/runs/<日時>-<タスク>-<ハッシュ>/` に3つのファイルが残ります。
 
 | ファイル | 内容 |
 | --- | --- |
@@ -466,6 +597,7 @@ context-grill doctor --json    # 機械可読（終了コードは ✗ があれ
 | 実行環境 | Node.js 20+ / fetch / git CLI |
 | 設定ファイル | 発見できるか、JSON として妥当か |
 | 設定の妥当性 | 必須項目、`id` の重複、後述の形式チェック |
+| presets | 定義の形式（不正なら ✗、使える preset ごとに ✓） |
 | 環境変数 | 設定内で参照している認証情報が揃っているか（名前と有無のみ。値は表示しません） |
 | source のパス | `local` ソースの `path` が存在するディレクトリか（ソースごとに個別表示） |
 | 索引 | 構築済みか |

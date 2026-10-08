@@ -79,6 +79,39 @@
     }
   ],
 
+  "presets": [
+    {
+      "_comment": "よく使う調査の登録例。context-grill run <name> 引数名=値 で呼び出す。effortPresets（深さの上限）とは別物。instruction の ${...} は環境変数展開されない",
+      "name": "bug-triage",
+      "description": "障害の原因調査",
+      "task": "bug",
+      "effort": "deep",
+      "sources": ["api", "jira"],
+      "instruction": "{{symptom}} の原因を調べて。「タイムアウト」「リトライ」「{{component}}」まわりを見たい",
+      "arguments": [
+        { "name": "symptom", "description": "症状" },
+        { "name": "component", "description": "対象のコンポーネント", "required": false, "default": "エラー処理" }
+      ]
+    },
+    {
+      "name": "spec-gap",
+      "description": "実装と仕様書の食い違いの整理",
+      "task": "spec",
+      "sources": ["api", "spec"],
+      "instruction": "「{{topic}}」について実装と仕様書の食い違いを整理して",
+      "arguments": [
+        { "name": "topic", "description": "調べたい機能や概念" }
+      ]
+    },
+    {
+      "name": "release-security",
+      "description": "リリース前のセキュリティ確認",
+      "task": "security",
+      "effort": "low",
+      "instruction": "認証・認可、入力検証、秘密情報の扱いのリスクを確認して。「トークン」「権限チェック」「入力検証」を見たい"
+    }
+  ],
+
   "retrieval": {
     "glossaryBridge": true,
     "chunk": {

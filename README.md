@@ -161,12 +161,38 @@ context-grill ask 'サブスク解約の予約機能を追加したい。「解�
 > 囲まないと実質 4 クエリしか生成されず、`--effort` を上げても増えません。
 > 詳しくは [commands.md](./commands.md) を参照してください。
 
+### よく使う調査を登録する（presets）
+
+毎回ほぼ同じ形で頼む調査は、設定ファイルの `presets` に名前を付けて登録できます。
+
+```json
+{
+  "presets": [
+    {
+      "name": "bug-triage", "task": "bug", "effort": "deep", "sources": ["api", "jira"],
+      "instruction": "{{symptom}} の原因を調べて。「タイムアウト」「リトライ」を見たい",
+      "arguments": [{ "name": "symptom" }]
+    }
+  ]
+}
+```
+
+```bash
+context-grill presets                                          # 登録済みの一覧
+context-grill run bug-triage "symptom=決済 API で 504" --dry-run
+```
+
+`run` は `ask` と同じ経路で実行するため、`allowLlmUpload=false` や `--offline` の制御もそのまま効きます。
+引数の渡し方・使えないオプション・書式は [commands.md](./commands.md) の「run / presets」を参照してください。
+
 ### トークンを一切使わないコマンド
 
 ```bash
 context-grill search "リトライ 上限"     # ハイブリッド検索だけ（LLM 不使用）
 context-grill scan --severity medium     # 静的解析だけ（LLM 不使用・毎回同じ結果）
 context-grill ask "..." --dry-run        # 証拠パック + プロンプト一式を生成して終了
+context-grill run <名前> ... --dry-run   # 登録した preset を展開し、証拠パックだけ生成して終了
+context-grill presets                    # 登録済みの preset を表示
 ```
 
 `--dry-run` が出力する `bundle.md` は、そのまま任意のチャット（Claude / ChatGPT / ローカル LLM）に
@@ -409,6 +435,7 @@ N が想定より少ない場合はこの設定を確認してください。
 | `llm.provider` | `anthropic` | `anthropic` / `openai` / `openai-compat` / `dry` |
 | `policy.requireVerbatimQuote` | `true` | 逐語引用の実在照合 |
 | `budget.maxRepairs` | `2` | 検証違反時の再生成回数 |
+| `presets` | `[]` | 名前付きの調査テンプレート（`run` で呼び出す。`effortPresets` とは別） |
 
 ローカル LLM の例:
 
