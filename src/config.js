@@ -63,6 +63,7 @@ export const DEFAULTS = {
     forbidSpeculativeLanguage: true,
     language: 'ja',
   },
+  presets: [],                   // 名前付きの調査テンプレート（形式は src/presets.js。effortPresets とは別物）
   effortPresets: {
     low:    { queries: 3, final: 14, evidenceTokens: 20000 },
     normal: { queries: 6, final: 28, evidenceTokens: 55000 },
@@ -131,7 +132,20 @@ export async function loadConfig(explicitPath) {
   } catch (e) {
     throw new Error(`設定ファイルの JSON が不正です (${configPath}): ${e.message}`);
   }
-  const merged = deepMerge(DEFAULTS, expandEnv(raw));
+  // presets は環境変数展開の対象から外す。instruction 内の ${...} は文字のまま通す
+  // （展開すると未定義の変数が黙って '' になり、指示文が欠ける）。
+  // 実際の秘密値が貼られた場合は validate() の秘密値スキャンで拒否する。
+  const rawIsObject = raw !== null && typeof raw === 'object' && !Array.isArray(raw);
+  const rawPresets = rawIsObject && Object.hasOwn(raw, 'presets') ? raw.presets : undefined;
+  let rest = raw;
+  if (rawIsObject) {
+    const { presets: _omit, ...others } = raw;
+    rest = others;
+  }
+  const merged = deepMerge(DEFAULTS, expandEnv(rest));
+  // DEFAULTS の配列を共有しない。形の検証は presets.js の validatePresets が行い、
+  // ここでは throw しない（不正な preset があっても sync / search / MCP 起動は止めない）。
+  merged.presets = rawPresets ?? [];
   merged.rootDir = rootDir;
   merged.configPath = configPath;
   merged.workspaceDir = path.resolve(rootDir, merged.workspace);
@@ -151,7 +165,8 @@ export async function loadConfig(explicitPath) {
     chunk: merged.retrieval.chunk,
     embedding: { p: merged.retrieval.embedding.provider, m: merged.retrieval.embedding.model, d: merged.retrieval.embedding.dimensions },
   }));
-  merged.configHash = sha256(stableStringify({ ...merged, rootDir: undefined, configPath: undefined, workspaceDir: undefined }));
+  // presets は調査の入口を名前で束ねただけで、索引にも設定の同一性にも影響させない
+  merged.configHash = sha256(stableStringify({ ...merged, rootDir: undefined, configPath: undefined, workspaceDir: undefined, presets: undefined }));
   return merged;
 }
 
@@ -256,6 +271,7 @@ function validate(c) {
   scan(c.llm, 'llm');
   scan(c.retrieval, 'retrieval');
   scan(c.security, 'security');
+  scan(c.presets, 'presets');
   if (errs.length) throw new Error('設定エラー:\n  - ' + errs.join('\n  - '));
 }
 
