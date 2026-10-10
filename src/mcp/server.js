@@ -127,6 +127,11 @@ const fitsRunTask = (p) => RUN_TASK_TASKS.includes(p.task) && RUN_TASK_EFFORTS.i
 
 const presetDescription = (p) => p.description ?? `context-grill の preset（task=${p.task} effort=${p.effort}）`;
 
+// Claude Code は prompt の引数を空白で語に分け、余った語を黙って捨てる。補完に出るのは description
+// だけなので、引数のある preset の list 用 description にだけ注意書きを足す（get の応答と本文には足さない）。
+const ARG_NOTE = '※引数は空白（半角・全角）で区切られます。空白を含む値は渡せません（余った語は捨てられます）。';
+const listDescription = (p) => (p.arguments.length > 0 ? `${presetDescription(p)} ${ARG_NOTE}` : presetDescription(p));
+
 /**
  * prompts/get が返す依頼文。会話側のモデルに context_grill_run_task の呼び出しを頼むだけで、
  * ここでは何も実行しない。資料本文を含まず、preset と呼び出し側の引数だけから作るので墨消しはかけない
@@ -289,7 +294,7 @@ export async function startMcpServer({ configPath } = {}) {
    */
   const promptList = () => listPresets(config).filter(fitsRunTask).map((p) => ({
     name: p.name,
-    description: presetDescription(p),
+    description: listDescription(p),
     arguments: p.arguments.map((a) => {
       const text = [a.description, a.required ? null : `省略時: ${JSON.stringify(a.default)}`].filter(Boolean).join(' ');
       return { name: a.name, ...(text ? { description: text } : {}), required: a.required };
