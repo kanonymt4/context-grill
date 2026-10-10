@@ -281,6 +281,24 @@ Confluence の HTML 変換より簡単。
 
 ## 未確認・次にやること
 
+- **未対応（同時ビルドが索引を壊す / 排他制御が無い）**: `IndexBuilder.start()` は
+  `(latestGen(dir) ?? 0) + 1` で世代を決めるが、`latestGen()` は**公開済みの**
+  `manifest.NNNN.json` しか見ないため、進行中の別ビルドが見えない。`docs.NNNN.txt` を
+  `'w'` で開くので、同時に走った 2 本が同じ名前を掴み、後から `start()` した側が
+  先に書いた分を **0 バイトに切り詰める**。壊れ方は `finish()` の順序で変わり、後に
+  `finish()` した側の meta が公開される一方、そのオフセットが指す先には先に書いた側の
+  バイトが載る。**例外は出ない。**
+  `buildIndex()` の呼び出し元は `src/cli.js`（2 箇所）と `src/mcp/server.js` の 3 箇所で、
+  **`src/` に排他制御は存在しない**。MCP サーバーは常駐するため、常駐中に別プロセスで
+  `context-grill sync` を叩けば同じ索引ディレクトリに 2 本が並ぶ。仮想的な条件ではない。
+  `'wx'` で開いて `EEXIST` なら世代を進める部分修正と再現テストを
+  `fix/index-concurrent-build` に置いた（**テストは skip 付き**。CI を緑に保つため）。
+  **これだけでは閉じない。** 世代の奪い合いは解消するが、`finish()` が
+  `pruneGenerations(dir, 自分の世代)` を呼んで「自分の世代以外はゴミ」として他方の
+  `docs.NNNN.txt` を消すため、公開された manifest が存在しないファイルを指して
+  **ENOENT** になる（2026-09-20 実測。skip を外すと 1 件失敗する）。
+  `pruneGenerations()` は「他の世代が使用中か」を知る手段を持たないので、
+  局所修正ではなく前提の再設計が要る。
 - ~~`schema/` が空~~ 2026-08-10 解消。ITEM_SCHEMA/envelopeSchema (src/tasks/index.js) は「LLM回答の構造契約」であり対象プロジェクト非依存（itemTypes も spec/debug/security/techdebt/design の固定5種）。外部化するとカスタマイズ可能に見えて evidence/quotes の強制が緩められるリスクがあるため、inline のままが妥当と判断し schema/ を削除、package.json の files からも除去
 - ~~実際に GitHub / Confluence / Jira へ接続して動かした記録がない~~ 2026-08-10 GitHub のみ検証済み（private repo kanonymt4/context-grill を対象に mode:clone で実クローン成功、42ドキュメント/130チャンク、パーマリンク生成も正常）。`GITHUB_TOKEN` を用意しなくても `credential.helper=osxkeychain` があれば通ることを確認 （コードが独自 Authorization ヘッダを付けるのはトークンがある場合のみで、無い場合は素の git にフォールバックするため）。Confluence / Jira は未検証のまま
 - ~~埋め込みプロバイダを有効にした状態での動作が未検証~~ 2026-08-10 検証済み。ローカル Ollama（nomic-embed-text, 768次元, openai-compat 経由）で sync→embedding API 実呼び出し→egress.log記録→ベクトル索引構築→2回目syncでキャッシュ全ヒット、を一通り確認。ただし RRF 融合の効果は一様ではなく、クエリによってはBM25単体の方が正解ファイルの順位が高いケースもあった（言い換え耐性は効く場合とそうでない場合がある）。2026-08-10 OpenAI/Voyage 実APIでも検証済み。
