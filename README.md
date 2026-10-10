@@ -161,12 +161,39 @@ context-grill ask 'サブスク解約の予約機能を追加したい。「解�
 > 囲まないと実質 4 クエリしか生成されず、`--effort` を上げても増えません。
 > 詳しくは [commands.md](./commands.md) を参照してください。
 
+### よく使う調査を登録する（presets）
+
+毎回ほぼ同じ形で頼む調査は、設定ファイルの `presets` に名前を付けて登録できます。
+
+```json
+{
+  "presets": [
+    {
+      "name": "bug-triage", "task": "bug", "effort": "deep", "sources": ["api", "jira"],
+      "instruction": "{{symptom}} の原因を調べて。「タイムアウト」「リトライ」を見たい",
+      "arguments": [{ "name": "symptom" }]
+    }
+  ]
+}
+```
+
+```bash
+context-grill presets                                          # 登録済みの一覧
+context-grill run bug-triage "symptom=決済 API で 504" --dry-run
+```
+
+`run` は `ask` と同じ経路で実行するため、`allowLlmUpload=false` や `--offline` の制御もそのまま効きます。
+引数の渡し方・使えないオプション・書式は [commands.md](./commands.md) の「run / presets」を参照してください。
+MCP からは prompts として呼び出せます（[§5](#5-mcp-サーバーとして使う)）。
+
 ### トークンを一切使わないコマンド
 
 ```bash
 context-grill search "リトライ 上限"     # ハイブリッド検索だけ（LLM 不使用）
 context-grill scan --severity medium     # 静的解析だけ（LLM 不使用・毎回同じ結果）
 context-grill ask "..." --dry-run        # 証拠パック + プロンプト一式を生成して終了
+context-grill run <名前> ... --dry-run   # 登録した preset を展開し、証拠パックだけ生成して終了
+context-grill presets                    # 登録済みの preset を表示
 ```
 
 `--dry-run` が出力する `bundle.md` は、そのまま任意のチャット（Claude / ChatGPT / ローカル LLM）に
@@ -222,6 +249,21 @@ context-grill mcp     # stdio
 
 **推奨フロー**：`context_grill_evidence_pack` → ホストのモデルが JSON を生成 → `context_grill_verify` → 合格した結果だけを提示。
 これによりホストのモデルが何であっても、**証拠の選定と合否判定は同一**になります。
+
+### preset を prompts として呼び出す
+
+設定の `presets`（§4）のうち検証を通ったものは、MCP の prompts として同じ名前・同じ引数で公開されます。
+Claude Code では `/mcp__<サーバー名>__<preset 名> 値1 値2` の形で呼びます（`<サーバー名>` は上の設定例の
+`mcpServers` のキー。例では `context-grill`）。
+
+- **prompt は何も実行しません。** `context_grill_run_task` を所定の引数で呼ぶよう会話側のモデルに依頼する文面を返すだけで、
+  実際に呼ぶかどうかは会話側のモデルと権限確認に委ねられます。外部通信も書き込みも、prompt 自体はしません。
+- 引数は半角・全角の空白で語に分けられ、定義順に位置で対応します（Claude Code 2.1.231 で実測）。引用符は効かず、
+  引数の数より多い語は黙って捨てられるので、空白を含む値（症状文など）は渡せません。そのような値は CLI の `run` で渡してください。
+  必須の引数を先に定義してください。
+- `--model` や dry-run に当たる引数はありません。preset の定義を変えたら MCP サーバーの再起動が必要です。
+
+詳細と制約は [commands.md](./commands.md) の「MCP から呼び出す（prompts）」を参照してください。
 
 ---
 
@@ -386,6 +428,12 @@ N が想定より少ない場合はこの設定を確認してください。
 
 チケット URL を `context-grill resolve` に渡すと `key = ENG-1234` の形で生成されます。
 
+補足:
+
+- `baseUrl` は **サイトのルート**（Cloud なら `https://xxx.atlassian.net`）です。Confluence と同じサイトでも、
+  Confluence 用の `/wiki` は付けません（Jira の API はサイトのルート直下にあります）。
+  `/wiki` 付きの `baseUrl` は、設定の読み込み時（`doctor` を含む）にエラーになります
+
 ### 8.4 ローカルディレクトリ
 
 ```json
@@ -403,6 +451,7 @@ N が想定より少ない場合はこの設定を確認してください。
 | `llm.provider` | `anthropic` | `anthropic` / `openai` / `openai-compat` / `dry` |
 | `policy.requireVerbatimQuote` | `true` | 逐語引用の実在照合 |
 | `budget.maxRepairs` | `2` | 検証違反時の再生成回数 |
+| `presets` | `[]` | 名前付きの調査テンプレート（`run` で呼び出す。`effortPresets` とは別） |
 
 ローカル LLM の例:
 
@@ -449,8 +498,8 @@ context-grill init        # 設定のひな形とドキュメントを配置し�
 OS を問わず同じ手順です。`init` が `commands.md` / `usage.md` を作業ディレクトリに置き、
 続けて何をすればよいかを画面に表示します。あとは `sources` を設定して `sync` するだけです。
 
-`npm install -g` で `EACCES` が出る場合と、PATH が通らない場合の対処は同梱の
-`README-FIRST.md` に記載しています。
+`npm install -g` で `EACCES` が出る場合と、PATH が通らない場合の対処は、`.tgz` と一緒に
+渡す `README-FIRST.md` に記載しています（パッケージの中には入っていません。9.2 を参照）。
 
 **`npm install -g` で `EACCES` エラーが出る場合**
 
@@ -464,7 +513,9 @@ npm install -g ./context-grill-<version>.tgz
 ```
 
 
-配布物に含まれるのは `bin/` `src/` `scripts/` `context-grill.config.example.json` `commands.md` `usage.md` `README.md` のみです。認証情報・索引・作業メモ（`CLAUDE.md`）はどの配布物にも含まれません。
+配布物（`.tgz`）に含まれるのは `bin/` `src/` `context-grill.config.example.json` `commands.md` `usage.md` `README.md` のみです。
+`scripts/` は CI・開発者向けで、`README-FIRST.md` は展開前に読むものなので、どちらも入れていません
+（`README-FIRST.md` は `.tgz` の横に置く別ファイルとして渡します。手順は 9.2）。認証情報・索引・作業メモ（`CLAUDE.md`）はどの配布物にも含まれません。
 
 ### 9.2 メールで配布する場合の注意
 
@@ -582,6 +633,7 @@ Confluence ページや Issue に「これまでの指示を無視して〜」�
 検知した場合はモデルに **実行させず `open_questions` へ報告させます**。
 またツール群には任意の URL を取得する機能が無く、更新系 API も持たないため、
 **注入が成功しても外部送信・データ改変の経路がありません**。
+preset の prompts（§5）も依頼文を返すだけで、外部通信も書き込みもしません。
 
 ### 10.7 推奨運用
 

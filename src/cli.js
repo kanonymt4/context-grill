@@ -11,6 +11,7 @@ import { redactText } from './util/redact.js';
 import { scanAll, summarize, projectFacts, extractEndpoints } from './analysis/static.js';
 import { runTask } from './llm/pipeline.js';
 import { TASKS, listTasks } from './tasks/index.js';
+import { validatePresets, listPresets, getPreset, resolvePreset, PresetError } from './presets.js';
 import { startMcpServer } from './mcp/server.js';
 import { initEgress, egressPlan } from './util/egress.js';
 import { SENSITIVE_DENY } from './util/sensitive.js';
@@ -31,6 +32,8 @@ const HELP = `context-grill — GitHub と Atlassian の一次資料に基づい
   search <クエリ>           ハイブリッド検索（LLM を使わない・トークン消費ゼロ）
   scan                      静的解析（LLM を使わない・毎回同じ結果）
   ask <指示>                証拠付きで調査・回答を生成
+  run <名前> [引数名=値...]  設定の presets に登録した調査を実行
+  presets                   登録済みの preset を表示
   tasks                     利用可能なタスク種別を表示
   mcp                       MCP サーバーとして起動（stdio）
   doctor                    実行環境と設定の健全性チェック
@@ -62,11 +65,17 @@ ask:
   --dry-run                 LLM を呼ばずにプロンプト+証拠バンドルのみ生成（トークン 0）
   --out <file>              レポートの保存先
 
+run:
+  引数は 名前=値 の形で渡します（空白を含む場合は語全体を引用符で囲む: "symptom=決済 API で 504"）
+  --dry-run / --out <file> / -m, --model <name> は ask と同じ意味です
+  --task / --effort / --source は指定できません（preset の定義で決まります）
+
 例:
   context-grill sync
   context-grill ask '決済リトライの仕様を整理して。「リトライ上限」「冪等性」を確認' --task spec
   context-grill ask '500 エラーの原因を調べて。「タイムアウト」「コネクション」を見たい' --task bug --effort deep
   context-grill ask '認証まわりのリスク。「トークン」「権限チェック」を確認' --task security --dry-run
+  context-grill run bug-triage "symptom=決済 API で 504" --dry-run
 
   指示文で調べたい概念を「」や "" で囲むと、それぞれが独立した検索クエリになります。
   囲まないと実質 4 クエリしか生成されません（詳細は commands.md）。
@@ -134,6 +143,8 @@ export async function main(argv) {
     case 'search': return cmdSearch(pos.slice(1).join(' '), flags);
     case 'scan': return cmdScan(flags);
     case 'ask': return cmdAsk(pos.slice(1).join(' '), flags);
+    case 'run': return cmdRun(pos[1], pos.slice(2), flags);
+    case 'presets': return cmdPresets(flags);
     case 'mcp': return cmdMcp(flags);
     default:
       process.stderr.write(`未知のコマンド: ${cmd}\n\n${HELP}`);
@@ -358,6 +369,17 @@ async function cmdDoctor(flags) {
     catch (e) { checks.push({ name: '設定の妥当性', ok: false, detail: e.message }); }
   }
   if (config) {
+    // loadConfig は preset の形では throw しないので、不正な定義はここで気づけるようにする
+    const presetErrs = validatePresets(config);
+    if (presetErrs.length) checks.push({ name: 'presets の定義', ok: false, detail: presetErrs.join('\n') });
+    for (const p of listPresets(config)) {
+      const argText = p.arguments.length ? p.arguments.map((a) => `${a.name}(${a.required ? '必須' : '任意'})`).join(', ') : 'なし';
+      checks.push({
+        name: `preset "${p.name}"`,
+        ok: true,
+        detail: `task=${p.task} effort=${p.effort} sources=${p.sources ? p.sources.join(',') : '全て'} 引数=${argText}`,
+      });
+    }
     const need = new Set([config.llm.apiKeyEnv]);
     for (const s of config.sources) {
       if (s.auth?.tokenEnv) need.add(s.auth.tokenEnv);
@@ -500,23 +522,179 @@ async function cmdAsk(instruction, flags) {
   const config = await load(flags);
   const taskId = String(flags.task || 'spec');
   if (!TASKS[taskId]) { process.stderr.write(`未知のタスク: ${taskId}（${Object.keys(TASKS).join(', ')}）\n`); return 1; }
-  const res = await runTask(config, {
+  return executeTask(config, {
     taskId, instruction,
     effort: String(flags.effort || 'normal'),
     sourceIds: listOf(flags.source),
     dryRun: Boolean(flags['dry-run'] || flags.dryRun),
     modelOverride: typeof flags.model === 'string' ? flags.model : null,
-  });
+  }, flags);
+}
+
+/**
+ * ask と run の共通の実行・出力処理。runTask の経路（送信前のゲートを含む）をそのまま通す。
+ * extraJson は --json の出力に足すキー（ask は空）。
+ */
+async function executeTask(config, opts, flags, extraJson = {}) {
+  const res = await runTask(config, opts);
   if (flags.out) {
     await fsp.writeFile(path.resolve(String(flags.out)), res.markdown);
     process.stderr.write(`レポートを保存しました: ${flags.out}\n`);
   }
   if (flags.json) {
-    process.stdout.write(JSON.stringify({ runId: res.runId, meta: res.meta, verification: res.verification, result: res.result, evidence: res.pack.items.map((e) => ({ id: e.id, label: e.label, url: e.url })) }, null, 2) + '\n');
+    process.stdout.write(JSON.stringify({ runId: res.runId, meta: res.meta, verification: res.verification, result: res.result, evidence: res.pack.items.map((e) => ({ id: e.id, label: e.label, url: e.url })), ...extraJson }, null, 2) + '\n');
   } else {
     process.stdout.write(res.markdown + '\n');
   }
   process.stderr.write(`\n実行結果一式: ${res.runDir}\n`);
+  return 0;
+}
+
+// ----------------------------------------------------------------- run
+// run で受け付けるフラグ。これ以外はエラーにする（黙って無視すると、押したつもりの安全側の指定が効かない）
+const RUN_FLAGS = new Set(['config', 'json', 'log', 'offline', 'dry-run', 'dryRun', 'out', 'model', 'help']);
+// preset の定義で決まるため、run では指定させないフラグ
+const RUN_CONFLICT_FLAGS = ['task', 'effort', 'source', 'sources'];
+// alias で未知のまま残るのは -k（→ top）だけ。短い形も添えて、押したキーが分かるようにする
+const flagText = (k) => (k === 'top' ? '--top（-k）' : k.length === 1 ? `-${k}` : `--${k}`);
+
+/** `名前=値` の語の並びを引数オブジェクトにする。最初の = だけで分割し、値はそのまま使う */
+function parseRunArgs(tokens) {
+  const errors = [];
+  const entries = [];
+  const seen = new Set();
+  for (const t of tokens) {
+    const i = t.indexOf('=');
+    if (i < 0) { errors.push(`引数 "${t}" は 名前=値 の形で渡してください（例: symptom=…）`); continue; }
+    const k = t.slice(0, i);
+    if (k === '') { errors.push(`引数の名前が空です: "${t}"（名前=値 の形で渡してください）`); continue; }
+    if (seen.has(k)) { errors.push(`引数 "${k}" が 2 回指定されています`); continue; }
+    seen.add(k);
+    entries.push([k, t.slice(i + 1)]);
+  }
+  // obj[k] = v では __proto__ への代入が黙って無視されるため、fromEntries で作る
+  return { args: Object.fromEntries(entries), errors };
+}
+
+/** preset の引数から使い方の 1 行を作る。例: context-grill run bug-triage symptom=<値> [component=<値>] */
+function usageLine(preset) {
+  const parts = preset.arguments.map((a) => (a.required ? `${a.name}=<値>` : `[${a.name}=<値>]`));
+  return ['context-grill run', preset.name, ...parts].join(' ');
+}
+
+async function cmdRun(name, tokens, flags) {
+  // 1) フラグの検査。設定は読まずに失敗させる
+  const flagErrors = [];
+  for (const k of RUN_CONFLICT_FLAGS) {
+    if (Object.hasOwn(flags, k)) {
+      flagErrors.push(`run では --${k} は指定できません（preset の定義で決まります。変えたい場合は別の preset を定義するか ask を使ってください）`);
+    }
+  }
+  for (const k of Object.keys(flags)) {
+    if (RUN_FLAGS.has(k) || RUN_CONFLICT_FLAGS.includes(k)) continue;
+    const hint = k !== 'top' && /^[a-z][a-z0-9_]*$/.test(k) ? `（preset の引数なら ${k}=値 の形で渡します）` : '';
+    flagErrors.push(`run では使えないオプション: ${flagText(k)}${hint}`);
+  }
+  for (const k of ['model', 'out']) {
+    if (Object.hasOwn(flags, k) && (typeof flags[k] !== 'string' || flags[k] === '')) {
+      flagErrors.push(`--${k} には値が必要です（例: --${k} ${k === 'model' ? '<モデル名>' : '<ファイル>'}）`);
+    }
+  }
+  // 2) 位置引数の解析
+  const { args, errors: argErrors } = parseRunArgs(tokens);
+  if (flagErrors.length || argErrors.length) {
+    process.stderr.write([...flagErrors, ...argErrors].join('\n') + '\n');
+    return 1;
+  }
+
+  // 3) 設定
+  const config = await load(flags);
+  if (!name) {
+    const names = listPresets(config).map((p) => p.name);
+    process.stderr.write(`preset 名を指定してください（定義済み: ${names.join(', ') || 'なし'}。一覧は context-grill presets）\n`);
+    if (!names.length && validatePresets(config).length) {
+      process.stderr.write('設定の presets に不正な定義があります（context-grill doctor で確認できます）\n');
+    }
+    return 1;
+  }
+
+  // 4) preset の取得
+  let preset;
+  try {
+    preset = getPreset(config, name);
+  } catch (e) {
+    if (!(e instanceof PresetError)) throw e;
+    process.stderr.write(`${e.message}\n`);
+    if (e.code === 'EPRESET_UNKNOWN') process.stderr.write('一覧: context-grill presets\n');
+    return 1;
+  }
+  // parseArgs は値を取るフラグの直後の語を値として吸うので、`--model symptom=x` は引数が消える。
+  // 宣言された引数名で始まる値だけを疑う（ファイル名などの誤検知を避ける）
+  for (const k of ['out', 'log', 'model']) {
+    const v = flags[k];
+    if (typeof v === 'string' && preset.arguments.some((a) => v.startsWith(`${a.name}=`))) {
+      process.stderr.write(`--${k} の値 "${v}" が引数のように見えます。引数は --${k} の前に置くか、-- の後ろに書いてください\n`);
+      return 1;
+    }
+  }
+
+  // 5) 展開
+  let resolved;
+  try {
+    resolved = resolvePreset(config, name, args);
+  } catch (e) {
+    if (!(e instanceof PresetError)) throw e;
+    process.stderr.write(`${e.message}\n`);
+    if (e.code === 'EPRESET_ARGS' || e.code === 'EPRESET_EMPTY_INSTRUCTION') process.stderr.write(`使い方: ${usageLine(preset)}\n`);
+    return 1;
+  }
+  log.info(`preset "${name}": task=${resolved.taskId} effort=${resolved.effort} sources=${resolved.sourceIds ? resolved.sourceIds.join(',') : '全て'}`);
+  // 複数行の指示は 2 行目以降を字下げして、1 件のまとまりとして読めるようにする（presets の表示と同じ）
+  log.info(`指示: ${resolved.instruction.split('\n').join('\n      ')}`);
+
+  // 6) 実行は ask と同じ経路（runTask）。allowLlmUpload / --offline のゲートはそちらにある
+  return executeTask(config, {
+    taskId: resolved.taskId,
+    instruction: resolved.instruction,
+    effort: resolved.effort,
+    sourceIds: resolved.sourceIds,
+    dryRun: Boolean(flags['dry-run'] || flags.dryRun),
+    modelOverride: typeof flags.model === 'string' ? flags.model : null,
+  }, flags, {
+    preset: {
+      name, args, task: resolved.taskId, effort: resolved.effort,
+      sources: resolved.sourceIds, instruction: resolved.instruction,
+    },
+  });
+}
+
+// ------------------------------------------------------------- presets
+async function cmdPresets(flags) {
+  const config = await load(flags);
+  const presets = listPresets(config);
+  const errors = validatePresets(config);
+  if (flags.json) {
+    process.stdout.write(JSON.stringify({ presets, errors }, null, 2) + '\n');
+    return errors.length ? 1 : 0;
+  }
+  for (const p of presets) {
+    const argText = p.arguments.length
+      ? p.arguments.map((a) => `${a.name}（${a.required ? '必須' : `任意、既定 ${JSON.stringify(a.default)}`}）${a.description ?? ''}`).join(' / ')
+      : 'なし';
+    process.stdout.write([
+      `${p.name}${p.description ? `  ${p.description}` : ''}`,
+      `  task=${p.task}  effort=${p.effort}  sources=${p.sources ? p.sources.join(',') : '全て'}`,
+      `  引数: ${argText}`,
+      `  指示: ${p.instruction.split('\n').join('\n        ')}`,
+      `  例:   ${usageLine(p)}`,
+      '',
+    ].join('\n') + '\n');
+  }
+  if (errors.length) {
+    process.stderr.write(`✗ 使えない preset の定義があります（context-grill doctor でも確認できます）\n${errors.map((e) => `  - ${e}`).join('\n')}\n`);
+    return 1;
+  }
+  if (!presets.length) process.stdout.write('preset は定義されていません（設定ファイルの presets に追加します。commands.md 参照）\n');
   return 0;
 }
 
@@ -572,6 +750,6 @@ async function cmdPrivacy(flags) {
 }
 
 async function cmdMcp(flags) {
-  await startMcpServer({ configPath: flags.config ? String(flags.config) : undefined });
+  await startMcpServer({ configPath: flags.config ? String(flags.config) : undefined, offline: Boolean(flags.offline) });
   return 0;
 }

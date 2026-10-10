@@ -63,6 +63,7 @@ export const DEFAULTS = {
     forbidSpeculativeLanguage: true,
     language: 'ja',
   },
+  presets: [],                   // 名前付きの調査テンプレート（形式は src/presets.js。effortPresets とは別物）
   effortPresets: {
     low:    { queries: 3, final: 14, evidenceTokens: 20000 },
     normal: { queries: 6, final: 28, evidenceTokens: 55000 },
@@ -116,6 +117,27 @@ function expandEnv(value) {
   return value;
 }
 
+/**
+ * JSON.parse した直後の木から、自分のキーとしての "__proto__" を探してパスを返す。
+ * JSON.parse は "__proto__" を own のプロパティとして作るが、後段の `out[k] = v` は
+ * プロトタイプの設定になり、Object.entries / Object.keys から見えなくなる。
+ * 黙って消えるうえ、配列要素の中では秘密値スキャンも迂回できてしまうため、読み込みの
+ * 入口で拒否する。最上位の presets の配下は validatePresets の担当なので走査しない。
+ */
+function findProtoKeys(node, at = '', found = []) {
+  if (Array.isArray(node)) {
+    node.forEach((n, i) => findProtoKeys(n, `${at}[${i}]`, found));
+  } else if (node && typeof node === 'object') {
+    for (const k of Object.keys(node)) {
+      const here = at ? `${at}.${k}` : k;
+      if (k === '__proto__') found.push(here);
+      if (at === '' && k === 'presets') continue;
+      findProtoKeys(node[k], here, found);
+    }
+  }
+  return found;
+}
+
 export async function loadConfig(explicitPath) {
   const configPath = explicitPath ? path.resolve(explicitPath) : findConfigPath();
   if (!configPath) {
@@ -131,7 +153,24 @@ export async function loadConfig(explicitPath) {
   } catch (e) {
     throw new Error(`設定ファイルの JSON が不正です (${configPath}): ${e.message}`);
   }
-  const merged = deepMerge(DEFAULTS, expandEnv(raw));
+  const protoKeys = findProtoKeys(raw);
+  if (protoKeys.length) {
+    throw new Error('設定エラー:\n  - ' + protoKeys.map((p) => `${p} は使えません（"__proto__" キーは読み込み時に消えてしまうため）`).join('\n  - '));
+  }
+  // presets は環境変数展開の対象から外す。instruction 内の ${...} は文字のまま通す
+  // （展開すると未定義の変数が黙って '' になり、指示文が欠ける）。
+  // 実際の秘密値が貼られた場合は validate() の秘密値スキャンで拒否する。
+  const rawIsObject = raw !== null && typeof raw === 'object' && !Array.isArray(raw);
+  const rawPresets = rawIsObject && Object.hasOwn(raw, 'presets') ? raw.presets : undefined;
+  let rest = raw;
+  if (rawIsObject) {
+    const { presets: _omit, ...others } = raw;
+    rest = others;
+  }
+  const merged = deepMerge(DEFAULTS, expandEnv(rest));
+  // DEFAULTS の配列を共有しない。形の検証は presets.js の validatePresets が行い、
+  // ここでは throw しない（不正な preset があっても sync / search / MCP 起動は止めない）。
+  merged.presets = rawPresets ?? [];
   merged.rootDir = rootDir;
   merged.configPath = configPath;
   merged.workspaceDir = path.resolve(rootDir, merged.workspace);
@@ -151,7 +190,8 @@ export async function loadConfig(explicitPath) {
     chunk: merged.retrieval.chunk,
     embedding: { p: merged.retrieval.embedding.provider, m: merged.retrieval.embedding.model, d: merged.retrieval.embedding.dimensions },
   }));
-  merged.configHash = sha256(stableStringify({ ...merged, rootDir: undefined, configPath: undefined, workspaceDir: undefined }));
+  // presets は調査の入口を名前で束ねただけで、索引にも設定の同一性にも影響させない
+  merged.configHash = sha256(stableStringify({ ...merged, rootDir: undefined, configPath: undefined, workspaceDir: undefined, presets: undefined }));
   return merged;
 }
 
@@ -174,8 +214,10 @@ function validate(c) {
     // 連結した先が 404 になるため、実際に叩く前にここで弾く。
     if ((s.type === 'confluence' || s.type === 'jira') && s.baseUrl) {
       const bad = String(s.baseUrl).match(/\/(spaces|pages|display|browse|wiki\/spaces)\//);
+      // Jira の API はサイトのルート直下にあり、/wiki は Confluence 側のパス
+      const jiraWiki = s.type === 'jira' && String(s.baseUrl).match(/^(https?:\/\/[^/?#]+)\/wiki(?:[/?#]|$)/i);
       if (bad) {
-        const m = String(s.baseUrl).match(/^(https?:\/\/[^/]+(?:\/wiki)?)/);
+        const m = String(s.baseUrl).match(s.type === 'jira' ? /^(https?:\/\/[^/]+)/ : /^(https?:\/\/[^/]+(?:\/wiki)?)/);
         const suggest = m ? m[1] : 'https://your-org.atlassian.net' + (s.type === 'confluence' ? '/wiki' : '');
         const field = s.type === 'confluence' ? 'pageUrls / spaceKey' : 'jql / projectKey';
         errs.push(
@@ -183,6 +225,13 @@ function validate(c) {
           `      指定された値: ${s.baseUrl}\n` +
           `      正しい形式  : ${suggest}\n` +
           `      特定のページ・課題を対象にする場合は ${field} で指定してください`
+        );
+      } else if (jiraWiki) {
+        errs.push(
+          `${where}.baseUrl に /wiki が含まれています（Jira の API はサイトのルート直下にあり、/wiki は Confluence 用です）\n` +
+          `      指定された値: ${s.baseUrl}\n` +
+          `      正しい形式  : ${jiraWiki[1]}\n` +
+          `      Confluence と同じサイトでも、Jira の baseUrl には /wiki を付けないでください`
         );
       }
     }
@@ -247,6 +296,7 @@ function validate(c) {
   scan(c.llm, 'llm');
   scan(c.retrieval, 'retrieval');
   scan(c.security, 'security');
+  scan(c.presets, 'presets');
   if (errs.length) throw new Error('設定エラー:\n  - ' + errs.join('\n  - '));
 }
 

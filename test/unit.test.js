@@ -18,6 +18,7 @@ import { scanDocument } from '../src/analysis/rules.js';
 import { htmlToText, adfToText } from '../src/util/html.js';
 import { buildEmbeddingRequest, parseEmbeddingResponse, embedChunks, embedCacheKey, embedCacheNamespace } from '../src/index/embed.js';
 import { initEgress } from '../src/util/egress.js';
+import { loadConfig } from '../src/config.js';
 
 test('glob: 代表的なパターン', () => {
   assert.ok(matchGlob('src/a/b.js', 'src/**'));
@@ -355,6 +356,59 @@ test('URL 解析: GitHub / Confluence / Jira の指定方法', async () => {
   assert.equal(parseGithubUrl('https://example.com/foo'), null);
 });
 
+// ------------------------------------------------------------------ 設定の検証
+async function loadWithSource(source) {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-cfg-'));
+  try {
+    const file = path.join(dir, 'context-grill.config.json');
+    await fsp.writeFile(file, JSON.stringify({ project: 'x', sources: [source], llm: { provider: 'dry', model: 'd' } }));
+    return await loadConfig(file);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+}
+
+const JIRA_JQL = 'project = ENG ORDER BY updated DESC';
+
+test('設定: Jira の baseUrl に /wiki が付いていたら sync を待たずに拒否する', async () => {
+  // Confluence と同じサイトでは Confluence 用の baseUrl (.../wiki) を写しやすい。
+  // Jira の API はサイトのルート直下にあるため、そのままだと sync が 404 になる。
+  for (const baseUrl of ['https://acme.atlassian.net/wiki', 'https://acme.atlassian.net/wiki/']) {
+    await assert.rejects(
+      () => loadWithSource({ id: 'jira', type: 'jira', baseUrl, jql: JIRA_JQL }),
+      (e) => {
+        assert.match(e.message, /sources\[0\]\.baseUrl に \/wiki が含まれています/, baseUrl);
+        assert.match(e.message, /正しい形式  : https:\/\/acme\.atlassian\.net\n/, baseUrl);
+        return true;
+      },
+    );
+  }
+});
+
+test('設定: Jira の baseUrl に Confluence のページ URL を貼ったら /wiki なしのルートを案内する', async () => {
+  // 案内が /wiki を残すと、直した直後に上の検査で再び弾かれる
+  await assert.rejects(
+    () => loadWithSource({
+      id: 'jira', type: 'jira', jql: JIRA_JQL,
+      baseUrl: 'https://acme.atlassian.net/wiki/spaces/ENG/pages/393217/決済仕様',
+    }),
+    (e) => {
+      assert.match(e.message, /正しい形式  : https:\/\/acme\.atlassian\.net\n/);
+      return true;
+    },
+  );
+});
+
+test('設定: /wiki の検査は Jira の baseUrl の先頭パスが wiki のときだけ', async () => {
+  const wiki = await loadWithSource({ id: 'wiki', type: 'confluence', baseUrl: 'https://acme.atlassian.net/wiki', spaceKey: 'ENG' });
+  assert.equal(wiki.sources[0].baseUrl, 'https://acme.atlassian.net/wiki');
+
+  for (const baseUrl of ['https://acme.atlassian.net', 'https://gateway.example.com/atlassian', 'https://gateway.example.com/wiki-proxy/jira']) {
+    const jira = await loadWithSource({ id: 'jira', type: 'jira', baseUrl, jql: JIRA_JQL });
+    assert.equal(jira.sources[0].baseUrl, baseUrl);
+  }
+});
+
 // ------------------------------------------------------------------ 埋め込み
 test('埋め込み: クエリと文書で input_type を使い分ける', () => {
   const voyage = { provider: 'voyage', model: 'voyage-3-lite', dimensions: 512 };
@@ -456,4 +510,13 @@ test('埋め込み: 途中で失敗しても成功分はキャッシュに残る
   delete process.env.TEST_EMBED_KEY;
   await new Promise((r) => server.close(r));
   await fsp.rm(dir, { recursive: true, force: true });
+});
+
+test('配布物: package.json の files に scripts/ を含めない', async () => {
+  // scripts/ には CI 用・開発者向けのスクリプトと、tgz の横に置く README-FIRST.md がある。
+  // どれも利用者のインストール先には要らない（README-FIRST は展開前に読むため同梱しない）。
+  // ディレクトリごと指定すると、今後そこに置くファイルまで黙って配布物に入る。
+  const pkg = JSON.parse(await fsp.readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  const shipped = pkg.files.map((f) => f.replace(/\/+$/, ''));
+  assert.ok(!shipped.includes('scripts'), `files に scripts が含まれている: ${JSON.stringify(pkg.files)}`);
 });
