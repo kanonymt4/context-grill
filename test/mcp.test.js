@@ -57,6 +57,10 @@ function rpc(probe, lines, expected, opts = {}) {
     let out = '';
     let errText = '';
     const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('タイムアウト: ' + out + errText)); }, 20000);
+    // チャンクの境界でマルチバイト文字が割れても壊れないよう、setEncoding で継ぎ直す
+    // （Buffer を文字列に足すと U+FFFD になる）
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     child.stdout.on('data', (c) => {
       out += c;
       let nl;
