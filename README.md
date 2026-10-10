@@ -184,6 +184,7 @@ context-grill run bug-triage "symptom=決済 API で 504" --dry-run
 
 `run` は `ask` と同じ経路で実行するため、`allowLlmUpload=false` や `--offline` の制御もそのまま効きます。
 引数の渡し方・使えないオプション・書式は [commands.md](./commands.md) の「run / presets」を参照してください。
+MCP からは prompts として呼び出せます（[§5](#5-mcp-サーバーとして使う)）。
 
 ### トークンを一切使わないコマンド
 
@@ -248,6 +249,19 @@ context-grill mcp     # stdio
 
 **推奨フロー**：`context_grill_evidence_pack` → ホストのモデルが JSON を生成 → `context_grill_verify` → 合格した結果だけを提示。
 これによりホストのモデルが何であっても、**証拠の選定と合否判定は同一**になります。
+
+### preset を prompts として呼び出す
+
+設定の `presets`（§4）のうち検証を通ったものは、MCP の prompts として同じ名前・同じ引数で公開されます。
+Claude Code では `/mcp__<サーバー名>__<preset 名> 値1 値2` の形で呼びます（`<サーバー名>` は上の設定例の
+`mcpServers` のキー。例では `context-grill`）。
+
+- **prompt は何も実行しません。** `context_grill_run_task` を所定の引数で呼ぶよう会話側のモデルに依頼する文面を返すだけで、
+  実際に呼ぶかどうかは会話側のモデルと権限確認に委ねられます。外部通信も書き込みも、prompt 自体はしません。
+- 引数は定義順に位置で渡り、空白で区切られる可能性があります（未実測）。必須の引数を先に定義してください。
+- `--model` や dry-run に当たる引数はありません。preset の定義を変えたら MCP サーバーの再起動が必要です。
+
+詳細と制約は [commands.md](./commands.md) の「MCP から呼び出す（prompts）」を参照してください。
 
 ---
 
@@ -617,6 +631,7 @@ Confluence ページや Issue に「これまでの指示を無視して〜」�
 検知した場合はモデルに **実行させず `open_questions` へ報告させます**。
 またツール群には任意の URL を取得する機能が無く、更新系 API も持たないため、
 **注入が成功しても外部送信・データ改変の経路がありません**。
+preset の prompts（§5）も依頼文を返すだけで、外部通信も書き込みもしません。
 
 ### 10.7 推奨運用
 
