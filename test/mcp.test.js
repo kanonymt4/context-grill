@@ -258,3 +258,109 @@ test('MCP: 検索でストアを開いた後でも sync が成功する（公開
       `rename の宛先 ${path.basename(m.to)} が既に存在していた（Windows で開かれていればここで EPERM になる）`);
   }
 });
+
+// --- --offline が MCP サーバーに効くこと ---
+//
+// startMcpServer は設定を自前で loadConfig し直すため、cmdMcp が --offline を渡さないと効かない。
+// しかも runTaskWithStore / syncSources / buildIndex は呼ばれるたびに initEgress(config) をやり直す。
+// POLICY だけを上書きする修正では、次の run_task で normal に戻る。
+// そのため bin/ 経由（cmdMcp を通る経路）で起動し、設定値そのものが書き換わっていることを見る。
+// （writeProbe は startMcpServer を直接 import するので cmdMcp を通らない）
+
+const INIT = { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'test', version: '0' } } };
+
+/** bin/context-grill.js を子プロセスで起動し、全リクエストを 1 回で送って応答を待つ。後始末は SIGKILL。 */
+function rpcBin(dir, args, lines, expected, { env = {}, then = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(ROOT, 'bin', 'context-grill.js'), ...args], {
+      cwd: dir, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...env },
+    });
+    const responses = [];
+    let out = '';
+    let errText = '';
+    let done = false;
+    let sentThen = false;
+    let target = expected;
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('タイムアウト: ' + out + errText)); }, 20000);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (c) => {
+      out += c;
+      let nl;
+      while ((nl = out.indexOf('\n')) >= 0) {
+        const line = out.slice(0, nl).trim();
+        out = out.slice(nl + 1);
+        if (!line) continue;
+        try { responses.push(JSON.parse(line)); } catch { /* ignore */ }
+      }
+      // then を渡すと、最初の expected 件が返ってから続きを送る（同じプロセスでの「その後」を作る）
+      if (then && !sentThen && responses.length >= expected) {
+        sentThen = true;
+        target = expected + then.length;
+        child.stdin.write(then.map((l) => JSON.stringify(l)).join('\n') + '\n');
+      }
+      if (responses.length >= target && !done) { done = true; setTimeout(() => child.kill('SIGKILL'), 100); }
+    });
+    child.stderr.on('data', (c) => { errText += c; });
+    child.on('close', () => { clearTimeout(timer); resolve({ responses, stderr: errText }); });
+    child.on('error', reject);
+    child.stdin.write(lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+  });
+}
+
+const egressModeOf = (res, id) => {
+  const r = res.responses.find((x) => x.id === id);
+  assert.ok(r, `id=${id} の応答が無い: ` + res.stderr.slice(-300));
+  return JSON.parse(r.result.content[0].text).egress.mode;
+};
+
+for (const [label, args] of [['--offline mcp', ['--offline', 'mcp']], ['mcp --offline', ['mcp', '--offline']]]) {
+  test(`MCP: ${label} で context_grill_status の egress.mode が offline になる`, async () => {
+    const { dir, configPath } = await fixture({ build: true });
+    const res = await rpcBin(dir, [...args, '-c', configPath], [INIT, call(2, 'context_grill_status', {})], 2);
+    assert.equal(egressModeOf(res, 2), 'offline');
+  });
+}
+
+test('MCP: --offline なしでは egress.mode は normal のまま（startMcpServer の既定は変わらない）', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const res = await rpcBin(dir, ['mcp', '-c', configPath], [INIT, call(2, 'context_grill_status', {})], 2);
+  assert.equal(egressModeOf(res, 2), 'normal');
+});
+
+test('MCP: --offline は run_task（dry_run）の後でも維持される（initEgress のやり直しで戻らない）', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const res = await rpcBin(dir, ['--offline', 'mcp', '-c', configPath], [
+    INIT,
+    call(2, 'context_grill_run_task', { instruction: 'refundPayment の挙動', task: 'spec', dry_run: true }),
+  ], 2, { then: [call(3, 'context_grill_status', {})] });
+  const run = res.responses.find((r) => r.id === 2);
+  assert.ok(run, 'run_task の応答が無い: ' + res.stderr.slice(-300));
+  assert.notEqual(run.result?.isError, true, 'dry_run がエラーになった: ' + JSON.stringify(run.result).slice(0, 300));
+  assert.equal(egressModeOf(res, 3), 'offline');
+});
+
+test('MCP: --offline では dry_run なしの run_task が送信前にブロックされ、egress.log も作られない', async () => {
+  const { dir } = await fixture({ build: false });
+  const keyEnv = 'CG_MCP_OFFLINE_TEST_KEY';
+  const configPath = path.join(dir, 'offline.config.json');
+  await fsp.writeFile(configPath, JSON.stringify({
+    project: 'mcp-offline',
+    sources: [{ id: 'repo', type: 'local', path: dir, include: ['src/**'] }],
+    // .invalid は名前解決できない。offline が効いていなければ別のエラーになり、メッセージで区別できる
+    llm: { provider: 'anthropic', model: 'test-model', apiKeyEnv: keyEnv, baseUrl: 'https://llm.invalid' },
+    security: { allowLlmUpload: true },
+  }));
+  const config = await loadConfig(configPath);
+  await syncSources(config, {});
+  await buildIndex(config, { embed: false });
+  const res = await rpcBin(dir, ['--offline', 'mcp', '-c', configPath], [
+    INIT,
+    call(2, 'context_grill_run_task', { instruction: 'refundPayment の挙動', task: 'spec' }),
+  ], 2, { env: { [keyEnv]: 'dummy-not-a-real-key' } });
+  const run = res.responses.find((r) => r.id === 2);
+  assert.ok(run, 'run_task の応答が無い: ' + res.stderr.slice(-300));
+  assert.equal(run.result?.isError, true, '送信がブロックされず成功した: ' + JSON.stringify(run.result).slice(0, 300));
+  assert.match(run.result.content[0].text, /オフラインモード/);
+  await assert.rejects(fsp.access(path.join(config.workspaceDir, 'egress.log')), { code: 'ENOENT' });
+});

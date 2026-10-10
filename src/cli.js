@@ -750,6 +750,6 @@ async function cmdPrivacy(flags) {
 }
 
 async function cmdMcp(flags) {
-  await startMcpServer({ configPath: flags.config ? String(flags.config) : undefined });
+  await startMcpServer({ configPath: flags.config ? String(flags.config) : undefined, offline: Boolean(flags.offline) });
   return 0;
 }

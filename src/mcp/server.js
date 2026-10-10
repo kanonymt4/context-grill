@@ -155,8 +155,11 @@ function promptText(p, toolArgs) {
   ].join('\n');
 }
 
-export async function startMcpServer({ configPath } = {}) {
+export async function startMcpServer({ configPath, offline } = {}) {
   const config = await loadConfig(configPath);
+  // --offline は設定そのものを書き換える（cli.js の load() と同じ）。run_task / sync は呼ばれるたびに
+  // config から initEgress をやり直すため、POLICY だけを上書きしても次の呼び出しで normal に戻る。
+  if (offline) config.security.networkMode = 'offline';
   await ensureDirs(config);
   initEgress(config);
   const p = paths(config);
