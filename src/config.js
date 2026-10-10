@@ -117,6 +117,27 @@ function expandEnv(value) {
   return value;
 }
 
+/**
+ * JSON.parse した直後の木から、自分のキーとしての "__proto__" を探してパスを返す。
+ * JSON.parse は "__proto__" を own のプロパティとして作るが、後段の `out[k] = v` は
+ * プロトタイプの設定になり、Object.entries / Object.keys から見えなくなる。
+ * 黙って消えるうえ、配列要素の中では秘密値スキャンも迂回できてしまうため、読み込みの
+ * 入口で拒否する。最上位の presets の配下は validatePresets の担当なので走査しない。
+ */
+function findProtoKeys(node, at = '', found = []) {
+  if (Array.isArray(node)) {
+    node.forEach((n, i) => findProtoKeys(n, `${at}[${i}]`, found));
+  } else if (node && typeof node === 'object') {
+    for (const k of Object.keys(node)) {
+      const here = at ? `${at}.${k}` : k;
+      if (k === '__proto__') found.push(here);
+      if (at === '' && k === 'presets') continue;
+      findProtoKeys(node[k], here, found);
+    }
+  }
+  return found;
+}
+
 export async function loadConfig(explicitPath) {
   const configPath = explicitPath ? path.resolve(explicitPath) : findConfigPath();
   if (!configPath) {
@@ -131,6 +152,10 @@ export async function loadConfig(explicitPath) {
     raw = JSON.parse(await fsp.readFile(configPath, 'utf8'));
   } catch (e) {
     throw new Error(`設定ファイルの JSON が不正です (${configPath}): ${e.message}`);
+  }
+  const protoKeys = findProtoKeys(raw);
+  if (protoKeys.length) {
+    throw new Error('設定エラー:\n  - ' + protoKeys.map((p) => `${p} は使えません（"__proto__" キーは読み込み時に消えてしまうため）`).join('\n  - '));
   }
   // presets は環境変数展開の対象から外す。instruction 内の ${...} は文字のまま通す
   // （展開すると未定義の変数が黙って '' になり、指示文が欠ける）。
