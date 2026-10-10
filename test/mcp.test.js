@@ -123,6 +123,14 @@ test('MCP: 索引が無くても不正なタスク名は「未知のタスク」
   assert.match(text, /未知のタスク/, `索引の有無より先にタスク名を検証すべき。実際の応答: ${text}`);
 });
 
+test('MCP: 索引が無くても prototype のキーのタスク名（constructor）は「未知のタスク」を返す', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const { responses } = await rpc(probe, [call(1, 'context_grill_run_task', { instruction: 'x', task: 'constructor' })], 1);
+  const text = responses[0]?.result?.content?.[0]?.text ?? JSON.stringify(responses[0]);
+  assert.match(text, /未知のタスク/, `own のキーだけを受理すべき。実際の応答: ${text}`);
+});
+
 test('MCP: 同一チャンクの並行リクエストで IndexStore.open() が二重に走らない', async () => {
   const { dir, configPath } = await fixture({ build: true });
   const probe = await writeProbe(dir, configPath);
