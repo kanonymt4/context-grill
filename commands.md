@@ -14,7 +14,7 @@ init / resolve  →  sync  →  search / scan / ask
 
 困ったら `doctor`（環境チェック）と `privacy`（送信先の確認）。
 
-定型の調査は設定の `presets` に登録して `run` で呼び出せます
+定型の調査は設定の `presets` に登録して `run` で呼び出せます（MCP からは prompts として呼び出せます）
 → [run / presets — よく使う調査を登録して呼び出す](#run--presets--よく使う調査を登録して呼び出す)
 
 `ask --dry-run` で作った証拠パックは、他の AI に渡して議論の材料にもできます
@@ -37,7 +37,7 @@ init / resolve  →  sync  →  search / scan / ask
 | `run <名前> [引数名=値...]` | 設定の `presets` に登録した調査を実行 | **使用** | あり |
 | `presets` | 登録済みの preset を表示 | 不使用 | なし |
 | `tasks` | 利用可能なタスク種別を表示 | 不使用 | なし |
-| `mcp` | MCP サーバーとして起動（stdio） | — | — |
+| `mcp` | MCP サーバーとして起動（stdio）。preset は prompts として公開 | — | — |
 | `doctor` | 実行環境と設定の健全性チェック | 不使用 | なし |
 | `privacy` | どのデータがどこへ送られるかを表示 | 不使用 | なし |
 
@@ -454,6 +454,30 @@ context-grill presets --json   # {"presets": [...], "errors": [...]}
 
 索引や API キーは不要です。不正な定義があると、`presets` は使えない定義の理由を表示して終了コード 1 になります。
 `doctor` でも確認できます。不正な定義があっても、他の（正しい）preset は使えます。
+
+### MCP から呼び出す（prompts）
+
+`context-grill mcp` は、検証を通った preset を MCP の prompts として同じ名前・同じ引数で公開します。
+不正な定義と、`effort` が MCP の `context_grill_run_task` で指定できないもの
+（`effortPresets` に自分で足した段階など）は公開されません。該当する preset があると、起動時に stderr へ
+「使えない preset が N 件あります」と 1 行出ます（名前は出ません。原因は `doctor` / `presets` で確認します）。
+
+Claude Code では `/mcp__<サーバー名>__<preset 名> 値1 値2` の形で呼びます。`<サーバー名>` は MCP 設定
+（`.mcp.json` の `mcpServers` のキー）に付けた名前で、README の例どおりなら `context-grill` です。
+英数字・`_`・`-` 以外の文字は `_` になります。
+
+- 引数は定義順に位置で渡り、空白で区切られる**可能性があります**（**未実測**。配布物の静的な調査による）。
+  空白を含む値は渡しにくいので、必須の引数を先に定義しておくと使いやすくなります。
+  空白を含む値を引用符で渡したいときは、CLI の `run` を使ってください。
+- **prompt は何も実行しません。** 会話側のモデルに `context_grill_run_task` の呼び出しを依頼する文面
+  （展開済みの instruction を JSON で含む）を返すだけです。実際に呼ぶかどうかは会話側のモデルと権限確認に
+  委ねられ、呼ぶ前に引数を確かめられます。`run` が即実行するのとの違いです。
+- `--model` や dry-run に当たる引数はありません。送信先のモデルは MCP からは変えられません。
+  dry-run が要るときは、会話で「dry_run で」と頼んでください。
+- preset の定義を変えたら MCP サーバーの再起動が必要です（設定は起動時に 1 回だけ読みます）。
+- 文面は preset と引数から作るので**墨消しはかかりません**。資料本文は含みません。
+- Claude Code のデスクトップアプリの Code タブでは、補完に出ませんでした（試作サーバーでの実測）。
+  CLI の `claude` では `slash_commands` に出ることを確認しています。それ以外のクライアントは未確認です。
 
 ### effortPresets との違い
 
