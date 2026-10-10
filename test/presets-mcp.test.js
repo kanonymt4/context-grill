@@ -85,6 +85,9 @@ function rpc(probe, lines, expected) {
   });
 }
 
+/** prompts/list の description に、引数のある preset だけ足す注意書き。 */
+const ARG_NOTE = '※引数は空白（半角・全角）で区切られます。空白を含む値は渡せません（余った語は捨てられます）。';
+
 const PRESETS = [
   {
     name: 'bug-triage', description: '障害の原因調査', task: 'bug', effort: 'deep', sources: ['api', 'docs'],
@@ -258,20 +261,21 @@ test('P2: prompts/list は検証を通り enum に収まる preset だけを定�
   assert.equal('nextCursor' in r.result, false);
 
   const bt = prompts.find((x) => x.name === 'bug-triage');
-  assert.equal(bt.description, '障害の原因調査');
+  assert.equal(bt.description, `障害の原因調査 ${ARG_NOTE}`);
   assert.deepEqual(bt.arguments.map((a) => [a.name, a.required]), [['symptom', true], ['component', false]]);
   assert.equal(bt.arguments[0].description, '症状');
   assert.ok(bt.arguments[1].description.includes('省略時: "エラー処理"'), show(bt));
 
   const oe = prompts.find((x) => x.name === 'opt-empty');
   assert.ok(oe.arguments[0].description.includes('省略時: ""'), show(oe));
+  assert.equal(oe.description, `context-grill の preset（task=spec effort=normal） ${ARG_NOTE}`);
 
   // description の無い preset / 引数
   const na = prompts.find((x) => x.name === 'no-args');
   assert.equal(na.description, 'context-grill の preset（task=spec effort=normal）');
   assert.deepEqual(na.arguments, []);
   const ta = prompts.find((x) => x.name === 'task-arg');
-  assert.equal(typeof ta.description, 'string');
+  assert.equal(ta.description, `context-grill の preset（task=design effort=low） ${ARG_NOTE}`);
   assert.equal('description' in ta.arguments[0], false, show(ta));
 });
 
@@ -298,7 +302,8 @@ test('P4: 正常な prompts/get は user メッセージ 1 件で、埋め込み
   assert.equal(r.result.messages.length, 1);
   assert.equal(r.result.messages[0].role, 'user');
   assert.equal(r.result.messages[0].content.type, 'text');
-  assert.equal(typeof r.result.description, 'string');
+  assert.equal(r.result.description, '障害の原因調査', '注意書きは prompts/get の description に含めない');
+  assert.ok(!r.result.messages[0].content.text.includes('※引数は空白'), '注意書きがメッセージ本文に含まれている');
   const { args } = parseMessage(r);
   assert.deepEqual(args, { instruction: exp.instruction, task: exp.taskId, effort: exp.effort, sources: exp.sourceIds });
   assert.deepEqual(args.sources, ['api', 'docs']);
