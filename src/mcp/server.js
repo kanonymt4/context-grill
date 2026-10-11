@@ -17,6 +17,16 @@ import { redactText } from '../util/redact.js';
 
 const PROTOCOL_FALLBACK = '2024-11-05';
 
+/** serverInfo.version。package.json の version を使い、読めない・文字列でないときは 'unknown'（起動は止めない）。 */
+const SERVER_VERSION = (() => {
+  try {
+    const v = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
+    return typeof v === 'string' ? v : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+})();
+
 const TOOLS = [
   {
     name: 'context_grill_status',
@@ -508,18 +518,27 @@ export async function startMcpServer({ configPath, offline } = {}) {
       if (!line) continue;
       let msg;
       try { msg = JSON.parse(line); } catch { continue; }
-      handle(msg);
+      // 想定外の例外でプロセスを落とさない（await しないので unhandled rejection になる）
+      handle(msg).catch((e) => process.stderr.write(`[context-grill] リクエスト処理中に想定外のエラー: ${e?.message ?? e}\n`));
     }
   });
 
   async function handle(msg) {
+    // JSON として有効でも、リクエストの形（プレーンオブジェクト）でなければ分割代入で落ちる
+    if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) {
+      return err(null, -32600, 'Invalid Request: リクエストは JSON オブジェクトで指定してください');
+    }
     const { id, method, params } = msg;
+    if (typeof method !== 'string') {
+      if (id !== undefined) err(id, -32600, 'Invalid Request: method は文字列で指定してください');
+      return;
+    }
     try {
       if (method === 'initialize') {
         ok(id, {
           protocolVersion: params?.protocolVersion || PROTOCOL_FALLBACK,
           capabilities: { tools: { listChanged: false }, prompts: { listChanged: false } },
-          serverInfo: { name: 'context-grill', version: '0.1.0' },
+          serverInfo: { name: 'context-grill', version: SERVER_VERSION },
           instructions: [
             'このサーバーは設定済みの GitHub / Confluence / Jira を一次資料として扱います。',
             '回答する前に context_grill_evidence_pack で証拠を取得し、証拠 ID 付きで結論を書き、context_grill_verify で機械検証してください。証拠にない内容を書いてはいけません。',
@@ -540,6 +559,11 @@ export async function startMcpServer({ configPath, offline } = {}) {
       }
       if (method === 'tools/call') {
         const name = params?.name;
+        // 未知のツールは JSON-RPC のエラーで返す（isError はツール実行の失敗用）。
+        // TOOLS の名前との完全一致で判定するので、constructor 等の prototype のキーは通らない。
+        if (typeof name !== 'string' || !TOOLS.some((t) => t.name === name)) {
+          return err(id, -32602, `未知のツール: ${String(name)}`);
+        }
         // 無い / null だけを {} 扱いにする（|| {} だと false や "" も黙って {} になり、後段で無関係なエラーになる）。
         const rawArgs = params?.arguments;
         if (rawArgs !== undefined && rawArgs !== null && (typeof rawArgs !== 'object' || Array.isArray(rawArgs))) {
@@ -555,7 +579,12 @@ export async function startMcpServer({ configPath, offline } = {}) {
       if (id !== undefined) err(id, -32601, `Method not found: ${method}`);
     } catch (e) {
       if (id !== undefined) {
-        ok(id, { content: [{ type: 'text', text: `エラー: ${e.message}` }], isError: true });
+        // isError の形は tools/call の結果スキーマ。他のメソッドで返すとクライアントの検証に通らない。
+        if (method === 'tools/call') {
+          ok(id, { content: [{ type: 'text', text: `エラー: ${e.message}` }], isError: true });
+        } else {
+          err(id, -32603, `内部エラー: ${e.message}`);
+        }
       }
     }
   }

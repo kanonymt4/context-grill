@@ -563,3 +563,72 @@ test('MCP: tools/call の arguments がオブジェクトでなければ -32602�
     assert.equal(JSON.parse(textOf(r)).indexed, true, `id=${id} で status が動かない: ${JSON.stringify(r).slice(0, 300)}`);
   }
 });
+
+test('MCP: serverInfo.version は package.json の version と一致する', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const pkg = JSON.parse(await fsp.readFile(path.join(ROOT, 'package.json'), 'utf8'));
+  const res = await rpc(probe, [{ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } }], 1);
+  const r = byId(res, 1);
+  assert.equal(r.result?.serverInfo?.name, 'context-grill');
+  assert.equal(r.result?.serverInfo?.version, pkg.version, `serverInfo.version が package.json（${pkg.version}）と食い違う: ${JSON.stringify(r.result?.serverInfo)}`);
+});
+
+test('MCP: オブジェクトでない JSON の行は id:null の -32600 で返し、サーバーは落ちずに続行する', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const garbage = [null, [], [{ jsonrpc: '2.0', id: 9, method: 'ping' }], 1, 'x', true];
+  const res = await rpc(probe, [...garbage, { jsonrpc: '2.0', id: 100, method: 'ping' }], garbage.length + 1);
+  const nulls = res.responses.filter((x) => x.id === null);
+  assert.equal(nulls.length, garbage.length, `id:null の応答が ${garbage.length} 件のはず（サーバーが落ちた可能性）。実際: ${nulls.length} 件。stderr: ${res.stderr.slice(-300)}`);
+  for (const r of nulls) {
+    assert.ok(r.error?.code === -32600 && r.result === undefined, `-32600 のはず: ${JSON.stringify(r)}`);
+    assert.match(r.error.message, /^Invalid Request: /);
+  }
+  assert.deepEqual(byId(res, 100).result, {}, 'ping に応答できていない');
+  assert.equal(res.responses.find((x) => x.id === 9), undefined, 'バッチの中身が実行されている');
+});
+
+test('MCP: method が文字列でない要求は id があれば -32600、通知の形なら何も返さない', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [
+    { jsonrpc: '2.0', id: 5 },
+    { jsonrpc: '2.0', id: 6, method: 7 },
+    { jsonrpc: '2.0' },
+    { jsonrpc: '2.0', method: 7 },
+    { jsonrpc: '2.0', id: 100, method: 'ping' },
+  ], 3);
+  for (const id of [5, 6]) {
+    const r = byId(res, id);
+    assert.ok(r.error?.code === -32600 && r.result === undefined, `id=${id} は -32600 のはず: ${JSON.stringify(r)}`);
+    assert.match(r.error.message, /^Invalid Request: /);
+  }
+  assert.deepEqual(byId(res, 100).result, {});
+  assert.equal(res.responses.length, 3, `id の無いメッセージに応答が返っている: ${JSON.stringify(res.responses)}`);
+});
+
+test('MCP: tools/call の未知のツール名（name が無い・数値・空文字を含む）は -32602 で、既知のツールは従来どおり動く', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const bad = [
+    { id: 1, params: { name: 'nope', arguments: {} } },
+    { id: 2, params: { name: 5 } },
+    { id: 3, params: { arguments: {} } },
+    { id: 4, params: { name: '' } },
+    { id: 5, params: { name: 'constructor' } },
+    { id: 6 },
+  ];
+  const reqs = bad.map((b) => ({ jsonrpc: '2.0', method: 'tools/call', ...b }));
+  reqs.push(call(7, 'context_grill_status', {}));
+  const res = await rpc(probe, reqs, reqs.length);
+  for (const b of bad) {
+    const r = byId(res, b.id);
+    assert.ok(r.error?.code === -32602 && r.result === undefined, `id=${b.id} は -32602 のはず: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.match(r.error.message, /^未知のツール: /);
+  }
+  assert.equal(byId(res, 1).error.message, '未知のツール: nope');
+  const st = byId(res, 7);
+  assert.notEqual(st.result?.isError, true, JSON.stringify(st).slice(0, 300));
+  assert.equal(JSON.parse(textOf(st)).indexed, true);
+});
