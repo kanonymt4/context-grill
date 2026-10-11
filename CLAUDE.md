@@ -140,9 +140,17 @@ test/                    unit / e2e / security / mcp / presets / presets-cli / p
   構造的に満たせない」ことへの対処であって、恒久的に妥当な設定ではない
 - **Claude Code（自動モード）からの `gh pr merge --squash --admin` は拒否された**（2026-10-08、
   理由の説明なし）。GitHub MCP の `merge_pull_request` や API 直叩きは同じ迂回なので、
-  拒否を避ける手段として使わない。**マージは人間が GitHub の画面で行う**（「Merge without
-  waiting for requirements」から squash）。Claude の役割は、全チェックが成功したことを
-  check-runs API で確認して報告するところまで
+  拒否を避ける手段として使わない。~~マージは人間が GitHub の画面で行う~~
+  **2026-10-11 に変更: ユーザーが「Claude 側で squash マージする」と明示した。** 手順は次のとおり。
+  - 全チェック（9 ジョブ + `all-tests` + `pr-scope`）が `success` であることを **check-runs API**
+    （`repos/<owner>/<repo>/commits/<head sha>/check-runs`）で確認してから、`gh pr merge <番号> --squash`
+    を実行する。**`--admin` は要らなかった**（通常の squash マージで通った。承認要件がなぜ
+    妨げなかったかは未確認）
+  - `mergeStateStatus` が `BEHIND` だと「head branch is not up to date」で拒否される（必須チェックが
+    strict のため）。`gh pr update-branch <番号>` で main を取り込み、CI の再実行を待ってからマージする。
+    `--auto`（GitHub の自動マージ）と `--admin` は使わない
+  - CI の完了を待つあいだ、`gh` で繰り返し確認する（ポーリングする）代わりに、次の作業（別ブランチの
+    実装など、ファイルが重ならないもの）を進めて、区切りで 1 回だけ読む。失敗は Auto-fix が知らせる
 - **段階を分けて PR を出すなら、前の段階を main にマージしてから次を切る。** `test.yml` は
   `pull_request: branches: [main]` のときしか動かないので、前の段階を base にした stacked PR では
   3 OS × 3 Node のテストが走らない。`scope-gate` も `origin/<base>` との差分で数えるため、
@@ -190,6 +198,12 @@ test/                    unit / e2e / security / mcp / presets / presets-cli / p
 - **外部クライアントの挙動は、静的な読解で当たりを付けても、実測するまで文書に断定で書かない。**
   Claude Code の MCP prompts の引数分割は、バイナリの文字列を読んで推定し、実測で裏付けた
   （2026-10-10）。推定の段階では「可能性がある（未実測）」と書き、実測後に置き換えた
+- **同じ種類の穴は、grep で一括して探す。** 1 つ見つけたら、同じ型の書き方（`TASKS[x]`、`obj[k] = v`、
+  `process.env[n]`、`schema.properties?.[k]`）を探す。prototype のキー（`constructor` / `__proto__` /
+  `toString`）を引く穴は、`Object.hasOwn` で「自分のキーだけ」を見るように直す
+- **検証は、状態を持つ処理や索引を開く処理より前に置く。** 「索引がありません」が先に出ると、
+  指定の誤りが隠れる。入口（CLI / MCP）で検証せず、全員が通る下の層（`pipeline.js`）に集約すると、
+  呼び出し元の症状が一緒に直る
 - **サブエージェントの報告は、生の差分を読んで確かめる。** 「テストが通った」「設計どおり」の報告に、
   無関係な空白の変更（`config.js` の列揃え）、Markdown の字下げ崩れ（入れ子の箇条書きの
   直後に置いた文が前の項目の続きになる）、変異を入れても通る検査が混ざっていた
@@ -208,6 +222,9 @@ test/                    unit / e2e / security / mcp / presets / presets-cli / p
   テストを走らせようとすると、自動モードの分類器に拒否された（2026-10-08）。変異を入れたまま
   放置する事故も防げる。確認したら「変異が入ったこと」を diff で確かめる（入っていない変異で
   「検出した」と誤認しない）
+- **状態を持つ設定（`--offline` など）のテストは、「その後の操作の後でも維持されるか」を見る。**
+  起動直後の値だけを見ると、`POLICY` だけを上書きした不完全な修正が通る（`run_task` が `initEgress` を
+  やり直して元に戻る）。操作を 1 回挟んでから、もう一度値を取る
 - **fixture は、検査したい不具合を再現できる形にする。** ソースが1つだけの fixture では、
   `sourceIds` を先頭1件に切り詰める不具合を入れても `run` のテストが通った（実測）。
   絞り込みを検証するなら、複数ソースを選び、選ばれなかったソースを含める
@@ -322,27 +339,52 @@ Confluence の HTML 変換より簡単。
   `'w'` で開き直すため、fd を握っていても中身が入れ替わる。ストアを保持したまま作り直すと
   旧 meta と新ベクトルが組み合わさる。`open()` 時点のスナップショットという保証が
   `vectors.bin` には効いていない。
-- **未対応（黙って通る既存の失敗。2026-10-10 に preset の実装中に見つけ、今回は直していない）**:
-  - `resolveTask('constructor')` が検査を通る（`TASKS[taskId]` で引くため。`typeof` が `function`
-    になることを実測）。`cmdAsk` と MCP の `preflight` / `evidence_pack` も同じ引き方。
-    preset は `Object.hasOwn` を使っているので踏まない
-  - 不明な effort が黙って `normal` になる（`pipeline.js` / MCP。コードで確認）。preset は
-    定義時に `effortPresets` のキーで検証している
-  - `--source` に未知の id や空文字を渡すと、黙って証拠が 0 件になる（コードで確認）
-  - 設定の未定義の `${VAR}` が黙って `''` になる（`expandEnv`）。preset の `instruction` だけは
-    展開の対象から外してある
-  - 設定の最上位にある `__proto__` が `deepMerge` の後に黙って消える（実測）
-  - `ask --out`（値なし）が `true` という名前のファイルを作り、`ask --model`（値なし）は黙って
-    無視される（前者は実測、後者はコードで確認）。`run` はどちらもエラーにしている
-  - `context-grill --offline mcp` の `--offline` が MCP サーバーに効かない可能性がある
-    （`cmdMcp` が `configPath` しか渡さない。**コードで確認しただけで、実行は未確認**）
-  - MCP の `serverInfo.version` が `0.1.0` のまま、`protocolVersion` を交渉せずクライアントの値を
-    返す、`tools/call` の `params?.arguments || {}`、外側の `catch` が `tools/call` 以外にも
-    `isError` の形で返す、`resources/list` に応答するのに capability を宣言していない
-  - `test/mcp.test.js` の rpc helper が Buffer を文字列に連結しており、チャンク境界で
-    マルチバイト文字が壊れうる（`test/presets-mcp.test.js` は `setEncoding('utf8')` で回避済み）
+- ~~**未対応（黙って通る既存の失敗。2026-10-10 に preset の実装中に見つけ、今回は直していない）**~~
+  **2026-10-11 に、下の 1〜8 は #33〜#41 で修正済み。** 取り消し線の項目は修正前の記録で、
+  実測で記録と食い違っていた点を各項目に添えた（履歴の同日の項に経緯）:
+  - ~~`resolveTask('constructor')` が検査を通る~~ 修正済み（#36 で `pipeline.js` に集約、#37 で `cmdAsk` の
+    二重検証を削除、#38 で MCP の `evidence_pack`、#39 で未知のツール名）。**記録との差:** 「黙って通る」
+    のではなく、`kw.slice is not a function` という無関係なエラーで落ちる誤誘導型の失敗だった。
+    本当の欠陥は、「索引を開く前にタスク名を検証する」不変条件が、prototype のキーのときだけ破れていたこと
+  - ~~不明な effort が黙って `normal` になる~~ 修正済み（#36、MCP は #38）。**記録との差:** MCP の `run_task` は、
+    enum の外の effort でも、設定の `effortPresets` にあれば**そのまま使っていた**（`xdeep` で実測）。
+    「黙って `normal` になる」のは、定義にない値のときだけで、そのとき `meta.effort` には元の不正な値が
+    記録され、実際の動作と食い違っていた
+  - ~~`--source` に未知の id や空文字を渡すと、黙って証拠が 0 件になる~~ 修正済み（#36、CLI は #37、MCP は #38）。
+    **記録との差:** 経路ごとに挙動が違った。`--source ""` や値なしは**全ソース**、MCP の `search` に文字列を
+    渡すと `String#includes` の**部分一致**（`"docsx"` で `docs` が選ばれる）、`sync --source nope` は
+    「同期完了: 0/0」で exit 0
+  - ~~設定の未定義の `${VAR}` が黙って `''` になる~~ 修正済み（#41）。`${constructor}` が関数の文字列に
+    展開される穴と、`_comment` の中まで展開される問題も同時に直した
+  - ~~設定の最上位にある `__proto__` が `deepMerge` の後に黙って消える~~ 修正済み（#34）。**記録との差:**
+    原因は `deepMerge` より前の `expandEnv` の `out[k] = v`。しかも消えるだけでなく、配列の要素
+    （`sources[i]`）の中の `__proto__` は**読まれるのに秘密値スキャンを迂回できた**（README §10.1 の
+    「起動時に拒否」が破れていた）
+  - ~~`ask --out`（値なし）が `true` というファイルを作る、`--model`（値なし）が黙って無視される~~
+    修正済み（#37）。**記録との差:** 範囲はもっと広かった（`scan --out`、`search -k`、`--effort`、`--source`、
+    `-c` が TypeError、`scan --severity` の不明な値が info まで全部出す）
+  - ~~`context-grill --offline mcp` の `--offline` が MCP サーバーに効かない可能性~~ 修正済み（#35）。
+    **実測で確定:** `context_grill_status` の `egress.mode` が `"normal"` だった。直し方は `POLICY` だけを
+    上書きせず `config.security.networkMode` 自体を書き換えること（`run_task` / `sync` が呼ばれるたびに
+    config から `initEgress` をやり直すため、`POLICY` だけだと戻る）
+  - ~~MCP の `serverInfo.version` が `0.1.0` のまま、`tools/call` の `params?.arguments || {}`、外側の `catch` が
+    `tools/call` 以外にも `isError` の形で返す~~ 修正済み（#39、`arguments` は #38）。**記録に無かったもの:**
+    JSON の `null` を 1 行送るとサーバーが落ちた（#39）。`inputSchema`（`additionalProperties:false` など）は
+    公開されているだけで検査されていなかった（#40）
+  - ~~`test/mcp.test.js` の rpc helper が Buffer を文字列に連結している~~ 修正済み（#33）
+- **未対応（上記の修正の過程で残した、または見つけたもの）**:
+  - MCP が `protocolVersion` を交渉せず、クライアントの値をそのまま返す。実在のクライアントで確かめてから
+    扱う方針（対応表を決めるには仕様の changelog が要る）
+  - MCP が `resources/list` に応答するのに capability を宣言していない（黙って失われる入力が無いので見送り）
   - 実行結果の `meta.json` に、どの preset から実行したかが残らない。`prompts/get` とその後の
-    `tools/call` はサーバーが結び付けられず、`run_task` に引数を足しても自己申告にしかならない
+    `tools/call` はサーバーが結び付けられず、`run_task` に引数を足しても自己申告にしかならない。CLI の
+    `run --json` には `preset` が出る
+  - `context_grill_fetch` の `pack_id` が、検証されないまま `path.join(packDir, pack_id + '.json')` に渡り、`../` で
+    packs の外の `.json` を読める（**コードを読んだだけで、実行は未確認**）
+  - `apiKeyEnv` / `tokenEnv` に `toString` などを書くと `process.env[name]` が関数を返す
+    （`provider.js` / `base.js`。コードを読んだだけ）。`kinds` の未知の値は 0 件になる（同）
+  - `test/unit.test.js` の HTTP リクエスト本文の Buffer 連結（ASCII だけなので実害は無いと見ている）。
+    `context_grill_verify` の `result` は `type: object` の検査のみで中身は見ない（従来どおり）
 - **未確認（preset）**: Claude Code の対話モード（TUI）の `/` 補完でどう見えるか。デスクトップ
   アプリの Code タブでは、MCP の prompts が補完に出なかった（2026-10-08、試作サーバーで実測）。
   プロジェクトスコープの `.mcp.json` の承認画面も Code タブでは出なかった
@@ -687,8 +729,13 @@ Confluence の HTML 変換より簡単。
     実行の可否は会話側のモデルと権限確認に委ねる。`model` と `dry_run` は含めない
   - `params.arguments` は**コピーせず**そのまま `resolvePreset` に渡す。`Object.assign` でコピーすると
     `__proto__` キーが黙って消える（実測）。`|| {}` も `false` や `""` を黙って通すので使わない
-  - `effortPresets` に自分で足した effort は `run_task` の enum の外にあり、渡すと黙って `normal` に
-    なる。そのような preset は prompts の一覧に出さず、`get` は CLI の `run` を案内して拒否する
+  - ~~`effortPresets` に自分で足した effort は `run_task` の enum の外にあり、渡すと黙って `normal` に
+    なる。~~ **（2026-10-11 訂正: 誤りだった。サーバー側は、enum の外でも設定にある effort をそのまま
+    使う。「黙って `normal`」になるのは定義にない値のとき。上の「未対応」の訂正を参照）** そのような
+    preset は prompts の一覧に出さず、`get` は CLI の `run` を案内して拒否する。**この除外の根拠は
+    弱くなった。** 残る理由は、`tools/list` が公開する enum（`low` / `normal` / `deep`）を見て、
+    会話側のモデルや一部のクライアントが enum の外の値を送らない・拒否する可能性だが、
+    Claude Code がツール呼び出し前に enum を検証するかは**未確認**
   - **Claude Code 2.1.231 の実測（2026-10-10、試作サーバー）**: prompts の引数は半角・全角の空白で語に
     分けられ、定義順に位置で対応する。引用符は解釈されず、**余った語は黙って捨てられる**（空白を含む
     症状文は先頭の語しか届かない）。必須の引数が足りないときは、サーバーに届く前にクライアントが止める。
@@ -705,3 +752,43 @@ Confluence の HTML 変換より簡単。
     求めていた）。矛盾に気づいた実装者が、固定リストの確認を足して両立させた
   - 自動モードの分類器が、`--admin` でのマージと、本体に変異を入れた状態でのテスト実行を拒否した。
     どちらも回避せず、人間のマージと、コピー側での変異確認に切り替えた
+
+- 2026-10-10 〜 10-11 **「黙って通る既存の失敗」を 9 本の PR で直した**（#33 → #41。文書の PR が続く）。
+
+  preset の実装中に見つけた既存の問題を、「未確認・次にやること」に記録して、ユーザーが「修正」を
+  依頼した。着手前に、現在のコードを読み直して再現し、**記録と食い違った点**を洗い出した（「未対応」の
+  各項目に訂正を残してある）。修正は下の層から入れ、前の PR をマージしてから次を切った。
+
+  **順序と理由**
+  - #33 テストの UTF-8（土台。後続は日本語の応答を照合するテストを増やす）→ #34 設定の `__proto__` の拒否
+    → #35 `--offline` を MCP に効かせる（通信ポリシーの期待を裏切るので優先）→ #36 `pipeline.js` に
+    タスク名・effort・ソース id の検証を集約（**下の層**。CLI と MCP の症状が一緒に直る）→ #37 CLI の
+    値なしフラグ → #38 MCP の引数 → #39 MCP のプロトコル → #40 MCP の `inputSchema` の検査 → #41 未定義の
+    `${VAR}`
+  - 下の層から直したので、上の層の PR は「入口で早く止める」だけになり、差分が小さく済んだ
+
+  **見つけた落とし穴**（原則と検証の下限にも反映）
+  - **同じ種類の穴は、grep で一括して探す。** `TASKS[x]`（`resolveTask`）、`obj[k] = v`（`__proto__`）、
+    `process.env[n]`（`${constructor}`）、`schema.properties?.[k]`（`jsonschema.js` が `constructor` を
+    継承プロパティとして引く）は、どれも「自分のキーだけを見る」`Object.hasOwn` で直した
+  - **`POLICY` だけを上書きする修正は戻る。** `--offline` を MCP に効かせるとき、`initEgress` は
+    `run_task` / `sync` のたびに config から再計算されるので、`config.security.networkMode` 自体を
+    書き換える必要があった。テストは、`dry_run` の `run_task` の**後**でも `egress.mode` が維持される
+    ことを見て、この不完全な修正を捕まえる
+  - **検証は索引を開く前に行う。** 「索引がありません」が先に出ると、タスク名・effort・ソースの誤りが
+    隠れる。MCP の `preflight` と CLI の `runTask` で揃えた
+  - **公開している `inputSchema` を検査していなかった。** 未知のキーが黙って無視され、`dry_run:"false"`
+    が真になる。enum を検査用のコピーから外した理由は、設定で足した独自の effort を受け付けるため
+    （公開する `tools/list` は変えない）
+  - **検査を強くすると、既存のテストの期待が変わる。** 型違いの `sources` は `isError` から `-32602`
+    になるため、#38 のテスト 7 件の期待を、**ユーザー（私）が許可したうえで**書き換えた。実装者は
+    止まって確認を求めた（指示と既存テストが矛盾していることに気づいた）
+  - **Stop フックのテストが、テスト先行の途中で失敗を報告する。** 意図した失敗である場合は、その旨と
+    根拠（`src/` が未変更で、失敗がアサーションであること）を明示して報告した
+
+  **進め方**
+  - 設計と調査は強いモデル、実装とテストは別のエージェント。報告は鵜呑みにせず、生の差分と
+    `npm test` の出力を自分で読んだ。実装者の判断で仕様と違う点（`task` の enum も検査用コピーから
+    外した、`null` の省略扱いを定義済みの省略可のキーだけにした）は、理由を確認して採用した
+  - ファイルが重ならない PR は、前の PR の CI を待つあいだに並行で進めた（積み上げ PR にはしない）
+  - 2026-10-11 から、ユーザーの明示により、Claude が squash マージする（上の「開発フロー」）
