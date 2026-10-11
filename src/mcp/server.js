@@ -9,6 +9,7 @@ import { allDocs, syncSources, buildIndex } from '../index/ingest.js';
 import { scanAll, summarize, projectFacts, extractEndpoints } from '../analysis/static.js';
 import { TASKS, SYSTEM_CONTRACT, envelopeSchema, planQueries, taskPromptHash, listTasks } from '../tasks/index.js';
 import { verify } from '../verify/gate.js';
+import { validate } from '../llm/jsonschema.js';
 import { runTaskWithStore, resolveTask, resolveEffort, resolveSourceIds } from '../llm/pipeline.js';
 import { listPresets, validatePresets, resolvePreset, getPreset, PresetError } from '../presets.js';
 import { shortHash } from '../util/misc.js';
@@ -127,6 +128,37 @@ const TOOLS = [
     },
   },
 ];
+
+// tools/call の引数の検査に使うスキーマ。tools/list で公開する TOOLS は変えず、コピーを使う。
+// effort の enum は外す: 設定の effortPresets に足した独自の effort も受け付ける仕様で、
+// 実在の確認は preflight の resolveEffort が担当する（enum を残すと独自の preset が弾かれる）。
+// task の enum も同じ理由で外す。「未知のタスク」は resolveTask が isError で返す従来の挙動を保つ。
+// properties は prototype を持たない形にする。validate は schema.properties?.[k] で引くため、
+// 通常のオブジェクトだと "__proto__" や "constructor" が継承されたプロパティに当たり、
+// 未定義のプロパティとして報告されずに素通りする。
+const CHECK_SCHEMAS = new Map(TOOLS.map((t) => {
+  const schema = structuredClone(t.inputSchema);
+  for (const key of ['effort', 'task']) {
+    if (schema.properties[key]) delete schema.properties[key].enum;
+  }
+  schema.properties = Object.assign(Object.create(null), schema.properties);
+  return [t.name, schema];
+}));
+
+/**
+ * tools/call の引数を inputSchema で検査する。{ args, errors } を返す。
+ * スキーマで定義済みの省略可のキーが null のときは「省略」とみなして取り除く（検査にも実行にも渡さない）。
+ * 必須のキーの null はそのまま渡し、必須項目の欠落として報告させる。スキーマにないキーの null は
+ * 省略扱いにせず、未定義のプロパティとして報告させる。
+ * コピーは Object.fromEntries で作る。obj[k] = v だと JSON 由来の own の "__proto__" が
+ * プロトタイプの設定になってキーごと消え、未定義のプロパティを検出できなくなる。
+ */
+function checkArguments(name, rawArgs) {
+  const schema = CHECK_SCHEMAS.get(name);
+  const args = Object.fromEntries(Object.entries(rawArgs).filter(([k, v]) =>
+    !(v === null && Object.hasOwn(schema.properties, k) && !(schema.required ?? []).includes(k))));
+  return { args, errors: validate(schema, args) };
+}
 
 // prompts として公開できる preset の task / effort は、context_grill_run_task の inputSchema に
 // 収まるものだけ。enum を二重に持たず、TOOLS から取り出す。
@@ -569,7 +601,13 @@ export async function startMcpServer({ configPath, offline } = {}) {
         if (rawArgs !== undefined && rawArgs !== null && (typeof rawArgs !== 'object' || Array.isArray(rawArgs))) {
           return err(id, -32602, 'tools/call の params.arguments はオブジェクトで指定してください');
         }
-        const args = rawArgs ?? {};
+        // tools/list で公開している inputSchema で引数を検査する（未知のキー・enum・型・必須項目）。
+        // 値の意味の検証（未知の id など）は後段の preflight が isError で返す。
+        const checked = checkArguments(name, rawArgs ?? {});
+        if (checked.errors.length > 0) {
+          return err(id, -32602, `tools/call の引数が inputSchema に合いません（${name}）: ${checked.errors.join('; ')}`);
+        }
+        const args = checked.args;
         preflight(name, args);
         // ストアを使ったなら参照が確保された状態で実行される。実行中に sync が来ても
         // ストアは切り離されるだけで閉じられない。
