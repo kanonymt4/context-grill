@@ -9,8 +9,9 @@ import { hybridSearch } from './index/search.js';
 import { citationLabel } from './index/pack.js';
 import { redactText } from './util/redact.js';
 import { scanAll, summarize, projectFacts, extractEndpoints } from './analysis/static.js';
-import { runTask } from './llm/pipeline.js';
-import { TASKS, listTasks } from './tasks/index.js';
+import { SEVERITY_ORDER } from './analysis/rules.js';
+import { runTask, resolveSourceIds } from './llm/pipeline.js';
+import { listTasks } from './tasks/index.js';
 import { validatePresets, listPresets, getPreset, resolvePreset, PresetError } from './presets.js';
 import { startMcpServer } from './mcp/server.js';
 import { initEgress, egressPlan } from './util/egress.js';
@@ -125,11 +126,30 @@ async function load(flags) {
   return config;
 }
 
+// 値を取るフラグ。値なし（true）・空（--x=）・否定（--no-x）は、黙って別の意味になる
+// （true という名前のファイルができる、全ソースが対象になる等）ので共通で拒否する。
+const VALUE_FLAGS = ['config', 'source', 'task', 'effort', 'model', 'out', 'top', 'severity', 'log', 'dir', 'id'];
+
+/** 値を取るフラグが空でない文字列で渡されているか検査し、違反のメッセージを返す（なければ null） */
+function checkValueFlags(flags) {
+  for (const k of VALUE_FLAGS) {
+    if (Object.hasOwn(flags, k) && (typeof flags[k] !== 'string' || flags[k] === '')) {
+      return `--${k} には値が必要です（例: --${k} <${k === 'out' ? 'ファイル' : '値'}>）`;
+    }
+  }
+  return null;
+}
+
 export async function main(argv) {
   const { _: pos, flags } = parseArgs(argv);
-  if (flags.log) setLevel(String(flags.log));
   const cmd = pos[0];
   if (!cmd || flags.help || cmd === 'help') { process.stdout.write(HELP); return 0; }
+  // run は cmdRun に専用の検査とメッセージがあるため、共通検査を通さない
+  if (cmd !== 'run') {
+    const err = checkValueFlags(flags);
+    if (err) { process.stderr.write(err + '\n'); return 1; }
+  }
+  if (flags.log) setLevel(String(flags.log));
 
   switch (cmd) {
     case 'init': return cmdInit(flags);
@@ -425,8 +445,8 @@ async function cmdDoctor(flags) {
 // ---------------------------------------------------------------- sync
 async function cmdSync(flags) {
   const config = await load(flags);
+  const only = resolveSourceIds(config, listOf(flags.source));
   await ensureDirs(config);
-  const only = listOf(flags.source);
   const report = await syncSources(config, { only, force: Boolean(flags.full) });
   const manifest = await buildIndex(config, { embed: flags.embed !== false });
   const out = { sources: report, index: { chunks: manifest.N, terms: manifest.terms, dims: manifest.dims, indexKey: manifest.indexKey } };
@@ -469,10 +489,14 @@ async function cmdStatus(flags) {
 // -------------------------------------------------------------- search
 async function cmdSearch(query, flags) {
   if (!query) { process.stderr.write('検索クエリを指定してください\n'); return 1; }
+  if (Object.hasOwn(flags, 'top') && !/^[1-9][0-9]*$/.test(flags.top)) {
+    process.stderr.write(`--top は 1 以上の整数で指定してください: ${flags.top}\n`);
+    return 1;
+  }
   const config = await load(flags);
+  const only = resolveSourceIds(config, listOf(flags.source));
   const p = paths(config);
   const store = await IndexStore.open(p.index);
-  const only = listOf(flags.source);
   const k = Number(flags.top || 20);
   let results;
   try {
@@ -498,10 +522,15 @@ async function cmdSearch(query, flags) {
 
 // ---------------------------------------------------------------- scan
 async function cmdScan(flags) {
+  const severity = String(flags.severity || 'low');
+  if (!SEVERITY_ORDER.includes(severity)) {
+    process.stderr.write(`--severity の値が不正です: ${severity}（${SEVERITY_ORDER.join(', ')} のいずれか）\n`);
+    return 1;
+  }
   const config = await load(flags);
-  const only = listOf(flags.source);
+  const only = resolveSourceIds(config, listOf(flags.source));
   const docs = await allDocs(config, only);
-  const findings = scanAll(docs, { minSeverity: String(flags.severity || 'low'), includeTestPaths: Boolean(flags.includeTests) });
+  const findings = scanAll(docs, { minSeverity: severity, includeTestPaths: Boolean(flags.includeTests) });
   const out = { summary: summarize(findings), findings, facts: projectFacts(docs), endpoints: extractEndpoints(docs) };
   if (flags.out) {
     await fsp.writeFile(path.resolve(String(flags.out)), JSON.stringify(out, null, 2));
@@ -520,8 +549,8 @@ async function cmdScan(flags) {
 async function cmdAsk(instruction, flags) {
   if (!instruction) { process.stderr.write('指示を指定してください。例: context-grill ask "認証の仕様を整理して" --task spec\n'); return 1; }
   const config = await load(flags);
+  // タスク名・effort・ソースの検証は runTask が索引を開く前に行う
   const taskId = String(flags.task || 'spec');
-  if (!TASKS[taskId]) { process.stderr.write(`未知のタスク: ${taskId}（${Object.keys(TASKS).join(', ')}）\n`); return 1; }
   return executeTask(config, {
     taskId, instruction,
     effort: String(flags.effort || 'normal'),
@@ -595,9 +624,9 @@ async function cmdRun(name, tokens, flags) {
     const hint = k !== 'top' && /^[a-z][a-z0-9_]*$/.test(k) ? `（preset の引数なら ${k}=値 の形で渡します）` : '';
     flagErrors.push(`run では使えないオプション: ${flagText(k)}${hint}`);
   }
-  for (const k of ['model', 'out']) {
+  for (const k of ['model', 'out', 'log', 'config']) {
     if (Object.hasOwn(flags, k) && (typeof flags[k] !== 'string' || flags[k] === '')) {
-      flagErrors.push(`--${k} には値が必要です（例: --${k} ${k === 'model' ? '<モデル名>' : '<ファイル>'}）`);
+      flagErrors.push(`--${k} には値が必要です（例: --${k} ${{ model: '<モデル名>', out: '<ファイル>', log: '<level>', config: '<path>' }[k]}）`);
     }
   }
   // 2) 位置引数の解析

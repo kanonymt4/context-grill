@@ -86,11 +86,14 @@ import { redactText } from '../util/redact.js';
 
 const IGNORE_PATH = /(?:^|\/)(?:test|tests|__tests__|spec|fixtures?|mocks?|examples?|docs?)\//i;
 
+/** 深刻度の昇順。CLI の --severity の許可値もここを参照する */
+export const SEVERITY_ORDER = ['info', 'low', 'medium', 'high', 'critical'];
+
 /** 1 ドキュメント（コード/設定）に全ルールを適用 */
 export function scanDocument(doc, { includeTestPaths = false, minSeverity = 'info' } = {}) {
   if (!['code', 'config'].includes(doc.kind)) return [];
   if (!includeTestPaths && IGNORE_PATH.test(doc.path)) return [];
-  const order = ['info', 'low', 'medium', 'high', 'critical'];
+  const order = SEVERITY_ORDER;
   const minIdx = order.indexOf(minSeverity);
   const lines = doc.text.split('\n');
   const out = [];
