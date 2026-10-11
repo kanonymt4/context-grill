@@ -421,14 +421,26 @@ const byId = (res, id) => {
   return r;
 };
 
-/** 1 つのツールに対し、cases = [[args, 期待するメッセージ], ...] がすべて isError で拒否されることを見る。 */
+/**
+ * 1 つのツールに対し、cases = [[args, 期待するメッセージ, schemaPath?], ...] がすべて拒否されることを見る。
+ * 値の意味が不正なもの（未知の id など）は isError。schemaPath を付けたものは inputSchema に反する型違いで、
+ * ツール実行前の JSON-RPC エラー -32602 になる（索引の有無より先に止まる点は同じ）。
+ */
 async function assertRejected(tool, cases, { build }) {
   const { dir, configPath } = await fixture2({ build });
   const probe = await writeProbe(dir, configPath);
   const res = await rpc(probe, cases.map(([args], i) => call(i + 1, tool, args)), cases.length);
-  cases.forEach(([args, expected], i) => {
+  cases.forEach(([args, expected, schemaPath], i) => {
     const r = byId(res, i + 1);
     const label = `${tool} ${JSON.stringify(args)}`;
+    if (schemaPath) {
+      assert.ok(r.error?.code === -32602 && r.result === undefined, `${label} は -32602 のはず。応答全体: ${JSON.stringify(r).slice(0, 300)}`);
+      assert.match(r.error.message, /inputSchema/, `${label}: ${r.error.message}`);
+      assert.ok(r.error.message.includes(tool), `${label}: ツール名が無い: ${r.error.message}`);
+      assert.ok(r.error.message.includes(schemaPath), `${label}: ${schemaPath} が無い: ${r.error.message}`);
+      assert.match(r.error.message, expected, `${label}: ${r.error.message}`);
+      return;
+    }
     assert.equal(r.result?.isError, true, `${label} が拒否されていない。実際の応答: ${textOf(r).slice(0, 300)}`);
     assert.match(textOf(r), expected, `${label} のメッセージが違う。実際の応答: ${textOf(r).slice(0, 300)}`);
     assert.doesNotMatch(textOf(r), /索引がありません/, `${label}: 引数の検証より先に索引の有無が出ている`);
@@ -440,13 +452,13 @@ const RUN_LIKE_CASES = [
   [{ instruction: 'x', effort: 'foo' }, /未知の effort/],
   [{ instruction: 'x', effort: 'constructor' }, /未知の effort/],
   [{ instruction: 'x', sources: ['nope'] }, /未知のソース/],
-  [{ instruction: 'x', sources: 'repo' }, /配列/],
-  [{ instruction: 'x', sources: [1] }, /未知のソース/],
+  [{ instruction: 'x', sources: 'repo' }, /型が array/, '$.sources'],
+  [{ instruction: 'x', sources: [1] }, /型が string/, '$.sources[0]'],
   [{ instruction: 'x', sources: [''] }, /未知のソース/],
 ];
 const SOURCES_ONLY_CASES = [
   [{ query: 'refund', sources: ['nope'] }, /未知のソース/],
-  [{ query: 'refund', sources: 'docs' }, /配列/],
+  [{ query: 'refund', sources: 'docs' }, /型が array/, '$.sources'],
 ];
 
 test('MCP: 索引が無くても run_task の引数（task / effort / sources）は索引エラーより先に検証される', async () => {
@@ -462,17 +474,17 @@ test('MCP: 索引が無くても search の sources は索引エラーより先�
 });
 
 test('MCP: 索引が無くても static_scan の sources は索引エラーより先に検証される', async () => {
-  await assertRejected('context_grill_static_scan', SOURCES_ONLY_CASES.map(([a, m]) => [{ sources: a.sources }, m]), { build: false });
+  await assertRejected('context_grill_static_scan', SOURCES_ONLY_CASES.map(([a, m, p]) => [{ sources: a.sources }, m, p]), { build: false });
 });
 
 test('MCP: sync の sources は未知の id・文字列を拒否する（黙って何も同期しない / 部分一致で選ばない）', async () => {
-  await assertRejected('context_grill_sync', SOURCES_ONLY_CASES.map(([a, m]) => [{ sources: a.sources }, m]), { build: false });
+  await assertRejected('context_grill_sync', SOURCES_ONLY_CASES.map(([a, m, p]) => [{ sources: a.sources }, m, p]), { build: false });
 });
 
 test('MCP: fetch の source は未知の id・文字列でない値・空文字を拒否する', async () => {
   await assertRejected('context_grill_fetch', [
     [{ path: 'payment.js', source: 'nope' }, /未知のソース/],
-    [{ path: 'payment.js', source: 1 }, /未知のソース/],
+    [{ path: 'payment.js', source: 1 }, /型が string/, '$.source'],
     [{ path: 'payment.js', source: '' }, /未知のソース/],
   ], { build: false });
 });
@@ -492,8 +504,10 @@ test('MCP: search の sources は文字列（部分一致）を拒否し、配�
   ], 7);
   for (const id of [1, 2]) {
     const r = byId(res, id);
-    assert.equal(r.result?.isError, true, `id=${id}: 文字列の sources が拒否されていない。応答: ${textOf(r).slice(0, 200)}`);
-    assert.match(textOf(r), /配列/, `id=${id}: ${textOf(r).slice(0, 200)}`);
+    assert.ok(r.error?.code === -32602 && r.result === undefined, `id=${id}: 文字列の sources が -32602 で拒否されていない。応答全体: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.match(r.error.message, /inputSchema/, `id=${id}: ${r.error.message}`);
+    assert.ok(r.error.message.includes('context_grill_search') && r.error.message.includes('$.sources'), `id=${id}: ${r.error.message}`);
+    assert.match(r.error.message, /型が array/, `id=${id}: ${r.error.message}`);
   }
   const sourcesOf = (id) => {
     const r = byId(res, id);
@@ -631,4 +645,130 @@ test('MCP: tools/call の未知のツール名（name が無い・数値・空�
   const st = byId(res, 7);
   assert.notEqual(st.result?.isError, true, JSON.stringify(st).slice(0, 300));
   assert.equal(JSON.parse(textOf(st)).indexed, true);
+});
+
+// ---- tools/call の引数を inputSchema で検査する ----
+// tools/list で公開している inputSchema は、以前は tools/call で検査されておらず、未知のキーが黙って無視される・
+// enum 違いが通る・型違い（"false" は真、k:"12" など）が通る・必須項目の欠落が実行時の TypeError になる、
+// といった形で素通りしていた。検査は preflight（意味の検証）より前に走り、反する引数は -32602 になる。
+// 以降のテストは索引を作らない設定でも成立する（索引エラーより先に止まることも兼ねる）。
+
+/** -32602 で、メッセージに inputSchema・ツール名・needles が全部含まれることを見る。 */
+function assertSchemaError(r, tool, label, ...needles) {
+  assert.ok(r.error?.code === -32602 && r.result === undefined, `${label} は -32602 のはず。応答全体: ${JSON.stringify(r).slice(0, 400)}`);
+  assert.match(r.error.message, /inputSchema/, `${label}: ${r.error.message}`);
+  assert.ok(r.error.message.includes(tool), `${label}: ツール名が無い: ${r.error.message}`);
+  for (const n of needles) assert.ok(r.error.message.includes(n), `${label}: ${n} が無い: ${r.error.message}`);
+}
+
+const VALID_ARGS = {
+  context_grill_status: {},
+  context_grill_search: { query: 'x' },
+  context_grill_evidence_pack: { instruction: 'x' },
+  context_grill_verify: { pack_id: 'p', result: {} },
+  context_grill_static_scan: {},
+  context_grill_fetch: {},
+  context_grill_run_task: { instruction: 'x' },
+  context_grill_sync: {},
+};
+
+test('MCP: 全ツールで未知のキー（model / bogus）を -32602 で拒否する', async () => {
+  const { dir, configPath } = await fixture2({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const tools = Object.keys(VALID_ARGS);
+  const res = await rpc(probe, tools.map((t, i) => call(i + 1, t, { ...VALID_ARGS[t], model: 'x', bogus: 1, constructor: 1 })), tools.length);
+  tools.forEach((t, i) => {
+    // constructor は継承されたプロパティに当たるキー。スキーマの引き方次第で素通りしやすいので入れてある
+    assertSchemaError(byId(res, i + 1), t, t, '$.model: 未定義のプロパティ', '$.bogus: 未定義のプロパティ', '$.constructor: 未定義のプロパティ');
+  });
+});
+
+test('MCP: static_scan の severity は enum を検査する（hgih は拒否、high は通る）', async () => {
+  const { dir, configPath } = await fixture2({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [
+    call(1, 'context_grill_static_scan', { severity: 'hgih' }),
+    call(2, 'context_grill_static_scan', { severity: 'high' }),
+  ], 2);
+  assertSchemaError(byId(res, 1), 'context_grill_static_scan', 'severity:"hgih"', '$.severity', '"hgih"', '許可', 'critical, high, medium, low, info');
+  const ok = byId(res, 2);
+  assert.ok(ok.error === undefined && ok.result?.isError !== true, `severity:"high" は通るはず: ${JSON.stringify(ok).slice(0, 300)}`);
+});
+
+test('MCP: 引数の型違い（k / limit / dry_run / include_static / query / instruction）は -32602', async () => {
+  await assertRejected('context_grill_search', [
+    [{ query: 'x', k: '12' }, /型が number/, '$.k'],
+    [{ query: 5 }, /型が string/, '$.query'],
+    [{ query: 'x', kinds: 'code' }, /型が array/, '$.kinds'],
+  ], { build: false });
+  await assertRejected('context_grill_static_scan', [[{ limit: 'x' }, /型が number/, '$.limit']], { build: false });
+  await assertRejected('context_grill_run_task', [
+    [{ instruction: 'x', dry_run: 'false' }, /型が boolean/, '$.dry_run'],
+    [{ instruction: 'x', dry_run: 0 }, /型が boolean/, '$.dry_run'],
+    [{ instruction: 5 }, /型が string/, '$.instruction'],
+  ], { build: false });
+  await assertRejected('context_grill_evidence_pack', [
+    [{ instruction: 'x', include_static: 'no' }, /型が boolean/, '$.include_static'],
+    [{ instruction: 5 }, /型が string/, '$.instruction'],
+  ], { build: false });
+});
+
+test('MCP: 必須項目の欠落と、必須項目の null は -32602', async () => {
+  await assertRejected('context_grill_search', [
+    [{}, /必須項目がありません/, '$.query'],
+    [{ query: null }, /必須項目がありません/, '$.query'],
+  ], { build: false });
+  await assertRejected('context_grill_run_task', [[{}, /必須項目がありません/, '$.instruction']], { build: false });
+  await assertRejected('context_grill_evidence_pack', [[{}, /必須項目がありません/, '$.instruction']], { build: false });
+  await assertRejected('context_grill_verify', [
+    [{}, /必須項目がありません/, '$.pack_id'],
+    [{ pack_id: 'p' }, /必須項目がありません/, '$.result'],
+    [{ result: {} }, /必須項目がありません/, '$.pack_id'],
+  ], { build: false });
+});
+
+test('MCP: __proto__ を含む引数は黙って消えず、未定義のプロパティとして -32602', async () => {
+  const { dir, configPath } = await fixture2({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const raw = '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"context_grill_search","arguments":{"query":"x","__proto__":{"k":1}}}}';
+  const rawNull = raw.replace('"__proto__":{"k":1}', '"__proto__":null');
+  const reqs = [JSON.parse(raw), { ...JSON.parse(rawNull), id: 2 }];
+  // 空振り防止: JSON.parse は __proto__ を own のキーとして作り、送る行にも残っていること
+  for (const q of reqs) assert.ok(JSON.stringify(q).includes('"__proto__"'), `送る行に __proto__ が無い: ${JSON.stringify(q)}`);
+  const res = await rpc(probe, reqs, 2);
+  assertSchemaError(byId(res, 1), 'context_grill_search', '__proto__', '$.__proto__: 未定義のプロパティ');
+  assertSchemaError(byId(res, 2), 'context_grill_search', '__proto__:null', '$.__proto__: 未定義のプロパティ');
+});
+
+test('MCP: スキーマにない null のキーは省略扱いにならず拒否される', async () => {
+  await assertRejected('context_grill_search', [[{ query: 'x', model: null }, /未定義のプロパティ/, '$.model']], { build: false });
+});
+
+test('MCP: 正常な引数と、null の省略可キー・独自 effort（xdeep）・sources:[] は通り、tools/list の effort enum は変わらない', async () => {
+  const { dir, configPath } = await fixture2({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const q = 'refundPayment';
+  const ins = 'refundPayment の返金処理の仕様と制約を整理して';
+  const res = await rpc(probe, [
+    call(1, 'context_grill_search', { query: q }),
+    call(2, 'context_grill_search', { query: q, k: 3, sources: ['repo'] }),
+    call(3, 'context_grill_search', { query: q, k: null, sources: null, kinds: null }),
+    call(4, 'context_grill_run_task', { instruction: ins, effort: null, task: null, sources: null, dry_run: null }),
+    call(5, 'context_grill_evidence_pack', { instruction: ins, effort: 'xdeep' }),
+    call(6, 'context_grill_run_task', { instruction: ins, effort: 'xdeep', dry_run: true }),
+    call(7, 'context_grill_search', { query: q, sources: [] }),
+    { jsonrpc: '2.0', id: 8, method: 'tools/list' },
+    call(9, 'context_grill_static_scan', { sources: null, severity: null, limit: null }),
+  ], 9);
+  for (const id of [1, 2, 3, 4, 5, 6, 7, 9]) {
+    const r = byId(res, id);
+    assert.ok(r.error === undefined && r.result?.isError !== true, `id=${id} が通るはず: ${JSON.stringify(r).slice(0, 300)}`);
+  }
+  assert.equal(JSON.parse(textOf(byId(res, 2))).length <= 3, true, 'k:3 が効いていない');
+  assert.deepEqual([...new Set(JSON.parse(textOf(byId(res, 2))).map((x) => x.source))], ['repo']);
+  const both = (id) => [...new Set(JSON.parse(textOf(byId(res, id))).map((x) => x.source))].sort();
+  assert.deepEqual(both(7), ['docs', 'repo'], 'sources:[] は全ソース');
+  assert.deepEqual(both(3), ['docs', 'repo'], 'null の sources / k / kinds は省略扱い');
+  const tool = byId(res, 8).result.tools.find((t) => t.name === 'context_grill_run_task');
+  assert.deepEqual(tool.inputSchema.properties.effort.enum, ['low', 'normal', 'deep'], 'tools/list の effort enum は変えない');
 });
