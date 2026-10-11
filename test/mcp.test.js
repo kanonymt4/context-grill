@@ -772,3 +772,99 @@ test('MCP: 正常な引数と、null の省略可キー・独自 effort（xdeep�
   const tool = byId(res, 8).result.tools.find((t) => t.name === 'context_grill_run_task');
   assert.deepEqual(tool.inputSchema.properties.effort.enum, ['low', 'normal', 'deep'], 'tools/list の effort enum は変えない');
 });
+
+// ---- pack_id のパス走査 ----
+//
+// verify / fetch は args.pack_id を検証せずに path.join(packDir, `${pack_id}.json`) へ渡していたため、
+// "../../../secret" で packs ディレクトリの外にある <設定ディレクトリ>/secret.json が読めた。
+// 形式の検査（preflight）で止まることを見るので、索引は要らない。
+
+const PACK_SECRET = 'OUTSIDE-PACKS-DIR-CONTENT';
+const PACK_ID_MESSAGE = /pack_id の形式が不正です/;
+
+async function writePackSecret(dir) {
+  await fsp.writeFile(path.join(dir, 'secret.json'),
+    JSON.stringify({ pack: { items: [{ id: 'E1', text: PACK_SECRET }] }, taskId: 'spec' }));
+}
+
+const BAD_PACK_IDS = [
+  '../../../secret', '', '../x', '..\\x', '/etc/passwd', 'C:\\x', 'pack-', 'pack-xyz',
+  'pack-0123456789/../x', 'pack-0123456789.json', 'pack-012345678', 'pack-01234567890',
+  'PACK-0123456789', 'pack-0123456789\n', 'constructor', '__proto__',
+];
+
+test('MCP: pack_id が packs の外を指すと fetch / verify は目印を漏らさず形式エラーにする', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  await writePackSecret(dir);
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [
+    call(1, 'context_grill_fetch', { pack_id: '../../../secret', evidence_id: 'E1' }),
+    call(2, 'context_grill_verify', { pack_id: '../../../secret', result: {} }),
+  ], 2);
+  for (const id of [1, 2]) {
+    const r = byId(res, id);
+    const t = textOf(r);
+    assert.doesNotMatch(t, new RegExp(PACK_SECRET), `id=${id}: packs の外の内容が応答に含まれている: ${t.slice(0, 300)}`);
+    assert.equal(r.result?.isError, true, `id=${id} が拒否されていない。実際の応答: ${t.slice(0, 300)}`);
+    assert.match(t, PACK_ID_MESSAGE, `id=${id}: メッセージが違う。実際の応答: ${t.slice(0, 300)}`);
+    assert.ok(!t.includes('../../../secret'), `id=${id}: 不正な値そのものがメッセージに含まれている: ${t}`);
+  }
+});
+
+test('MCP: 形式に合わない pack_id は fetch / verify の両方で形式エラーになる', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  await writePackSecret(dir);
+  const probe = await writeProbe(dir, configPath);
+  const reqs = [];
+  for (const [i, bad] of BAD_PACK_IDS.entries()) {
+    reqs.push(call(i * 2 + 1, 'context_grill_fetch', { pack_id: bad, evidence_id: 'E1' }));
+    reqs.push(call(i * 2 + 2, 'context_grill_verify', { pack_id: bad, result: {} }));
+  }
+  const res = await rpc(probe, reqs, reqs.length);
+  BAD_PACK_IDS.forEach((bad, i) => {
+    for (const [k, tool] of [[1, 'context_grill_fetch'], [2, 'context_grill_verify']]) {
+      const label = `${tool} pack_id=${JSON.stringify(bad)}`;
+      const r = byId(res, i * 2 + k);
+      const t = textOf(r);
+      assert.equal(r.result?.isError, true, `${label} が拒否されていない。実際の応答: ${t.slice(0, 300)}`);
+      assert.match(t, PACK_ID_MESSAGE, `${label}: メッセージが違う。実際の応答: ${t.slice(0, 300)}`);
+      assert.doesNotMatch(t, new RegExp(PACK_SECRET), `${label}: 目印が漏れている`);
+    }
+  });
+});
+
+test('MCP: 形式が正しく存在しない pack_id は従来どおり「見つかりません」を返す', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [
+    call(1, 'context_grill_fetch', { pack_id: 'pack-0123456789', evidence_id: 'E1' }),
+    call(2, 'context_grill_verify', { pack_id: 'pack-0123456789', result: {} }),
+  ], 2);
+  const f = textOf(byId(res, 1));
+  const v = textOf(byId(res, 2));
+  assert.match(f, /pack が見つかりません/, `fetch: ${f}`);
+  assert.match(v, /pack_id pack-0123456789 が見つかりません/, `verify: ${v}`);
+  assert.doesNotMatch(f + v, PACK_ID_MESSAGE, '形式は正しいのに形式エラーになっている');
+});
+
+test('MCP: evidence_pack が返した pack_id は fetch / verify で使え、pack_id 無しの fetch も動く', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [call(1, 'context_grill_evidence_pack', { instruction: 'refundPayment' })], 1);
+  const packId = JSON.parse(textOf(byId(res, 1))).pack_id;
+  assert.match(packId, /^pack-[0-9a-f]{10}$/, `pack_id の形が想定と違う: ${packId}`);
+  const res2 = await rpc(probe, [
+    call(1, 'context_grill_fetch', { pack_id: packId, evidence_id: 'E1' }),
+    call(2, 'context_grill_verify', { pack_id: packId, result: {} }),
+    call(3, 'context_grill_fetch', { source: 'repo', path: 'src/payment.js' }),
+  ], 3);
+  const f = byId(res2, 1);
+  assert.notEqual(f.result?.isError, true, `fetch が拒否された: ${textOf(f).slice(0, 300)}`);
+  assert.equal(JSON.parse(textOf(f)).id, 'E1', `fetch: ${textOf(f).slice(0, 300)}`);
+  const v = byId(res2, 2);
+  assert.notEqual(v.result?.isError, true, `verify が拒否された: ${textOf(v).slice(0, 300)}`);
+  assert.equal(typeof JSON.parse(textOf(v)).passed, 'boolean', `verify: ${textOf(v).slice(0, 300)}`);
+  const s = byId(res2, 3);
+  assert.notEqual(s.result?.isError, true, `source+path の fetch が拒否された: ${textOf(s).slice(0, 300)}`);
+  assert.match(textOf(s), /refundPayment/, `source+path の fetch: ${textOf(s).slice(0, 300)}`);
+});
