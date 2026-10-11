@@ -103,15 +103,27 @@ export function loadDotEnv(dir) {
   }
 }
 
-/** 文字列中の ${ENV_NAME} を展開 */
-function expandEnv(value) {
+/**
+ * 文字列中の ${ENV_NAME} を展開する。
+ * - 未定義の変数は黙って '' にせず、errs に「<JSON のパス> の ${NAME} は環境変数が未定義です」を積む
+ *   （パスは sources[0].path のように示す。値は出さない）。定義済みで空文字の変数は '' に展開する。
+ * - 定義の有無は Object.hasOwn で判定する（process.env[n] だと constructor などの prototype のキーを引く）。
+ * - `_` で始まるキー（_comment / _README など）の配下は展開せず、文字のまま通す。
+ */
+function expandEnv(value, at = '', errs = []) {
   if (typeof value === 'string') {
-    return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, n) => process.env[n] ?? '');
+    return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, n) => {
+      if (Object.hasOwn(process.env, n)) return process.env[n];
+      errs.push(`${at} の \${${n}} は環境変数が未定義です`);
+      return m;
+    });
   }
-  if (Array.isArray(value)) return value.map(expandEnv);
+  if (Array.isArray(value)) return value.map((v, i) => expandEnv(v, `${at}[${i}]`, errs));
   if (value && typeof value === 'object') {
     const out = {};
-    for (const [k, v] of Object.entries(value)) out[k] = expandEnv(v);
+    for (const [k, v] of Object.entries(value)) {
+      out[k] = k.startsWith('_') ? v : expandEnv(v, at ? `${at}.${k}` : k, errs);
+    }
     return out;
   }
   return value;
@@ -167,7 +179,10 @@ export async function loadConfig(explicitPath) {
     const { presets: _omit, ...others } = raw;
     rest = others;
   }
-  const merged = deepMerge(DEFAULTS, expandEnv(rest));
+  const envErrs = [];
+  const expanded = expandEnv(rest, '', envErrs);
+  if (envErrs.length) throw new Error('設定エラー:\n  - ' + envErrs.join('\n  - '));
+  const merged = deepMerge(DEFAULTS, expanded);
   // DEFAULTS の配列を共有しない。形の検証は presets.js の validatePresets が行い、
   // ここでは throw しない（不正な preset があっても sync / search / MCP 起動は止めない）。
   merged.presets = rawPresets ?? [];
