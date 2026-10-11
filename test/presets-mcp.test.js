@@ -186,23 +186,69 @@ const RUN_TASK_SCHEMA = {
   properties: {
     instruction: { type: 'string' },
     task: { type: 'string', enum: ['spec', 'bug', 'security', 'static', 'design'] },
-    effort: { type: 'string', enum: ['low', 'normal', 'deep'] },
+    // effort の enum は設定の effortPresets のキー。fixture には huge がある（既定値が先、独自の段階が後）
+    effort: { type: 'string', enum: ['low', 'normal', 'deep', 'huge'] },
     sources: { type: 'array', items: { type: 'string' } },
     dry_run: { type: 'boolean' },
   },
   required: ['instruction'], additionalProperties: false,
 };
+const EVIDENCE_PACK_EFFORT = { type: 'string', enum: ['low', 'normal', 'deep', 'huge'], description: '深さ（既定 normal）' };
 const TOOL_NAMES = [
   'context_grill_status', 'context_grill_search', 'context_grill_evidence_pack', 'context_grill_verify',
   'context_grill_static_scan', 'context_grill_fetch', 'context_grill_run_task', 'context_grill_sync',
 ];
 
-test('G1: tools/list の名前の集合と run_task の inputSchema が変わっていない', async () => {
+test('G1: tools/list の名前の集合と run_task / evidence_pack の inputSchema（effort の enum は設定由来）', async () => {
   const { probe } = await setup();
   const r = await one(probe, req('tools/list'));
   const tools = r?.result?.tools ?? [];
   assert.deepEqual(tools.map((t) => t.name).sort(), [...TOOL_NAMES].sort(), show(r));
   assert.deepEqual(tools.find((t) => t.name === 'context_grill_run_task').inputSchema, RUN_TASK_SCHEMA);
+  assert.deepEqual(tools.find((t) => t.name === 'context_grill_evidence_pack').inputSchema.properties.effort, EVIDENCE_PACK_EFFORT);
+});
+
+// 注意: このテストは実装前にも通る回帰ガード。effortPresets を足していない設定では、
+// 動的な enum にしても tools/list の effort は従来の固定値のまま。
+test('G4: effortPresets を足していない設定では run_task / evidence_pack の effort の enum は low / normal / deep のまま', async () => {
+  const { probe } = await setup({ raw: { effortPresets: undefined } });
+  const r = await one(probe, req('tools/list'));
+  const tools = r?.result?.tools ?? [];
+  for (const name of ['context_grill_run_task', 'context_grill_evidence_pack']) {
+    assert.deepEqual(tools.find((t) => t.name === name).inputSchema.properties.effort.enum, ['low', 'normal', 'deep'], name);
+  }
+});
+
+test('G5: 独自の effort（xdeep）を足すと evidence_pack の enum にも入り、task の enum と他のツールの inputSchema は変わらない', async () => {
+  const base = await setup({ raw: { effortPresets: undefined } });
+  const custom = await setup({ raw: { effortPresets: { xdeep: { queries: 1, final: 5, evidenceTokens: 5000 } } } });
+  const t0 = (await one(base.probe, req('tools/list')))?.result?.tools ?? [];
+  const t1 = (await one(custom.probe, req('tools/list')))?.result?.tools ?? [];
+  const ep = t1.find((t) => t.name === 'context_grill_evidence_pack').inputSchema;
+  assert.deepEqual(ep.properties.effort.enum, ['low', 'normal', 'deep', 'xdeep']);
+  assert.deepEqual(ep.properties.task.enum, ['spec', 'bug', 'security', 'static', 'design']);
+  const rt = t1.find((t) => t.name === 'context_grill_run_task').inputSchema;
+  assert.deepEqual(rt.properties.effort.enum, ['low', 'normal', 'deep', 'xdeep']);
+  assert.deepEqual(rt.properties.task.enum, ['spec', 'bug', 'security', 'static', 'design']);
+  // effort の enum 以外は、既定の設定のサーバーと完全に同じ
+  const strip = (tools) => tools.map((t) => {
+    const c = structuredClone(t);
+    if (c.inputSchema.properties.effort) delete c.inputSchema.properties.effort.enum;
+    return c;
+  });
+  assert.deepEqual(strip(t1), strip(t0));
+});
+
+test('G6: tools/list は何度呼んでも同じ結果（決定的）で、呼ぶたびに enum が増えたりしない', async () => {
+  const { probe } = await setup();
+  const a = req('tools/list');
+  const b = req('tools/list');
+  const c = req('tools/list');
+  const res = await many(probe, [a, b, c]);
+  assert.deepEqual(res.at(b).result, res.at(a).result);
+  assert.deepEqual(res.at(c).result, res.at(a).result);
+  assert.deepEqual(res.at(a).result.tools.find((t) => t.name === 'context_grill_run_task').inputSchema.properties.effort.enum,
+    ['low', 'normal', 'deep', 'huge']);
 });
 
 test('G2: README §5 のツール表と tools/list が双方向で一致する', async () => {
@@ -249,14 +295,15 @@ test('P1: initialize が prompts capability を宣言し、tools は現行どお
   assert.deepEqual(r?.result?.capabilities, { tools: { listChanged: false }, prompts: { listChanged: false } }, show(r));
 });
 
-test('P2: prompts/list は検証を通り enum に収まる preset だけを定義順に出し、null を含まない', async () => {
+test('P2: prompts/list は検証を通った preset をすべて定義順に出し（独自の effort の huge-effort も含む）、null を含まない', async () => {
   const { configPath, probe } = await setup();
   const config = await loadConfig(configPath);
-  const expected = listPresets(config).filter((x) => x.name !== 'huge-effort');
+  const expected = listPresets(config);
   const r = await one(probe, req('prompts/list'));
   const prompts = r?.result?.prompts;
   assert.deepEqual(prompts?.map((x) => x.name), expected.map((x) => x.name), show(r));
-  assert.equal(prompts.length, 4, '期待する preset の数が変わった（テスト側の前提を確認）');
+  assert.ok(prompts.some((x) => x.name === 'huge-effort'), 'huge-effort が list に無い');
+  assert.equal(prompts.length, 5, '期待する preset の数が変わった（テスト側の前提を確認）');
   assert.ok(!hasNull(r.result), `応答に null が含まれる: ${show(r)}`);
   assert.equal('nextCursor' in r.result, false);
 
@@ -492,7 +539,7 @@ test('P16: 巨大な値（200,000 字）でも往復して一致し、タイム�
   assert.ok(got === exp, `往復で変わった（長さ 実際 ${got.length} / 期待 ${exp.length}）`);
 });
 
-test('P17: MCP の enum の外にある effort の preset は list に出ず、get は CLI を案内して拒否する', async () => {
+test('P17: 独自の effort（huge）の preset は list に出て、get は成功し、埋め込み JSON の effort が huge になる', async () => {
   const { configPath, probe } = await setup();
   const config = await loadConfig(configPath);
   assert.ok(listPresets(config).some((x) => x.name === 'huge-effort'), 'テスト前提: huge-effort は preset として有効');
@@ -500,10 +547,24 @@ test('P17: MCP の enum の外にある effort の preset は list に出ず、g
   const g = getReq('huge-effort');
   const res = await many(probe, [l, g]);
   const names = (res.at(l).result?.prompts ?? []).map((x) => x.name);
-  assert.ok(names.length > 0 && !names.includes('huge-effort'), show(res.at(l)));
-  const bad = res.at(g);
-  assertInvalid(bad);
-  assert.match(bad.error.message, /context-grill run/);
+  assert.ok(names.includes('huge-effort'), show(res.at(l)));
+  const { args } = parseMessage(res.at(g));
+  assert.equal(args.effort, 'huge');
+  assert.equal(args.task, 'spec');
+  assert.equal(args.instruction, 'HUGE-BODY-MARKER');
+});
+
+test('P22: get が返した引数で run_task を呼ぶと通る（往復。huge は tools/list の enum にも入っている）', async () => {
+  const { probe } = await setup({ build: true });
+  const g = getReq('huge-effort');
+  const l = req('tools/list');
+  const first = await many(probe, [g, l]);
+  const { args } = parseMessage(first.at(g));
+  const enumValues = first.at(l).result.tools.find((t) => t.name === 'context_grill_run_task').inputSchema.properties.effort.enum;
+  assert.ok(enumValues.includes(args.effort), `prompt が返す effort "${args.effort}" が tools/list の enum に無い: ${enumValues}`);
+  const c = req('tools/call', { name: 'context_grill_run_task', arguments: { ...args, dry_run: true } });
+  const r = await one(probe, c);
+  assert.ok(r?.error === undefined && r?.result?.isError !== true, `呼び出しが通らない: ${show(r)}`);
 });
 
 test('P18: 引数名が task / effort でも、ツールの task / effort は preset の定義の値', async () => {
@@ -541,12 +602,12 @@ test('P20: README §5 と commands.md に MCP prompts の呼び出し方が書�
   assert.match(secC, /\/mcp__/, 'commands.md の run / presets の節に /mcp__ が無い');
 });
 
-test('P21: 起動時に使えない preset があれば stderr に 1 行出す（名前と本文は出さない）', async () => {
+test('P21: 起動時に定義が不正な preset があれば stderr に 1 行出す（名前と本文は出さない。独自の effort の preset は数えない）', async () => {
   const bad = await setup();
   const r1 = await rpc(bad.probe, [req('ping')], 1);
   const hit = r1.stderr.split('\n').filter((l) => l.includes('使えない preset が'));
   assert.equal(hit.length, 1, `警告の行がちょうど 1 行ではない: ${r1.stderr}`);
-  assert.match(hit[0], /使えない preset が 2 件あります/);
+  assert.match(hit[0], /使えない preset が 1 件あります/);
   for (const secret of ['broken', 'huge-effort', 'BROKEN-BODY-MARKER', 'HUGE-BODY-MARKER']) {
     assert.ok(!r1.stderr.includes(secret), `stderr に "${secret}" が出ている: ${r1.stderr}`);
   }

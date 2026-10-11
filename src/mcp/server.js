@@ -175,12 +175,25 @@ function checkArguments(name, rawArgs) {
   return { args, errors: validate(schema, args) };
 }
 
-// prompts として公開できる preset の task / effort は、context_grill_run_task の inputSchema に
-// 収まるものだけ。enum を二重に持たず、TOOLS から取り出す。
-const RUN_TASK_PROPS = TOOLS.find((t) => t.name === 'context_grill_run_task').inputSchema.properties;
-const RUN_TASK_TASKS = RUN_TASK_PROPS.task.enum;
-const RUN_TASK_EFFORTS = RUN_TASK_PROPS.effort.enum;
-const fitsRunTask = (p) => RUN_TASK_TASKS.includes(p.task) && RUN_TASK_EFFORTS.includes(p.effort);
+// effort の enum を設定の effortPresets から作る対象のツール。
+const EFFORT_ENUM_TOOLS = ['context_grill_run_task', 'context_grill_evidence_pack'];
+
+/**
+ * tools/list で公開する配列を作る。effort の enum だけを設定の effortPresets のキー
+ * （定義順。既定値が先、独自の段階が後）で置き換える。
+ * キーの取り方は presets.js の validatePresets の effort 判定と揃える（プレーンなオブジェクトのみ）。
+ * モジュール定数の TOOLS は書き換えず、複製に対して置き換える。
+ */
+function buildToolList(config) {
+  const levels = config.effortPresets !== null && typeof config.effortPresets === 'object' && !Array.isArray(config.effortPresets)
+    ? Object.keys(config.effortPresets) : [];
+  return TOOLS.map((t) => {
+    if (!EFFORT_ENUM_TOOLS.includes(t.name)) return t;
+    const copy = structuredClone(t);
+    copy.inputSchema.properties.effort.enum = [...levels];
+    return copy;
+  });
+}
 
 const presetDescription = (p) => p.description ?? `context-grill の preset（task=${p.task} effort=${p.effort}）`;
 
@@ -396,12 +409,16 @@ export async function startMcpServer({ configPath, offline } = {}) {
   const safe = (t) => (doRedact ? redactText(t ?? '').text : (t ?? ''));
   const textResult = (obj) => ({ content: [{ type: 'text', text: typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2) }] });
 
+  // 起動時の設定から 1 回だけ作る（設定の変更は再起動で反映される）。
+  const toolList = buildToolList(config);
+
   /**
-   * prompts/list の中身。検証を通り、かつ context_grill_run_task の enum に収まる preset だけを
-   * 定義順に返す。MCP の応答に null は出せないので、無い値はキーごと省略する。
+   * prompts/list の中身。検証を通った preset を定義順に返す（独自の effort の preset も含む。
+   * tools/list の effort の enum も同じ effortPresets から作るので食い違わない）。
+   * MCP の応答に null は出せないので、無い値はキーごと省略する。
    * runRequest / getStore を使わないので、prompts/* が索引を開くことはない。
    */
-  const promptList = () => listPresets(config).filter(fitsRunTask).map((p) => ({
+  const promptList = () => listPresets(config).map((p) => ({
     name: p.name,
     description: listDescription(p),
     arguments: p.arguments.map((a) => {
@@ -417,11 +434,6 @@ export async function startMcpServer({ configPath, offline } = {}) {
     if (typeof name !== 'string') return err(id, -32602, 'prompts/get の params.name に preset 名（文字列）を指定してください');
     try {
       const preset = getPreset(config, name);
-      if (!fitsRunTask(preset)) {
-        return err(id, -32602,
-          `preset "${name}" の task "${preset.task}" / effort "${preset.effort}" は MCP の context_grill_run_task では指定できません。CLI の context-grill run を使ってください`,
-          { code: 'EPRESET_MCP_UNSUPPORTED', preset: name, issues: [] });
-      }
       // arguments はコピーせずそのまま渡す（Object.assign 等でコピーすると "__proto__" キーが黙って消える）。
       // 無い / null だけを {} 扱いにする（|| {} だと false や "" も黙って {} になる）。
       const rawArgs = Object.hasOwn(params, 'arguments') ? params.arguments : undefined;
@@ -629,7 +641,7 @@ export async function startMcpServer({ configPath, offline } = {}) {
       }
       if (method === 'notifications/initialized' || method === 'notifications/cancelled') return;
       if (method === 'ping') return ok(id, {});
-      if (method === 'tools/list') return ok(id, { tools: TOOLS });
+      if (method === 'tools/list') return ok(id, { tools: toolList });
       if (method === 'resources/list') return ok(id, { resources: [] });
       if (method === 'prompts/list') return ok(id, { prompts: promptList() });
       if (method === 'prompts/get') {
@@ -674,10 +686,10 @@ export async function startMcpServer({ configPath, offline } = {}) {
     }
   }
 
-  // 使えない preset（定義が不正、または MCP の enum の外）があれば 1 行だけ知らせる。
+  // 使えない preset（定義が不正なもの）があれば 1 行だけ知らせる。
   // 名前や本文は出さない（原因は doctor / presets で確認する）。
-  if (validatePresets(config).length > 0 || (Array.isArray(config.presets) && promptList().length < config.presets.length)) {
-    const unusable = Array.isArray(config.presets) ? config.presets.length - promptList().length : 1;
+  if (validatePresets(config).length > 0 || (Array.isArray(config.presets) && listPresets(config).length < config.presets.length)) {
+    const unusable = Array.isArray(config.presets) ? config.presets.length - listPresets(config).length : 1;
     process.stderr.write(`[context-grill] 使えない preset が ${unusable} 件あります（context-grill doctor / presets で確認できます）\n`);
   }
   process.stderr.write(`[context-grill] MCP サーバー起動 (project=${config.project}, sources=${config.sources.length})\n`);
