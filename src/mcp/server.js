@@ -16,7 +16,22 @@ import { shortHash } from '../util/misc.js';
 import { initEgress, egressPlan } from '../util/egress.js';
 import { redactText } from '../util/redact.js';
 
-const PROTOCOL_FALLBACK = '2024-11-05';
+// 新しい順。先頭が最新で、交渉に失敗したときの既定。
+// 対応表の根拠: Claude Code 2.1.231 と MCP SDK 1.29 が持つ版。
+// 2026-07-28（server/discover 方式）は未実装なので含めない。
+// 2024-10-07 は正式版より前の版なので含めない。
+const SUPPORTED_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
+const LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0];
+
+/**
+ * initialize の protocolVersion を交渉する。
+ * クライアントが文字列で対応表にある版を求めたらそれを、それ以外（未知・省略・文字列以外）は
+ * 最新版を返す。結果の型（string）を守るため、クライアントの値をそのまま返さない。
+ */
+function negotiateProtocolVersion(params) {
+  const v = params !== null && typeof params === 'object' && !Array.isArray(params) ? params.protocolVersion : undefined;
+  return typeof v === 'string' && SUPPORTED_PROTOCOL_VERSIONS.includes(v) ? v : LATEST_PROTOCOL_VERSION;
+}
 
 /** serverInfo.version。package.json の version を使い、読めない・文字列でないときは 'unknown'（起動は止めない）。 */
 const SERVER_VERSION = (() => {
@@ -600,7 +615,7 @@ export async function startMcpServer({ configPath, offline } = {}) {
     try {
       if (method === 'initialize') {
         ok(id, {
-          protocolVersion: params?.protocolVersion || PROTOCOL_FALLBACK,
+          protocolVersion: negotiateProtocolVersion(params),
           capabilities: { tools: { listChanged: false }, prompts: { listChanged: false } },
           serverInfo: { name: 'context-grill', version: SERVER_VERSION },
           instructions: [
