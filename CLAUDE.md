@@ -379,8 +379,12 @@ Confluence の HTML 変換より簡単。
   - 実行結果の `meta.json` に、どの preset から実行したかが残らない。`prompts/get` とその後の
     `tools/call` はサーバーが結び付けられず、`run_task` に引数を足しても自己申告にしかならない。CLI の
     `run --json` には `preset` が出る
-  - `context_grill_fetch` の `pack_id` が、検証されないまま `path.join(packDir, pack_id + '.json')` に渡り、`../` で
-    packs の外の `.json` を読める（**コードを読んだだけで、実行は未確認**）
+  - ~~`context_grill_fetch` の `pack_id` が、検証されないまま `path.join(packDir, pack_id + '.json')` に渡り、`../` で
+    packs の外の `.json` を読める（コードを読んだだけで、実行は未確認）~~ **実測で確認し、修正済み（#43）。**
+    `fetch` に `../../../secret` を渡すと、packs の外の JSON（`pack.items[].id` の形のもの）の中身が返り、
+    `verify` も同じファイルを読んで検証が走った。直し方は多層防御: `pack_id` の形式（生成側と同じ定数
+    `pack-` + 16 進 10 桁）を `preflight` で検査し、`packFile()` で `path.resolve` した結果が packs の中に
+    あることを再確認する。後者は通常経路からは到達できず、テストでは検出できない（変異で確認済み）
   - `apiKeyEnv` / `tokenEnv` に `toString` などを書くと `process.env[name]` が関数を返す
     （`provider.js` / `base.js`。コードを読んだだけ）。`kinds` の未知の値は 0 件になる（同）
   - `test/unit.test.js` の HTTP リクエスト本文の Buffer 連結（ASCII だけなので実害は無いと見ている）。
@@ -793,3 +797,5 @@ Confluence の HTML 変換より簡単。
     外した、`null` の省略扱いを定義済みの省略可のキーだけにした）は、理由を確認して採用した
   - ファイルが重ならない PR は、前の PR の CI を待つあいだに並行で進めた（積み上げ PR にはしない）
   - 2026-10-11 から、ユーザーの明示により、Claude が squash マージする（上の「開発フロー」）
+  - 後から、`pack_id` のパス走査（#43）も直した。review で「コードを読んだだけ」と記録していたものを、
+    実際に再現してから修正した（記録の確度を上げてから直す）

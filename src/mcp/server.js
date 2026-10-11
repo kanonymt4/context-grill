@@ -197,6 +197,11 @@ function promptText(p, toolArgs) {
   ].join('\n');
 }
 
+// pack_id の形式。evidence_pack が生成する形（pack- + 16 進数）と、verify / fetch が受け付ける形を
+// 同じ定数から作る。生成の桁数を変えたとき、検査も追随する。
+const PACK_ID_HEX_LEN = 10;
+const PACK_ID_RE = new RegExp(`^pack-[0-9a-f]{${PACK_ID_HEX_LEN}}$`);
+
 export async function startMcpServer({ configPath, offline } = {}) {
   const config = await loadConfig(configPath);
   // --offline は設定そのものを書き換える（cli.js の load() と同じ）。run_task / sync は呼ばれるたびに
@@ -207,6 +212,19 @@ export async function startMcpServer({ configPath, offline } = {}) {
   const p = paths(config);
   const packDir = path.join(p.runs, 'packs');
   await fsp.mkdir(packDir, { recursive: true });
+
+  /**
+   * pack_id から pack ファイルのパスを作る。
+   *
+   * 形式の検査（preflight）を通っていても、packs の外に出ないことをここで再確認する
+   * （"../../x" のような値で packs の外の JSON が読めてしまうパス走査への最後の砦）。
+   */
+  const packFile = (packId) => {
+    const root = path.resolve(packDir) + path.sep;
+    const f = path.resolve(packDir, `${packId}.json`);
+    if (!f.startsWith(root)) throw new Error('pack_id が packs ディレクトリの外を指しています');
+    return f;
+  };
 
   // 索引ストアは 1 つだけ開いて使い回す。
   //
@@ -307,10 +325,24 @@ export async function startMcpServer({ configPath, offline } = {}) {
       resolveTask(args.task ?? 'spec');
       resolveEffort(config, args.effort ?? 'normal');
       normalizeSources(args.sources);
+    } else if (name === 'context_grill_verify') {
+      checkPackId(args.pack_id);
     } else if (name === 'context_grill_search' || name === 'context_grill_static_scan' || name === 'context_grill_sync') {
       normalizeSources(args.sources);
     } else if (name === 'context_grill_fetch') {
       normalizeSource(args.source);
+      checkPackId(args.pack_id);
+    }
+  };
+
+  /**
+   * pack_id の形式を検査する。undefined / null（fetch の source + path 経路）は対象外。
+   * 不正な値そのものはメッセージに含めない。
+   */
+  const checkPackId = (raw) => {
+    if (raw === undefined || raw === null) return;
+    if (typeof raw !== 'string' || !PACK_ID_RE.test(raw)) {
+      throw new Error('pack_id の形式が不正です（context_grill_evidence_pack が返した pack-… の形で指定してください）');
     }
   };
 
@@ -436,7 +468,7 @@ export async function startMcpServer({ configPath, offline } = {}) {
           kindPriors: task.kindPriors, sourcePriority,
         });
         const pack = buildEvidencePack(results, { budgetTokens: preset.evidenceTokens ?? config.budget.evidenceTokens, redact: config.security?.redactSecrets !== false });
-        const packId = `pack-${shortHash(args.instruction + taskId + s.manifest.indexKey + Date.now(), 10)}`;
+        const packId = `pack-${shortHash(args.instruction + taskId + s.manifest.indexKey + Date.now(), PACK_ID_HEX_LEN)}`;
         await fsp.writeFile(path.join(packDir, `${packId}.json`), JSON.stringify({ packId, taskId, instruction: args.instruction, pack }, null, 2));
 
         const includeStatic = args.include_static ?? task.staticNeeds.findings;
@@ -465,7 +497,7 @@ export async function startMcpServer({ configPath, offline } = {}) {
         });
       }
       case 'context_grill_verify': {
-        const f = path.join(packDir, `${args.pack_id}.json`);
+        const f = packFile(args.pack_id);
         if (!fs.existsSync(f)) return textResult({ error: `pack_id ${args.pack_id} が見つかりません` });
         const saved = JSON.parse(await fsp.readFile(f, 'utf8'));
         const task = TASKS[saved.taskId] || TASKS.spec;
@@ -494,7 +526,7 @@ export async function startMcpServer({ configPath, offline } = {}) {
       }
       case 'context_grill_fetch': {
         if (args.pack_id && args.evidence_id) {
-          const f = path.join(packDir, `${args.pack_id}.json`);
+          const f = packFile(args.pack_id);
           if (!fs.existsSync(f)) return textResult({ error: 'pack が見つかりません' });
           const saved = JSON.parse(await fsp.readFile(f, 'utf8'));
           const e = saved.pack.items.find((x) => x.id === args.evidence_id);
