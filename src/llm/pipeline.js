@@ -16,9 +16,43 @@ import { log } from '../util/log.js';
 import { initEgress, egressSummary } from '../util/egress.js';
 
 export function resolveTask(taskId) {
-  const task = TASKS[taskId];
-  if (!task) throw new Error(`未知のタスク: ${taskId}（利用可能: ${Object.keys(TASKS).join(', ')}）`);
-  return task;
+  // TASKS[taskId] と直接引くと、constructor / toString / __proto__ が prototype 側の値を返し、
+  // 未知のタスクとして弾かれずに後段で別のエラー（kw.slice is not a function など）になる。
+  if (typeof taskId !== 'string' || !Object.hasOwn(TASKS, taskId)) {
+    throw new Error(`未知のタスク: ${String(taskId)}（利用可能: ${Object.keys(TASKS).join(', ')}）`);
+  }
+  return TASKS[taskId];
+}
+
+/**
+ * effort 名から preset を解決する。省略（undefined）のときだけ normal を使う。
+ * 不明な名前を黙って normal に置き換えると、meta.effort に記録される名前と
+ * 実際に使われた preset が食い違うため、throw する。
+ */
+export function resolveEffort(config, effort = 'normal') {
+  const presets = config.effortPresets;
+  const preset = typeof effort === 'string' && Object.hasOwn(presets, effort) ? presets[effort] : null;
+  if (preset === null || typeof preset !== 'object') {
+    throw new Error(`未知の effort: ${String(effort)}（利用可能: ${Object.keys(presets).join(', ')}）`);
+  }
+  return preset;
+}
+
+/**
+ * 対象ソースの id を検証し、重複を除いた配列で返す。null / undefined は全ソース（null）。
+ * 未知の id や空配列を通すと、エラーも警告もなく証拠が 0 件になる。
+ */
+export function resolveSourceIds(config, sourceIds) {
+  if (sourceIds === null || sourceIds === undefined) return null;
+  const available = config.sources.map((s) => s.id);
+  if (!Array.isArray(sourceIds)) throw new Error(`ソースは配列で指定してください（利用可能: ${available.join(', ')}）`);
+  if (sourceIds.length === 0) throw new Error('ソースが空です。全ソースを対象にする場合は省略してください');
+  for (const id of sourceIds) {
+    if (typeof id !== 'string' || id === '' || !available.includes(id)) {
+      throw new Error(`未知のソース: ${String(id)}（利用可能: ${available.join(', ')}）`);
+    }
+  }
+  return [...new Set(sourceIds)];
 }
 
 /**
@@ -30,9 +64,11 @@ export function resolveTask(taskId) {
  * runTaskWithStore() を直接使うこと。
  */
 export async function runTask(config, opts) {
-  // 索引を開く前にタスク名を検証する。逆にすると、索引が無い環境で
-  // タスク名を間違えた場合に「索引がありません」という無関係なエラーになる。
+  // 索引を開く前にタスク名・effort・ソースを検証する。逆にすると、索引が無い環境で
+  // 指定を間違えた場合に「索引がありません」という無関係なエラーになる。
   resolveTask(opts.taskId);
+  resolveEffort(config, opts.effort);
+  resolveSourceIds(config, opts.sourceIds);
 
   // --- 1. 索引を開く -------------------------------------------------
   // 本体を try/finally の内側に置き、例外パスでも fd を必ず解放する。
@@ -58,10 +94,11 @@ export async function runTask(config, opts) {
 export async function runTaskWithStore(store, config, opts) {
   const task = resolveTask(opts.taskId);
   const {
-    taskId, instruction, effort = 'normal', sourceIds = null,
+    taskId, instruction, effort = 'normal',
     dryRun = false, save = true, modelOverride = null, extraQueries = [],
   } = opts;
-  const preset = config.effortPresets[effort] || config.effortPresets.normal;
+  const preset = resolveEffort(config, effort);
+  const sourceIds = resolveSourceIds(config, opts.sourceIds);
   const startedAt = new Date().toISOString();
   const p = paths(config);
   initEgress(config);
