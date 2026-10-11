@@ -372,3 +372,194 @@ test('MCP: --offline では dry_run なしの run_task が送信前にブロッ�
   assert.match(run.result.content[0].text, /オフラインモード/);
   await assert.rejects(fsp.access(path.join(config.workspaceDir, 'egress.log')), { code: 'ENOENT' });
 });
+
+// --- ツール引数の検証（黙って通る失敗の防止） ---
+//
+// sources / effort / task / arguments の誤りは、索引を開く前に分かりやすいエラーで止める。
+// 以前は、文字列の sources が String#includes の部分一致になる（"docsx" で docs が選ばれる）、
+// 未知の effort が黙って normal になる、索引の無い環境で「索引がありません」が先に出る、
+// arguments が false や "" だと黙って {} になる、といった形で素通りしていた。
+
+const XDEEP = { queries: 1, final: 5, evidenceTokens: 5000 };
+
+/** local ソース 2 つ（repo / docs）と独自の effort preset（xdeep）を持つ設定を置く。 */
+async function fixture2({ build }) {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-mcp-args-'));
+  await fsp.mkdir(path.join(dir, 'repo'), { recursive: true });
+  await fsp.mkdir(path.join(dir, 'docs'), { recursive: true });
+  await fsp.writeFile(path.join(dir, 'repo', 'payment.js'),
+    'function refundPayment(id) { return "repo-refund-marker"; }\nmodule.exports = { refundPayment };\n');
+  await fsp.writeFile(path.join(dir, 'docs', 'guide.md'),
+    '# guide\n\nrefundPayment の方針: docs-refund-marker\n');
+  const configPath = path.join(dir, 'context-grill.config.json');
+  await fsp.writeFile(configPath, JSON.stringify({
+    project: 'mcp-args',
+    sources: [
+      { id: 'repo', type: 'local', path: path.join(dir, 'repo'), include: ['**/*'], includeUnknownTypes: true },
+      { id: 'docs', type: 'local', path: path.join(dir, 'docs'), include: ['**/*'], includeUnknownTypes: true },
+    ],
+    llm: { provider: 'dry', model: 'dry' },
+    effortPresets: {
+      low: { queries: 3, final: 14, evidenceTokens: 20000 },
+      normal: { queries: 6, final: 28, evidenceTokens: 55000 },
+      deep: { queries: 12, final: 56, evidenceTokens: 110000 },
+      xdeep: XDEEP,
+    },
+  }));
+  if (build) {
+    const config = await loadConfig(configPath);
+    await syncSources(config, {});
+    await buildIndex(config, { embed: false });
+  }
+  return { dir, configPath };
+}
+
+const textOf = (r) => r?.result?.content?.[0]?.text ?? JSON.stringify(r);
+const byId = (res, id) => {
+  const r = res.responses.find((x) => x.id === id);
+  assert.ok(r, `id=${id} の応答が無い: ${res.stderr.slice(-300)}`);
+  return r;
+};
+
+/** 1 つのツールに対し、cases = [[args, 期待するメッセージ], ...] がすべて isError で拒否されることを見る。 */
+async function assertRejected(tool, cases, { build }) {
+  const { dir, configPath } = await fixture2({ build });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, cases.map(([args], i) => call(i + 1, tool, args)), cases.length);
+  cases.forEach(([args, expected], i) => {
+    const r = byId(res, i + 1);
+    const label = `${tool} ${JSON.stringify(args)}`;
+    assert.equal(r.result?.isError, true, `${label} が拒否されていない。実際の応答: ${textOf(r).slice(0, 300)}`);
+    assert.match(textOf(r), expected, `${label} のメッセージが違う。実際の応答: ${textOf(r).slice(0, 300)}`);
+    assert.doesNotMatch(textOf(r), /索引がありません/, `${label}: 引数の検証より先に索引の有無が出ている`);
+  });
+}
+
+const RUN_LIKE_CASES = [
+  [{ instruction: 'x', task: 'constructor' }, /未知のタスク/],
+  [{ instruction: 'x', effort: 'foo' }, /未知の effort/],
+  [{ instruction: 'x', effort: 'constructor' }, /未知の effort/],
+  [{ instruction: 'x', sources: ['nope'] }, /未知のソース/],
+  [{ instruction: 'x', sources: 'repo' }, /配列/],
+  [{ instruction: 'x', sources: [1] }, /未知のソース/],
+  [{ instruction: 'x', sources: [''] }, /未知のソース/],
+];
+const SOURCES_ONLY_CASES = [
+  [{ query: 'refund', sources: ['nope'] }, /未知のソース/],
+  [{ query: 'refund', sources: 'docs' }, /配列/],
+];
+
+test('MCP: 索引が無くても run_task の引数（task / effort / sources）は索引エラーより先に検証される', async () => {
+  await assertRejected('context_grill_run_task', RUN_LIKE_CASES, { build: false });
+});
+
+test('MCP: 索引が無くても evidence_pack の引数（task / effort / sources）は索引エラーより先に検証される', async () => {
+  await assertRejected('context_grill_evidence_pack', RUN_LIKE_CASES, { build: false });
+});
+
+test('MCP: 索引が無くても search の sources は索引エラーより先に検証される', async () => {
+  await assertRejected('context_grill_search', SOURCES_ONLY_CASES, { build: false });
+});
+
+test('MCP: 索引が無くても static_scan の sources は索引エラーより先に検証される', async () => {
+  await assertRejected('context_grill_static_scan', SOURCES_ONLY_CASES.map(([a, m]) => [{ sources: a.sources }, m]), { build: false });
+});
+
+test('MCP: sync の sources は未知の id・文字列を拒否する（黙って何も同期しない / 部分一致で選ばない）', async () => {
+  await assertRejected('context_grill_sync', SOURCES_ONLY_CASES.map(([a, m]) => [{ sources: a.sources }, m]), { build: false });
+});
+
+test('MCP: fetch の source は未知の id・文字列でない値・空文字を拒否する', async () => {
+  await assertRejected('context_grill_fetch', [
+    [{ path: 'payment.js', source: 'nope' }, /未知のソース/],
+    [{ path: 'payment.js', source: 1 }, /未知のソース/],
+    [{ path: 'payment.js', source: '' }, /未知のソース/],
+  ], { build: false });
+});
+
+test('MCP: search の sources は文字列（部分一致）を拒否し、配列の id だけで絞り込む。[] と省略は全ソース', async () => {
+  const { dir, configPath } = await fixture2({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const q = 'refundPayment';
+  const res = await rpc(probe, [
+    call(1, 'context_grill_search', { query: q, sources: 'docsx' }),
+    call(2, 'context_grill_search', { query: q, sources: 'docs' }),
+    call(3, 'context_grill_search', { query: q, sources: ['repo'] }),
+    call(4, 'context_grill_search', { query: q, sources: ['repo', 'docs'] }),
+    call(5, 'context_grill_search', { query: q, sources: [] }),
+    call(6, 'context_grill_search', { query: q }),
+    call(7, 'context_grill_static_scan', { sources: ['nope'] }),
+  ], 7);
+  for (const id of [1, 2]) {
+    const r = byId(res, id);
+    assert.equal(r.result?.isError, true, `id=${id}: 文字列の sources が拒否されていない。応答: ${textOf(r).slice(0, 200)}`);
+    assert.match(textOf(r), /配列/, `id=${id}: ${textOf(r).slice(0, 200)}`);
+  }
+  const sourcesOf = (id) => {
+    const r = byId(res, id);
+    assert.notEqual(r.result?.isError, true, `id=${id} がエラー: ${textOf(r).slice(0, 200)}`);
+    return new Set(JSON.parse(textOf(r)).map((x) => x.source));
+  };
+  assert.deepEqual([...sourcesOf(3)].sort(), ['repo'], 'sources:["repo"] は repo のみ');
+  assert.deepEqual([...sourcesOf(4)].sort(), ['docs', 'repo']);
+  assert.deepEqual([...sourcesOf(5)].sort(), ['docs', 'repo'], 'sources:[] は全ソース');
+  assert.deepEqual([...sourcesOf(6)].sort(), ['docs', 'repo'], 'sources 省略は全ソース');
+  const scan = byId(res, 7);
+  assert.equal(scan.result?.isError, true, `static_scan の未知のソースが拒否されていない: ${textOf(scan).slice(0, 200)}`);
+  assert.match(textOf(scan), /未知のソース/);
+});
+
+test('MCP: evidence_pack の effort は own の preset だけを受理する（xdeep は通り、省略は normal、foo は拒否）', async () => {
+  const { dir, configPath } = await fixture2({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const ins = 'refundPayment の返金処理の仕様と制約を整理して';
+  const res = await rpc(probe, [
+    call(1, 'context_grill_evidence_pack', { instruction: ins, effort: 'xdeep' }),
+    call(2, 'context_grill_evidence_pack', { instruction: ins }),
+    call(3, 'context_grill_evidence_pack', { instruction: ins, effort: 'foo' }),
+    call(4, 'context_grill_evidence_pack', { instruction: ins, effort: null }),
+    call(5, 'context_grill_run_task', { instruction: ins, effort: 'xdeep', dry_run: true }),
+    call(6, 'context_grill_run_task', { instruction: ins, effort: '', dry_run: true }),
+  ], 6);
+  const x = byId(res, 1);
+  assert.notEqual(x.result?.isError, true, `xdeep が拒否された: ${textOf(x).slice(0, 200)}`);
+  const xq = JSON.parse(textOf(x)).queries;
+  assert.ok(xq.length >= 1 && xq.length <= XDEEP.queries, `xdeep のクエリ数は ${XDEEP.queries} 以内のはず（実際: ${xq.length}）`);
+  const n = byId(res, 2);
+  assert.notEqual(n.result?.isError, true, `effort 省略が拒否された: ${textOf(n).slice(0, 200)}`);
+  const nq = JSON.parse(textOf(n)).queries;
+  assert.ok(nq.length > XDEEP.queries && nq.length <= 6, `省略時は normal（最大 6）のはず（実際: ${nq.length}）`);
+  const bad = byId(res, 3);
+  assert.equal(bad.result?.isError, true, `effort:"foo" が黙って normal になった: ${textOf(bad).slice(0, 200)}`);
+  assert.match(textOf(bad), /未知の effort/);
+  const nul = byId(res, 4);
+  assert.notEqual(nul.result?.isError, true, `effort:null は既定の normal のはず: ${textOf(nul).slice(0, 200)}`);
+  const rt = byId(res, 5);
+  assert.notEqual(rt.result?.isError, true, `run_task の xdeep が拒否された: ${textOf(rt).slice(0, 200)}`);
+  const empty = byId(res, 6);
+  assert.equal(empty.result?.isError, true, `run_task の effort:"" が黙って normal になった: ${textOf(empty).slice(0, 200)}`);
+  assert.match(textOf(empty), /未知の effort/);
+});
+
+test('MCP: tools/call の arguments がオブジェクトでなければ -32602（null と省略だけが {} 扱い）', async () => {
+  const { dir, configPath } = await fixture2({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const bads = [false, '', 0, [], '返金', true, 1];
+  const reqs = bads.map((v, i) => ({ jsonrpc: '2.0', id: i + 1, method: 'tools/call', params: { name: 'context_grill_status', arguments: v } }));
+  const nullId = bads.length + 1;
+  const omitId = bads.length + 2;
+  reqs.push({ jsonrpc: '2.0', id: nullId, method: 'tools/call', params: { name: 'context_grill_status', arguments: null } });
+  reqs.push({ jsonrpc: '2.0', id: omitId, method: 'tools/call', params: { name: 'context_grill_status' } });
+  const res = await rpc(probe, reqs, reqs.length);
+  bads.forEach((v, i) => {
+    const r = byId(res, i + 1);
+    assert.ok(r.error?.code === -32602 && r.result === undefined,
+      `arguments=${JSON.stringify(v)} は -32602 のはず。応答全体: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.match(r.error.message, /params\.arguments はオブジェクト/);
+  });
+  for (const id of [nullId, omitId]) {
+    const r = byId(res, id);
+    assert.notEqual(r.result?.isError, true, `id=${id}: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.equal(JSON.parse(textOf(r)).indexed, true, `id=${id} で status が動かない: ${JSON.stringify(r).slice(0, 300)}`);
+  }
+});
