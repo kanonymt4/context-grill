@@ -9,7 +9,7 @@ import { allDocs, syncSources, buildIndex } from '../index/ingest.js';
 import { scanAll, summarize, projectFacts, extractEndpoints } from '../analysis/static.js';
 import { TASKS, SYSTEM_CONTRACT, envelopeSchema, planQueries, taskPromptHash, listTasks } from '../tasks/index.js';
 import { verify } from '../verify/gate.js';
-import { runTaskWithStore, resolveTask } from '../llm/pipeline.js';
+import { runTaskWithStore, resolveTask, resolveEffort, resolveSourceIds } from '../llm/pipeline.js';
 import { listPresets, validatePresets, resolvePreset, getPreset, PresetError } from '../presets.js';
 import { shortHash } from '../util/misc.js';
 import { initEgress, egressPlan } from '../util/egress.js';
@@ -262,9 +262,26 @@ export async function startMcpServer({ configPath, offline } = {}) {
    */
   const preflight = (name, args) => {
     if (name === 'context_grill_run_task' || name === 'context_grill_evidence_pack') {
-      resolveTask(args.task || 'spec');
+      resolveTask(args.task ?? 'spec');
+      resolveEffort(config, args.effort ?? 'normal');
+      normalizeSources(args.sources);
+    } else if (name === 'context_grill_search' || name === 'context_grill_static_scan' || name === 'context_grill_sync') {
+      normalizeSources(args.sources);
+    } else if (name === 'context_grill_fetch') {
+      normalizeSource(args.source);
     }
   };
+
+  /**
+   * sources 引数を検証して返す。省略・null・空配列は全ソース（null）。
+   * 文字列を通すと String#includes の部分一致になり（"docsx" で docs が選ばれる）、
+   * 未知の id は黙って 0 件になるため、resolveSourceIds に任せて throw させる。
+   * 空配列を全ソースとして扱うのは MCP 側の仕様で、CLI の resolveSourceIds 単体は空配列を拒否する。
+   */
+  const normalizeSources = (raw) => (Array.isArray(raw) && raw.length === 0 ? null : resolveSourceIds(config, raw));
+
+  /** fetch の単数 source を検証して返す。省略・null は全ソース（null）。 */
+  const normalizeSource = (raw) => (raw === undefined || raw === null ? null : resolveSourceIds(config, [raw]));
 
   /**
    * 索引を作り直した後に呼ぶ。使用中なら閉じずに切り離すだけにする。
@@ -349,7 +366,7 @@ export async function startMcpServer({ configPath, offline } = {}) {
       }
       case 'context_grill_search': {
         const s = await getStore();
-        const only = args.sources?.length ? args.sources : null;
+        const only = normalizeSources(args.sources);
         const kinds = args.kinds?.length ? args.kinds : null;
         const results = await hybridSearch(s, {
           queries: [args.query], config, k: args.k || 12,
@@ -364,12 +381,11 @@ export async function startMcpServer({ configPath, offline } = {}) {
       }
       case 'context_grill_evidence_pack': {
         const s = await getStore();
-        const taskId = args.task || 'spec';
-        const task = TASKS[taskId];
-        const effort = args.effort || 'normal';
-        const preset = config.effortPresets[effort] || config.effortPresets.normal;
+        const taskId = args.task ?? 'spec';
+        const task = resolveTask(taskId);
+        const preset = resolveEffort(config, args.effort ?? 'normal');
         const queries = planQueries(taskId, args.instruction, { max: preset.queries });
-        const only = args.sources?.length ? args.sources : null;
+        const only = normalizeSources(args.sources);
         const sourcePriority = {};
         config.sources.forEach((src, i) => { sourcePriority[src.id] = src.priority ?? (1 - i * 0.05); });
         const results = await hybridSearch(s, {
@@ -423,7 +439,7 @@ export async function startMcpServer({ configPath, offline } = {}) {
         });
       }
       case 'context_grill_static_scan': {
-        const docs = await allDocs(config, args.sources?.length ? args.sources : null);
+        const docs = await allDocs(config, normalizeSources(args.sources));
         const findings = scanAll(docs, { minSeverity: args.severity || 'low' });
         const limit = args.limit || 200;
         return textResult({
@@ -442,8 +458,9 @@ export async function startMcpServer({ configPath, offline } = {}) {
           const e = saved.pack.items.find((x) => x.id === args.evidence_id);
           return textResult(e || { error: `${args.evidence_id} は pack にありません` });
         }
-        const docs = await allDocs(config, args.source ? [args.source] : null);
-        const doc = docs.find((d) => d.path === args.path && (!args.source || d.sourceId === args.source));
+        const onlySource = normalizeSource(args.source);
+        const docs = await allDocs(config, onlySource);
+        const doc = docs.find((d) => d.path === args.path && (!onlySource || onlySource.includes(d.sourceId)));
         if (!doc) return textResult({ error: `パスが見つかりません: ${args.path}` });
         const lines = doc.text.split('\n');
         const start = Math.max(1, args.start || 1);
@@ -459,14 +476,14 @@ export async function startMcpServer({ configPath, offline } = {}) {
         // ストアの所有権はこちらにあるので、runTaskWithStore は close() しない。
         const s = await getStore();
         const res = await runTaskWithStore(s, config, {
-          taskId: args.task || 'spec', instruction: args.instruction,
-          effort: args.effort || 'normal', sourceIds: args.sources?.length ? args.sources : null,
+          taskId: args.task ?? 'spec', instruction: args.instruction,
+          effort: args.effort ?? 'normal', sourceIds: normalizeSources(args.sources),
           dryRun: Boolean(args.dry_run),
         });
         return textResult(safe(res.markdown));
       }
       case 'context_grill_sync': {
-        const report = await syncSources(config, { only: args.sources?.length ? args.sources : null, force: Boolean(args.full) });
+        const report = await syncSources(config, { only: normalizeSources(args.sources), force: Boolean(args.full) });
         // 索引を作り直す前にストアを手放して docs.txt の fd を解放する。
         // finish() は docs.txt.tmp を rename で置き換えるが、Windows では開いている
         // ファイルを rename の宛先にできず EPERM になる。作り直した索引を publish する
@@ -523,7 +540,12 @@ export async function startMcpServer({ configPath, offline } = {}) {
       }
       if (method === 'tools/call') {
         const name = params?.name;
-        const args = params?.arguments || {};
+        // 無い / null だけを {} 扱いにする（|| {} だと false や "" も黙って {} になり、後段で無関係なエラーになる）。
+        const rawArgs = params?.arguments;
+        if (rawArgs !== undefined && rawArgs !== null && (typeof rawArgs !== 'object' || Array.isArray(rawArgs))) {
+          return err(id, -32602, 'tools/call の params.arguments はオブジェクトで指定してください');
+        }
+        const args = rawArgs ?? {};
         preflight(name, args);
         // ストアを使ったなら参照が確保された状態で実行される。実行中に sync が来ても
         // ストアは切り離されるだけで閉じられない。
