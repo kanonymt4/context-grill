@@ -463,9 +463,12 @@ context-grill presets --json   # {"presets": [...], "errors": [...]}
 ### MCP から呼び出す（prompts）
 
 `context-grill mcp` は、検証を通った preset を MCP の prompts として同じ名前・同じ引数で公開します。
-不正な定義と、`effort` が MCP の `context_grill_run_task` で指定できないもの
-（`effortPresets` に自分で足した段階など）は公開されません。該当する preset があると、起動時に stderr へ
-「使えない preset が N 件あります」と 1 行出ます（名前は出ません。原因は `doctor` / `presets` で確認します）。
+不正な定義は公開されません。該当する preset があると、起動時に stderr へ「使えない preset が N 件あります」
+と 1 行出ます（対象は定義が不正なものだけです。名前は出ません。原因は `doctor` / `presets` で確認します）。
+`tools/list` が公開する `context_grill_run_task` と `context_grill_evidence_pack` の `effort` の enum は、
+設定の `effortPresets` のキーを反映します（既定は `low` / `normal` / `deep`。自分で足した段階も入ります）。
+そのため、`effortPresets` に足した段階を `effort` に持つ preset も、prompts として公開されます。
+設定を変えたら MCP サーバーの再起動が必要です。
 
 Claude Code では `/mcp__<サーバー名>__<preset 名> 値1 値2` の形で呼びます。`<サーバー名>` は MCP 設定
 （`.mcp.json` の `mcpServers` のキー）に付けた名前で、README の例どおりなら `context-grill` です。

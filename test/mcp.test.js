@@ -744,7 +744,7 @@ test('MCP: スキーマにない null のキーは省略扱いにならず拒否
   await assertRejected('context_grill_search', [[{ query: 'x', model: null }, /未定義のプロパティ/, '$.model']], { build: false });
 });
 
-test('MCP: 正常な引数と、null の省略可キー・独自 effort（xdeep）・sources:[] は通り、tools/list の effort enum は変わらない', async () => {
+test('MCP: 正常な引数と、null の省略可キー・独自 effort（xdeep）・sources:[] は通り、tools/list の effort enum は設定の effortPresets を反映する', async () => {
   const { dir, configPath } = await fixture2({ build: true });
   const probe = await writeProbe(dir, configPath);
   const q = 'refundPayment';
@@ -770,7 +770,7 @@ test('MCP: 正常な引数と、null の省略可キー・独自 effort（xdeep�
   assert.deepEqual(both(7), ['docs', 'repo'], 'sources:[] は全ソース');
   assert.deepEqual(both(3), ['docs', 'repo'], 'null の sources / k / kinds は省略扱い');
   const tool = byId(res, 8).result.tools.find((t) => t.name === 'context_grill_run_task');
-  assert.deepEqual(tool.inputSchema.properties.effort.enum, ['low', 'normal', 'deep'], 'tools/list の effort enum は変えない');
+  assert.deepEqual(tool.inputSchema.properties.effort.enum, ['low', 'normal', 'deep', 'xdeep'], 'tools/list の effort enum は effortPresets のキーを反映する');
 });
 
 // ---- pack_id のパス走査 ----
