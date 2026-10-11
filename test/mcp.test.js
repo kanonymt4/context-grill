@@ -868,3 +868,90 @@ test('MCP: evidence_pack が返した pack_id は fetch / verify で使え、pac
   assert.notEqual(s.result?.isError, true, `source+path の fetch が拒否された: ${textOf(s).slice(0, 300)}`);
   assert.match(textOf(s), /refundPayment/, `source+path の fetch: ${textOf(s).slice(0, 300)}`);
 });
+
+// --- initialize の protocolVersion 交渉 ---
+
+/** initialize を 1 件送り、応答を返す。params に undefined を渡すと params キー自体を付けない。 */
+async function initializeWith(params) {
+  const { dir, configPath } = await fixture({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const req = { jsonrpc: '2.0', id: 1, method: 'initialize' };
+  if (params !== undefined) req.params = params;
+  const res = await rpc(probe, [req], 1);
+  return byId(res, 1);
+}
+
+test('MCP: initialize は対応表にある protocolVersion をそのまま返す', async () => {
+  for (const v of ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05']) {
+    const r = await initializeWith({ protocolVersion: v });
+    assert.equal(r.result?.protocolVersion, v, `${v}: ${JSON.stringify(r).slice(0, 300)}`);
+  }
+});
+
+test('MCP: initialize は対応外の protocolVersion 文字列には最新版 2025-11-25 を返す', async () => {
+  for (const v of ['garbage-9999', '1999-01-01', '2026-07-28', '2024-10-07', '2025-11-25-x', '']) {
+    const r = await initializeWith({ protocolVersion: v });
+    assert.equal(typeof r.result?.protocolVersion, 'string', `${JSON.stringify(v)}: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.equal(r.result.protocolVersion, '2025-11-25', `${JSON.stringify(v)} を送ったときの応答`);
+  }
+});
+
+test('MCP: initialize は protocolVersion が省略・不正な型でも文字列の 2025-11-25 を返す（エラーにしない）', async () => {
+  const cases = [
+    ['キー省略', {}],
+    ['params なし', undefined],
+    ['数値', { protocolVersion: 123 }],
+    ['オブジェクト', { protocolVersion: {} }],
+    ['null', { protocolVersion: null }],
+    ['空配列', { protocolVersion: [] }],
+    ['対応版を含む配列', { protocolVersion: ['2025-11-25'] }],
+    ['params が配列', []],
+    ['params が文字列', 'x'],
+  ];
+  for (const [label, params] of cases) {
+    const r = await initializeWith(params);
+    assert.equal(r.error, undefined, `${label}: エラーになっている: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.equal(typeof r.result?.protocolVersion, 'string', `${label}: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.equal(r.result.protocolVersion, '2025-11-25', `${label} のときの応答`);
+  }
+});
+
+test('MCP: Claude Code 2.1.231 の initialize（数値 id 0）に 2025-11-25 と従来の応答の形で返す', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [{
+    jsonrpc: '2.0',
+    id: 0,
+    method: 'initialize',
+    params: {
+      protocolVersion: '2025-11-25',
+      capabilities: { roots: { listChanged: true }, elicitation: {} },
+      clientInfo: {
+        name: 'claude-code',
+        title: 'Claude Code',
+        version: '2.1.231',
+        description: "Anthropic's agentic coding tool",
+        websiteUrl: 'https://claude.com/claude-code',
+      },
+    },
+  }], 1);
+  const r = byId(res, 0);
+  assert.equal(r.id, 0);
+  assert.equal(r.result?.protocolVersion, '2025-11-25');
+  assert.deepEqual(r.result.capabilities, { tools: { listChanged: false }, prompts: { listChanged: false } });
+  assert.equal(r.result.serverInfo?.name, 'context-grill');
+});
+
+test('MCP: server/discover は id を保ったまま -32601 を返す（従来の initialize への切り替えを促す）', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [{
+    jsonrpc: '2.0',
+    id: 'server-discover-probe-1',
+    method: 'server/discover',
+    params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28' } },
+  }], 1);
+  const r = byId(res, 'server-discover-probe-1');
+  assert.equal(r.error?.code, -32601, JSON.stringify(r).slice(0, 300));
+  assert.equal(r.result, undefined);
+});
