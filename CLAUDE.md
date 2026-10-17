@@ -380,7 +380,10 @@ Confluence の HTML 変換より簡単。
     （省略時の応答が `2024-11-05` から変わった）。**版ごとの仕様の差（バッチの必須性など）は確認できて
     いない**（手元の資料は draft のスキーマだけ）。SDK 1.29 の stdio もバッチを拒否したまま 2025-03-26 に
     対応すると名乗っているので、同じ水準にした
-  - MCP が `resources/list` に応答するのに capability を宣言していない（黙って失われる入力が無いので見送り）
+  - MCP が `resources/list` に応答するのに capability を宣言していない（黙って失われる入力が無いので見送り）。
+    2026-10-11 の実測: `resources/templates/list` と `resources/read` は `-32601` で、`resources/list` とだけ
+    挙動が食い違う。SDK の Server は capability を宣言せずにハンドラを登録しようとすると throw する。
+    Claude Code が `resources/list` を送るかは未実測（送らないなら削除が最小）
   - 実行結果の `meta.json` に、どの preset から実行したかが残らない。`prompts/get` とその後の
     `tools/call` はサーバーが結び付けられず、`run_task` に引数を足しても自己申告にしかならない。CLI の
     `run --json` には `preset` が出る
@@ -390,8 +393,15 @@ Confluence の HTML 変換より簡単。
     `verify` も同じファイルを読んで検証が走った。直し方は多層防御: `pack_id` の形式（生成側と同じ定数
     `pack-` + 16 進 10 桁）を `preflight` で検査し、`packFile()` で `path.resolve` した結果が packs の中に
     あることを再確認する。後者は通常経路からは到達できず、テストでは検出できない（変異で確認済み）
-  - `apiKeyEnv` / `tokenEnv` に `toString` などを書くと `process.env[name]` が関数を返す
-    （`provider.js` / `base.js`。コードを読んだだけ）。`kinds` の未知の値は 0 件になる（同）
+  - ~~`apiKeyEnv` / `tokenEnv` に `toString` などを書くと `process.env[name]` が関数を返す
+    （`provider.js` / `base.js`。コードを読んだだけ）~~ **実測で確認し、修正済み（#49・#50）。** 対象は 7 か所
+    （上の 2 か所のほか `github.js`・`confluence.js` の `bearerEnv`・`embed.js`・doctor・`loadDotEnv`）。
+    **秘密は漏れない**（送られるのは関数のソースや `[object Object]` という固定の文字列）。実害は、doctor が
+    ✓ を出す／送信前の「未設定」ガードをすり抜けて本文が送られ 401 になる／GitHub の api モードで匿名なら
+    成功する取得が 401 になる／`--offline` だと未設定のエラーが出ず誤設定が隠れる、`.env` の
+    `toString=X` が黙って無視される。直し方は `util/misc.js` の `readEnv()`（`Object.hasOwn`）
+  - `kinds` の未知の値は 0 件で成功する（実測。`[""]` や大文字違いも `isError:false`）。説明文に `other` が
+    抜けている。CLI には `kinds` 相当のフラグが無く、`--kinds` は次の語を飲み込む
   - `test/unit.test.js` の HTTP リクエスト本文の Buffer 連結（ASCII だけなので実害は無いと見ている）。
     `context_grill_verify` の `result` は `type: object` の検査のみで中身は見ない（従来どおり）
 - **未確認（preset）**: Claude Code の対話モード（TUI）の `/` 補完でどう見えるか。デスクトップ
@@ -824,10 +834,58 @@ Confluence の HTML 変換より簡単。
 
   **読解だけで、実測していないこと**（バイナリの文字列と SDK のコードを読んだ）
   - クライアントが受け入れる版の表は `2025-11-25` / `2025-06-18` / `2025-03-26` / `2024-11-05` /
-    `2024-10-07`。サーバーが別の版を返したときの接続の成否（`2024-11-05` は connected、未知の版は失敗、
-    という予測）は**未実測**
+    `2024-10-07`。~~サーバーが別の版を返したときの接続の成否は**未実測**~~ **2026-10-11 に実測した**
+    （Claude Code 2.1.231）: 上の 5 つを返すと接続に成功し、`1999-01-01`・`2026-07-28`・空文字（not supported）・
+    数値 `123`（結果の型の検査 INVALID_RESULT）は失敗する。**失敗の理由は stream-json にも stderr にも出ず、
+    `--debug-file` にだけ出る**。予測は 9 件とも当たった
   - Claude Code の MCP ツールの入力は zod の passthrough で検査され、**enum では拒否されないように見える**。
     会話側のモデルが enum 外の値（`xdeep`）をサーバーに送るかは**未実測**。認証が切れて
     `claude -p` が 1 回で止まった（モデルへの送信は 0 トークン）。再ログイン後に流せば測れる
   - 実装者の報告で、`typeof v === 'string'` の判定を外してもテストが落ちなかった。`includes` が厳密等価
     で比べるため、配列や `{}` は表のどの文字列とも一致せず、同値な変異だった。判定は読みやすさのために残した
+
+- 2026-10-11 〜 10-17 **実測できるものを 4 つの観点で測り（10-11）、見つかった問題を #46〜#50 で直した（10-17）**。
+
+  「実測できるものは分散して確認」の依頼で、(A) Claude Code の挙動、(B) CLAUDE.md で「読んだだけ」と
+  していた項目、(C) `--offline` の網羅、(D) MCP ツールの境界値、をそれぞれ別のエージェントが測った。
+
+  **測って確かめたこと**
+  - `--offline` は、git / GitHub API / Confluence / Jira / 埋め込み / LLM の全経路で漏れが無かった
+    （127.0.0.1 の TCP シンクが受けた接続は 0 件。CLI と MCP で差も無い）
+  - **`redactText` の `URL_PASSWORD` 規則が二乗で遅かった**: 区切りのない英数字 200KB の 1 行で約 21 秒
+    （同期処理なのでイベントループごと止まる）。直した後は 20ms、1MB で 96ms（#46）。スキーム名を 32 字までに
+    したので、33 字以上のスキーム名はこの規則では拾わない（テストで固定した既知の限界）
+  - `context_grill_verify` に深い `result` を渡すと、字下げのせいで応答が深さの二乗に膨らんだ（深さ 3000 で
+    18MB、5000 で 50MB。サーバー内の閾値は 5000〜6000 の間で RangeError）。深さ 64・2MB の上限を入れた（#48）
+  - `verify()` は型の合わない `quotes` / `contradictions` / `next_actions` で生の TypeError を投げた（9 通り）。
+    `jsonschema.js` のスプレッド `push(...)` は子の違反が約 12 万〜24 万件で RangeError（#47）
+  - **packs 内のシンボリックリンクで、packs の外の JSON を pack として読めた**。外のファイルの文字列を引用に入れた
+    `verify` が `passed:true` になった。#43 の文字列比較は実体を見ていなかった。realpath で確認するようにした（#48）。
+    pack が JSON でないと `JSON.parse` のエラー文に本文（20 字以下なら全文）が載っていた
+  - stdin の行に上限が無く、JSON として不正な行は黙って捨てられた。16MB の上限と `-32700` を入れた（#48）。
+    **10MB の行は元から 653ms で処理できた**（100MB は未測定）
+  - **同期の CPU 処理（上の正規表現）の最中は、無関係な `ping` / `fetch` / `search` も約 8 秒待たされる**ことを
+    サーバー内で実測した（処理の後は生きている）
+
+  **記録と食い違った点（予測が外れた点）**
+  - 私は `verify` の応答が 72MB になると予測したが、サーバー内では深さ 6000 で RangeError の isError
+    （125 字）だった。`node -e` のトップレベルより呼び出しが深いため。膨らむこと自体はサーバー内でも確認した
+  - 10MB の行は、二乗の外挿から予想するほど遅くなかった
+
+  **残り（未修正。判断が要るもの）**
+  - git が `insteadOf` / proxy で許可リスト外に接続する（実測 1 接続。トークンの送信は未測定）。失敗した
+    git の clone / fetch が egress.log に残らない。`git ls-remote --get-url` で展開後の URL を検査する案がある
+  - `static_scan` の `limit:-1` は `slice(0,-1)` で件数がずれる／`search` の `k` が負・小数、`fetch` の
+    `start` / `end` の負・小数・上限なし（`end` を付けると 200 行の上限が効かない）。スキーマを integer と
+    最小値にする案
+  - `doctor` が `--offline` を無視する、環境変数の検査がオフラインの判定より先に来る、クエリ埋め込みが
+    黙って省略される、offline + 埋め込みで MCP の `sync` が isError になる、`privacy` の文言
+  - `embedQuery` は 401 でも 3 回送信する
+  - `resources/list`・`kinds` の enum（上の「未対応」参照）
+
+  **進め方で学んだこと**
+  - Plan 型のエージェントは「ファイルを作れない」制約で測定を断ることがある。ファイルを作る測定は
+    general-purpose に再依頼する。リポジトリが別の作業で変わっているときは、`git archive main` のコピーに
+    対して測らせる
+  - 変異確認で、`doctor` の bearer 判定を戻しても未検出だった（`bearerEnv` が prototype のキーのときにしか
+    差が出ない）。差が出る入力のテストを足して検出できるようにした。最初の変異が通ったら、テストの入力を疑う
