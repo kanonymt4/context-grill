@@ -47,12 +47,27 @@ export function verify(result, { pack, schema, policy, taskId }) {
     if (unknown.length) {
       problems.push(['E_BAD_EVIDENCE', `存在しない証拠 ID: ${unknown.join(', ')}`, `使える証拠 ID は ${pack.items.length ? pack.items[0].id + '〜' + pack.items[pack.items.length - 1].id : 'なし'} です`]);
     }
-    for (const id of (it.contradicting_evidence || [])) {
+    // 値があるのに型が違うものは、例外にせず違反として報告して検査対象から外す（undefined / null は「無い」扱い）
+    let contra = [];
+    if (it.contradicting_evidence != null) {
+      if (Array.isArray(it.contradicting_evidence)) contra = it.contradicting_evidence;
+      else problems.push(['E_SCHEMA', 'contradicting_evidence は配列である必要があります', '証拠 ID の配列にするか、項目を削除してください']);
+    }
+    for (const id of contra) {
       if (!evidenceMap.has(id)) problems.push(['E_BAD_EVIDENCE', `contradicting_evidence に存在しない ID: ${id}`, '実在する証拠 ID のみ使ってください']);
     }
 
     // 逐語引用の実在照合（ハルシネーション検出の要）
-    for (const q of (it.quotes || [])) {
+    let quotes = [];
+    if (it.quotes != null) {
+      if (Array.isArray(it.quotes)) quotes = it.quotes;
+      else problems.push(['E_SCHEMA', 'quotes は配列である必要があります', 'quotes は {evidence, text} の配列にしてください']);
+    }
+    for (const [qi, q] of quotes.entries()) {
+      if (!q || typeof q !== 'object' || Array.isArray(q)) {
+        problems.push(['E_SCHEMA', `quotes[${qi}] がオブジェクトではありません`, 'quotes の要素は {evidence, text} のオブジェクトにしてください']);
+        continue;
+      }
       quotesChecked++;
       const src = evidenceMap.get(q.evidence);
       if (!src) { quotesFailed++; problems.push(['E_QUOTE_SRC', `quote の証拠 ID ${q.evidence} が存在しません`, '実在する証拠から引用してください']); continue; }
@@ -78,13 +93,26 @@ export function verify(result, { pack, schema, policy, taskId }) {
     else accepted.push(it);
   }
 
-  for (const [i, c] of (result.contradictions || []).entries()) {
-    const bad = (c.evidence || []).filter((id) => !evidenceMap.has(id));
-    if (bad.length) add('E_BAD_EVIDENCE', `contradictions[${i}]`, `存在しない証拠 ID: ${bad.join(', ')}`, '実在する証拠 ID のみ使ってください');
-  }
-  for (const [i, a] of (result.next_actions || []).entries()) {
-    const bad = (a.evidence || []).filter((id) => !evidenceMap.has(id));
-    if (bad.length) add('W_BAD_EVIDENCE', `next_actions[${i}]`, `存在しない証拠 ID: ${bad.join(', ')}`, '実在する証拠 ID のみ使ってください');
+  // 配列でない・要素がオブジェクトでない・evidence が配列でない場合は E_SCHEMA にして、その要素の検査は飛ばす
+  for (const key of ['contradictions', 'next_actions']) {
+    const list = result[key];
+    if (list == null) continue;
+    if (!Array.isArray(list)) {
+      add('E_SCHEMA', `$.${key}`, `${key} は配列である必要があります`, 'オブジェクトの配列にしてください');
+      continue;
+    }
+    for (const [i, c] of list.entries()) {
+      if (!c || typeof c !== 'object' || Array.isArray(c)) {
+        add('E_SCHEMA', `${key}[${i}]`, `${key}[${i}] がオブジェクトではありません`, '要素はオブジェクトにしてください');
+        continue;
+      }
+      if (c.evidence != null && !Array.isArray(c.evidence)) {
+        add('E_SCHEMA', `${key}[${i}]`, `${key}[${i}].evidence は配列である必要があります`, '証拠 ID の配列にしてください');
+        continue;
+      }
+      const bad = (c.evidence || []).filter((id) => !evidenceMap.has(id));
+      if (bad.length) add(key === 'contradictions' ? 'E_BAD_EVIDENCE' : 'W_BAD_EVIDENCE', `${key}[${i}]`, `存在しない証拠 ID: ${bad.join(', ')}`, '実在する証拠 ID のみ使ってください');
+    }
   }
   if (!Array.isArray(result.open_questions)) {
     add('E_SCHEMA', '$.open_questions', 'open_questions は配列である必要があります');

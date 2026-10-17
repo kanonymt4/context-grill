@@ -21,7 +21,8 @@ export function validate(schema, value, pathStr = '$') {
   if (Array.isArray(value)) {
     if (schema.minItems !== undefined && value.length < schema.minItems) errs.push(`${pathStr}: 要素が ${schema.minItems} 個以上必要です`);
     if (schema.maxItems !== undefined && value.length > schema.maxItems) errs.push(`${pathStr}: 要素は ${schema.maxItems} 個以下にしてください`);
-    if (schema.items) value.forEach((v, i) => errs.push(...validate(schema.items, v, `${pathStr}[${i}]`)));
+    // スプレッドは引数の数の上限で RangeError になるため、1 件ずつ push する
+    if (schema.items) value.forEach((v, i) => { for (const e of validate(schema.items, v, `${pathStr}[${i}]`)) errs.push(e); });
   }
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     for (const r of schema.required || []) {
@@ -29,7 +30,7 @@ export function validate(schema, value, pathStr = '$') {
     }
     for (const [k, v] of Object.entries(value)) {
       const sub = schema.properties?.[k];
-      if (sub) errs.push(...validate(sub, v, `${pathStr}.${k}`));
+      if (sub) { for (const e of validate(sub, v, `${pathStr}.${k}`)) errs.push(e); }
       else if (schema.additionalProperties === false) errs.push(`${pathStr}.${k}: 未定義のプロパティです`);
     }
   }
