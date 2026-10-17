@@ -116,7 +116,8 @@ export function scanDocument(doc, { includeTestPaths = false, minSeverity = 'inf
         title: rule.title, sourceId: doc.sourceId, path: doc.path, line: i + 1,
         // 検出行そのものに秘密が載るため、外に出す表現は必ず墨消しする
         snippet: redactText(line.trim().slice(0, 300)).text,
-        context: redactText(lines.slice(Math.max(0, i - 2), Math.min(lines.length, i + 3)).join('\n')).text,
+        // snippet と同じく 1 行 300 字で切る（長い 1 行での墨消しの所要時間を抑える）
+        context: redactText(lines.slice(Math.max(0, i - 2), Math.min(lines.length, i + 3)).map((l) => l.slice(0, 300)).join('\n')).text,
         url: doc.url && doc.sourceType === 'github' ? `${doc.url}#L${i + 1}` : doc.url,
       });
       if (out.filter((o) => o.ruleId === rule.id && o.path === doc.path).length >= 20) break;
