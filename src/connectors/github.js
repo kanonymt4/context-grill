@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { isIncluded } from '../util/misc.js';
+import { isIncluded, readEnv } from '../util/misc.js';
 import { log } from '../util/log.js';
 import { redactMessage } from '../util/redact.js';
 import { isSensitiveDir, isInside } from '../util/sensitive.js';
@@ -32,7 +32,7 @@ const REF_RE = /^[A-Za-z0-9._\/-]{1,200}$/;
 
 function token(src) {
   const envName = src.auth?.tokenEnv || 'GITHUB_TOKEN';
-  return process.env[envName] || null;
+  return readEnv(envName) || null;
 }
 
 /** トークンを argv / URL / .git/config に一切載せず、環境変数経由でのみ git に渡す */

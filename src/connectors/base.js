@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { sha256, retry } from '../util/misc.js';
+import { sha256, retry, readEnv } from '../util/misc.js';
 import { log } from '../util/log.js';
 import { guardedFetch } from '../util/egress.js';
 import { redactMessage } from '../util/redact.js';
@@ -77,7 +77,7 @@ export async function readState(dir) {
 }
 
 export function requireEnv(name, hint) {
-  const v = process.env[name];
+  const v = readEnv(name);
   if (!v) {
     const e = new Error(`環境変数 ${name} が未設定です。${hint || ''}`);
     e.noRetry = true;
