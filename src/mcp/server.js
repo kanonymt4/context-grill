@@ -230,6 +230,29 @@ function promptText(p, toolArgs) {
 const PACK_ID_HEX_LEN = 10;
 const PACK_ID_RE = new RegExp(`^pack-[0-9a-f]{${PACK_ID_HEX_LEN}}$`);
 
+// stdin の 1 行（未完の行を含む）の上限。超えた行は捨てて -32700 を返す。
+const MAX_LINE_CHARS = 16 * 1024 * 1024;
+
+// verify の result の上限。検証後の result をそのまま字下げして返すため、深さ d の配列で応答が
+// 約 2d² バイトに膨らむ。
+const RESULT_MAX_DEPTH = 64;
+const RESULT_MAX_JSON_CHARS = 2_000_000;
+
+/**
+ * result の深さと大きさが上限内か。深さは再帰せず明示的なスタックで測る（深さ 10 万でも落ちない）。
+ * 配列とオブジェクトは同じ扱いで、result 自体を深さ 1 と数える。
+ */
+function isWithinResultLimits(value) {
+  const stack = [[value, 1]];
+  while (stack.length > 0) {
+    const [v, depth] = stack.pop();
+    if (v === null || typeof v !== 'object') continue;
+    if (depth > RESULT_MAX_DEPTH) return false;
+    for (const child of Array.isArray(v) ? v : Object.values(v)) stack.push([child, depth + 1]);
+  }
+  return JSON.stringify(value).length <= RESULT_MAX_JSON_CHARS;
+}
+
 export async function startMcpServer({ configPath, offline } = {}) {
   const config = await loadConfig(configPath);
   // --offline は設定そのものを書き換える（cli.js の load() と同じ）。run_task / sync は呼ばれるたびに
@@ -252,6 +275,31 @@ export async function startMcpServer({ configPath, offline } = {}) {
     const f = path.resolve(packDir, `${packId}.json`);
     if (!f.startsWith(root)) throw new Error('pack_id が packs ディレクトリの外を指しています');
     return f;
+  };
+
+  /**
+   * pack ファイルを読んで返す（存在確認は呼び出し側が先に行う）。
+   *
+   * packFile() は文字列としてのパスしか見ないため、packs 内のシンボリックリンクが外のファイルを
+   * 指していても通ってしまう。実体（realpath）が packs の実体の下にあることを再確認する。
+   * 外にあるものは、存在しないものと同じ文言にする（外にあることを示さない）。
+   * JSON のエラー文には本文の一部が載るので、本文を含まない固定文言に置き換える。
+   */
+  const readPack = async (packId) => {
+    const f = packFile(packId);
+    const notFound = () => new Error(`pack_id ${packId} が見つかりません`);
+    let real;
+    let root;
+    try {
+      real = fs.realpathSync(f);
+      root = fs.realpathSync(packDir) + path.sep;
+    } catch { throw notFound(); }
+    if (!real.startsWith(root)) throw notFound();
+    const broken = () => new Error(`pack_id ${packId} が壊れています`);
+    let saved;
+    try { saved = JSON.parse(await fsp.readFile(real, 'utf8')); } catch { throw broken(); }
+    if (saved === null || typeof saved !== 'object' || saved.pack === null || typeof saved.pack !== 'object' || !Array.isArray(saved.pack.items)) throw broken();
+    return saved;
   };
 
   // 索引ストアは 1 つだけ開いて使い回す。
@@ -524,9 +572,11 @@ export async function startMcpServer({ configPath, offline } = {}) {
         });
       }
       case 'context_grill_verify': {
+        // 応答が膨らむ入力は、pack を開く前に拒否する（検証後の result をそのまま返すため）。
+        if (!isWithinResultLimits(args.result)) throw new Error('result が大きすぎるか深すぎます（深さ 64・2MB まで）');
         const f = packFile(args.pack_id);
         if (!fs.existsSync(f)) return textResult({ error: `pack_id ${args.pack_id} が見つかりません` });
-        const saved = JSON.parse(await fsp.readFile(f, 'utf8'));
+        const saved = await readPack(args.pack_id);
         const task = TASKS[saved.taskId] || TASKS.spec;
         const schema = envelopeSchema(task.itemTypes);
         const v = verify(args.result, { pack: saved.pack, schema, policy: config.policy, taskId: saved.taskId });
@@ -555,7 +605,7 @@ export async function startMcpServer({ configPath, offline } = {}) {
         if (args.pack_id && args.evidence_id) {
           const f = packFile(args.pack_id);
           if (!fs.existsSync(f)) return textResult({ error: 'pack が見つかりません' });
-          const saved = JSON.parse(await fsp.readFile(f, 'utf8'));
+          const saved = await readPack(args.pack_id);
           const e = saved.pack.items.find((x) => x.id === args.evidence_id);
           return textResult(e || { error: `${args.evidence_id} は pack にありません` });
         }
@@ -599,16 +649,42 @@ export async function startMcpServer({ configPath, offline } = {}) {
   }
 
   let buffer = '';
+  // 上限を超えた行を捨てている間 true。改行が来るまで以降のデータを読み捨てる（メモリを増やさない）。
+  let discarding = false;
+  const lineTooLong = () => err(null, -32700, 'Parse error: 行が長すぎます（上限 16MB）');
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', async (chunk) => {
-    buffer += chunk;
-    let nl;
-    while ((nl = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, nl).trim();
-      buffer = buffer.slice(nl + 1);
+    let data = chunk;
+    while (data.length > 0) {
+      const nl = data.indexOf('\n');
+      if (discarding) {
+        if (nl < 0) return;
+        discarding = false;
+        data = data.slice(nl + 1);
+        continue;
+      }
+      if (nl < 0) {
+        // 未完の行。上限を超えたら捨て状態にして、応答は 1 回だけ返す。
+        buffer += data;
+        if (buffer.length > MAX_LINE_CHARS) {
+          buffer = '';
+          discarding = true;
+          lineTooLong();
+        }
+        return;
+      }
+      const full = buffer + data.slice(0, nl);
+      buffer = '';
+      data = data.slice(nl + 1);
+      if (full.length > MAX_LINE_CHARS) { lineTooLong(); continue; }
+      const line = full.trim();
       if (!line) continue;
       let msg;
-      try { msg = JSON.parse(line); } catch { continue; }
+      try { msg = JSON.parse(line); } catch {
+        // id を特定できないときも、JSON-RPC の仕様どおり id: null で返す
+        err(null, -32700, 'Parse error: JSON として解釈できません');
+        continue;
+      }
       // 想定外の例外でプロセスを落とさない（await しないので unhandled rejection になる）
       handle(msg).catch((e) => process.stderr.write(`[context-grill] リクエスト処理中に想定外のエラー: ${e?.message ?? e}\n`));
     }
