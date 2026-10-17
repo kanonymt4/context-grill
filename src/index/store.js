@@ -33,6 +33,8 @@ export function layout(dir, gen) {
 }
 
 const MANIFEST_RE = /^manifest\.(\d{4})\.json$/;
+/** pad() が 4 桁固定なので、これを超えるとファイル名の書式が崩れる。 */
+const MAX_GEN = 9999;
 
 /**
  * 公開済みの最大世代を返す。無ければ null。
@@ -96,9 +98,32 @@ export class IndexBuilder {
   }
   async start() {
     await fsp.mkdir(path.join(this.dir, 'postings'), { recursive: true });
-    this.L = layout(this.dir, (latestGen(this.dir) ?? 0) + 1);
-    // 世代番号つきの名前はまだ誰も開いていないので、tmp を経由せず直接書ける
-    this.fd = fs.openSync(this.L.docs, 'w');
+    // latestGen() は公開済みの manifest.NNNN.json しか見ないので、進行中の別ビルドは
+    // ここから見えない。'w' で開くと同時に走った 2 本が同じ docs.NNNN.txt を掴み、
+    // 後から start() した側が先に書いた分を 0 バイトに切り詰めてしまう。壊れ方は
+    // finish() の順序で変わり、後に finish() した側の meta が公開される一方、その
+    // オフセットが指す先には先に書いた側のバイトが載る。例外は出ない。
+    //
+    // そこで 'wx' で開き、EEXIST を「その世代は誰かが使っている」の合図として使う。
+    // 未使用の名前を掴むまで進めれば、2 本は別々の世代へ分かれて独立に完走する。
+    // クラッシュで残った docs.NNNN.txt もその世代を塞ぐが、次の publish の
+    // pruneGenerations() が消すので自己修復する。
+    let gen = (latestGen(this.dir) ?? 0) + 1;
+    for (;;) {
+      // 名前は 4 桁固定。ここを超えると MANIFEST_RE に一致しなくなり、latestGen() が
+      // 世代を見失って 1 から振り直す（= 公開済みの索引を上書きする）。手前で止める。
+      if (gen > MAX_GEN) throw new Error(`世代番号が上限 ${MAX_GEN} に達しました。索引ディレクトリを作り直してください (${this.dir})`);
+      const L = layout(this.dir, gen);
+      try {
+        this.fd = fs.openSync(L.docs, 'wx');
+      } catch (e) {
+        if (e.code !== 'EEXIST') throw e;
+        gen++;
+        continue;
+      }
+      this.L = L;
+      return;
+    }
   }
   add(chunk) {
     const idx = this.meta.length;
