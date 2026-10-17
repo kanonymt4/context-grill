@@ -955,3 +955,212 @@ test('MCP: server/discover は id を保ったまま -32601 を返す（従来�
   assert.equal(r.error?.code, -32601, JSON.stringify(r).slice(0, 300));
   assert.equal(r.result, undefined);
 });
+
+// ---- 入力の大きさ・深さの上限と、パース失敗の応答 ----
+//
+// verify は検証後の result をそのまま返し、textResult が字下げするため、深さ d の配列で応答が約 2d² バイトに膨らむ
+// （深さ 6000 の 12KB の要求で 72MB）。stdin の行にも上限が無く、不正な JSON の行は黙って捨てられていた。
+
+/**
+ * 生の文字列を、与えた単位のまま順に stdin へ書き、応答が expected 件そろうまで待つ（JSON.stringify しない）。
+ * 失敗系は「応答が来ない」ことが症状なので、タイムアウトは reject せず、そろった分を返す。後始末は SIGKILL。
+ */
+function rpcRaw(probe, chunks, expected, { timeoutMs = 15000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now();
+    const child = spawn(process.execPath, [probe], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const responses = [];
+    let out = '';
+    let errText = '';
+    let done = false;
+    const finish = () => { if (!done) { done = true; setTimeout(() => child.kill('SIGKILL'), 100); } };
+    const timer = setTimeout(finish, timeoutMs);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (c) => {
+      out += c;
+      let nl;
+      while ((nl = out.indexOf('\n')) >= 0) {
+        const line = out.slice(0, nl).trim();
+        out = out.slice(nl + 1);
+        if (!line) continue;
+        try { responses.push(JSON.parse(line)); } catch { /* ignore */ }
+      }
+      if (responses.length >= expected) finish();
+    });
+    child.stderr.on('data', (c) => { errText += c; });
+    child.on('close', () => { clearTimeout(timer); resolve({ responses, stderr: errText, elapsedMs: Date.now() - started }); });
+    child.on('error', reject);
+    child.stdin.on('error', () => { /* kill 後の EPIPE */ });
+    (async () => {
+      for (const c of chunks) await new Promise((r) => child.stdin.write(c, r));
+    })();
+  });
+}
+
+const PING = (id) => JSON.stringify({ jsonrpc: '2.0', id, method: 'ping' }) + '\n';
+const nest = (n) => '['.repeat(n) + ']'.repeat(n);
+/** result 自体を深さ 1 と数えて、全体の深さが total になる result の JSON 文字列（余分なキー x に入れ子を置く）。 */
+const resultOfDepth = (total) => `{"x":${nest(total - 1)}}`;
+const verifyLine = (id, packId, resultJson) =>
+  `{"jsonrpc":"2.0","id":${id},"method":"tools/call","params":{"name":"context_grill_verify","arguments":{"pack_id":${JSON.stringify(packId)},"result":${resultJson}}}}\n`;
+const TOO_BIG = /result が大きすぎるか深すぎます（深さ 64・2MB まで）/;
+const findId = (res, id) => res.responses.find((x) => x.id === id);
+
+test('MCP: verify は深さ 65 以上・2MB 超の result を pack を開く前に isError で拒否し、深さ 64 は通す', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const packRes = await rpc(probe, [call(1, 'context_grill_evidence_pack', { instruction: 'refundPayment' })], 1);
+  const packId = JSON.parse(textOf(byId(packRes, 1))).pack_id;
+  const res = await rpcRaw(probe, [
+    verifyLine(1, packId, resultOfDepth(64)),
+    verifyLine(2, packId, resultOfDepth(65)),
+    verifyLine(3, packId, resultOfDepth(100000)),
+    verifyLine(4, packId, JSON.stringify({ x: 'x'.repeat(2_100_000) })),
+    // pack が無くても、先に大きさ・深さで拒否される（pack を開く前に検査する）
+    verifyLine(5, 'pack-0123456789', resultOfDepth(65)),
+  ], 5);
+  const ok64 = findId(res, 1);
+  assert.ok(ok64, `深さ 64 の応答が無い: ${res.stderr.slice(-300)}`);
+  assert.notEqual(ok64.result?.isError, true, `深さ 64 が拒否された: ${textOf(ok64).slice(0, 300)}`);
+  assert.equal(typeof JSON.parse(textOf(ok64)).passed, 'boolean', textOf(ok64).slice(0, 300));
+  for (const [id, label] of [[2, '深さ 65'], [3, '深さ 100000'], [4, '2MB 超'], [5, 'pack 無し + 深さ 65']]) {
+    const r = findId(res, id);
+    assert.ok(r, `${label} の応答が無い: ${res.stderr.slice(-300)}`);
+    assert.equal(r.result?.isError, true, `${label} が拒否されていない: ${textOf(r).slice(0, 200)}`);
+    assert.match(textOf(r), TOO_BIG, `${label}: メッセージが違う: ${textOf(r).slice(0, 200)}`);
+    assert.ok(textOf(r).length < 1000, `${label}: 応答が大きい (${textOf(r).length})`);
+  }
+});
+
+test('MCP: JSON として不正な行は -32700（id: null）で応答し、サーバーは生きている。空行は無視する', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpcRaw(probe, ['{bad\n', '\n   \n', PING(7)], 2);
+  assert.equal(res.responses.length, 2, `応答は不正な行の 1 件と ping の 1 件のみのはず: ${JSON.stringify(res.responses).slice(0, 400)}`);
+  const pe = res.responses.find((x) => x.error);
+  assert.ok(pe, `パース失敗の応答が無い: ${JSON.stringify(res.responses).slice(0, 400)}`);
+  assert.equal(pe.error.code, -32700);
+  assert.equal(pe.id, null);
+  assert.equal(pe.error.message, 'Parse error: JSON として解釈できません');
+  assert.deepEqual(findId(res, 7)?.result, {}, 'その後の ping が返らない');
+});
+
+test('MCP: 16MB を超える行は -32700（長すぎます）を 1 回だけ返して捨て、続く正常な行を処理する', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const big = 'a'.repeat(17 * 1024 * 1024);
+  const MB = 1024 * 1024;
+  const cases = [
+    ['1 回の write（続きの行も同じ write）', [big + '\n' + PING(9)]],
+    ['1MB ずつ複数チャンク', [...Array.from({ length: 17 }, () => 'a'.repeat(MB)), 'a'.repeat(1000) + '\n', PING(9)]],
+  ];
+  for (const [label, chunks] of cases) {
+    const res = await rpcRaw(probe, chunks, 2);
+    assert.equal(res.responses.length, 2, `${label}: 応答の件数が違う（-32700 が 1 回だけのはず）: ${JSON.stringify(res.responses).slice(0, 400)}`);
+    const errs = res.responses.filter((x) => x.error);
+    assert.equal(errs.length, 1, `${label}: -32700 は 1 回だけ: ${JSON.stringify(res.responses).slice(0, 400)}`);
+    assert.equal(errs[0].error.code, -32700, label);
+    assert.equal(errs[0].id, null, label);
+    assert.match(errs[0].error.message, /Parse error: 行が長すぎます（上限 16MB）/, label);
+    assert.deepEqual(findId(res, 9)?.result, {}, `${label}: 捨てた後の ping が返らない`);
+    console.log(`# ${label}: ${res.elapsedMs}ms`);
+  }
+});
+
+test('MCP: 上限に達しても改行を待つ間は読み捨て、改行以降の複数行は通常どおり処理する', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const MB = 1024 * 1024;
+  // 改行なしで上限を超え → さらに続く（捨て状態で 2 チャンク）→ 改行 → 正常な 2 行
+  const res = await rpcRaw(probe, ['a'.repeat(17 * MB), 'b'.repeat(MB), 'c'.repeat(10) + '\n' + PING(1) + PING(2)], 3);
+  assert.equal(res.responses.length, 3, JSON.stringify(res.responses).slice(0, 400));
+  assert.equal(res.responses.filter((x) => x.error).length, 1);
+  assert.equal(res.responses.find((x) => x.error).error.code, -32700);
+  assert.deepEqual(findId(res, 1)?.result, {});
+  assert.deepEqual(findId(res, 2)?.result, {});
+});
+
+test('MCP: 1 回の write に複数行が入っていても、上限未満の大きな行（1MB）があっても従来どおり処理する', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpcRaw(probe, [
+    PING(1) + PING(2),
+    JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping', params: { pad: 'x'.repeat(1024 * 1024) } }) + '\n',
+    JSON.stringify(call(4, 'context_grill_search', { query: 'refundPayment '.repeat(75000) })) + '\n',
+  ], 4);
+  for (const id of [1, 2, 3]) assert.deepEqual(findId(res, id)?.result, {}, `id=${id}`);
+  const s = findId(res, 4);
+  assert.ok(s, '1MB の query の応答が無い');
+  assert.notEqual(s.result?.isError, true, textOf(s).slice(0, 300));
+});
+
+// ---- pack ファイルの読み込み ----
+
+async function packsDirOf(configPath) {
+  const dir = path.join(paths(await loadConfig(configPath)).runs, 'packs');
+  await fsp.mkdir(dir, { recursive: true });
+  return dir;
+}
+
+test('MCP: packs 内のシンボリックリンクが packs の外を指すと fetch / verify は「見つかりません」の isError にする', async (t) => {
+  const { dir, configPath } = await fixture({ build: false });
+  const packs = await packsDirOf(configPath);
+  const outside = path.join(dir, 'outside.json');
+  await fsp.writeFile(outside, JSON.stringify({ taskId: 'spec', pack: { items: [{ id: 'E1', text: 'OUTSIDE-MARKER' }] } }));
+  try {
+    await fsp.symlink(outside, path.join(packs, 'pack-0123456789.json'));
+  } catch (e) {
+    if (e.code === 'EPERM' || e.code === 'EACCES') return t.skip(`シンボリックリンクを作れない環境: ${e.code}`);
+    throw e;
+  }
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [
+    call(1, 'context_grill_fetch', { pack_id: 'pack-0123456789', evidence_id: 'E1' }),
+    call(2, 'context_grill_verify', { pack_id: 'pack-0123456789', result: {} }),
+  ], 2);
+  for (const id of [1, 2]) {
+    const r = byId(res, id);
+    assert.equal(r.result?.isError, true, `id=${id} が拒否されていない: ${textOf(r).slice(0, 300)}`);
+    assert.match(textOf(r), /pack_id pack-0123456789 が見つかりません/, `id=${id}: ${textOf(r).slice(0, 300)}`);
+    assert.doesNotMatch(textOf(r), /OUTSIDE-MARKER/, `id=${id}: packs の外の内容が漏れている`);
+  }
+});
+
+test('MCP: pack が JSON でない・形が違うときは本文を含まない「壊れています」の isError にする', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const packs = await packsDirOf(configPath);
+  await fsp.writeFile(path.join(packs, 'pack-abcdefabcd.json'), 'hunter2-secret-body');
+  await fsp.writeFile(path.join(packs, 'pack-abcdefabce.json'), '{}');
+  await fsp.writeFile(path.join(packs, 'pack-abcdefabcf.json'), JSON.stringify({ taskId: 'spec', pack: { items: 'x' } }));
+  const probe = await writeProbe(dir, configPath);
+  const reqs = [];
+  const ids = ['pack-abcdefabcd', 'pack-abcdefabce', 'pack-abcdefabcf'];
+  ids.forEach((pid, i) => {
+    reqs.push(call(i * 2 + 1, 'context_grill_fetch', { pack_id: pid, evidence_id: 'E1' }));
+    reqs.push(call(i * 2 + 2, 'context_grill_verify', { pack_id: pid, result: {} }));
+  });
+  const res = await rpc(probe, reqs, reqs.length);
+  ids.forEach((pid, i) => {
+    for (const k of [1, 2]) {
+      const r = byId(res, i * 2 + k);
+      const text = textOf(r);
+      assert.equal(r.result?.isError, true, `${pid} id=${i * 2 + k}: ${text.slice(0, 300)}`);
+      assert.equal(text, `エラー: pack_id ${pid} が壊れています`, `${pid}: ${text.slice(0, 300)}`);
+      assert.doesNotMatch(text, /hunter2/, `${pid}: 本文が漏れている`);
+    }
+  });
+});
+
+test('MCP: evidence_pack が作った正常な pack は fetch / verify で従来どおり読める（tmpdir がリンクでも）', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [call(1, 'context_grill_evidence_pack', { instruction: 'refundPayment' })], 1);
+  const packId = JSON.parse(textOf(byId(res, 1))).pack_id;
+  const res2 = await rpc(probe, [
+    call(1, 'context_grill_fetch', { pack_id: packId, evidence_id: 'E1' }),
+    call(2, 'context_grill_verify', { pack_id: packId, result: {} }),
+  ], 2);
+  assert.equal(JSON.parse(textOf(byId(res2, 1))).id, 'E1');
+  assert.equal(typeof JSON.parse(textOf(byId(res2, 2))).passed, 'boolean');
+});
