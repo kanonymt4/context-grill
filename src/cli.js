@@ -18,6 +18,7 @@ import { initEgress, egressPlan } from './util/egress.js';
 import { SENSITIVE_DENY } from './util/sensitive.js';
 import { urlToSource } from './util/urls.js';
 import { log, setLevel } from './util/log.js';
+import { readEnv } from './util/misc.js';
 
 const HELP = `context-grill — GitHub と Atlassian の一次資料に基づいて調査・設計を行うツール
 
@@ -406,6 +407,11 @@ async function cmdDoctor(flags) {
     }
     const need = new Set([config.llm.apiKeyEnv]);
     for (const s of config.sources) {
+      // confluence は bearer が設定済みならそれを使い、email / token は参照しない（connectors/confluence.js の authHeader）
+      if (s.type === 'confluence') {
+        const bearerEnv = s.auth?.bearerEnv || 'ATLASSIAN_BEARER';
+        if (readEnv(bearerEnv)) { need.add(bearerEnv); continue; }
+      }
       if (s.auth?.tokenEnv) need.add(s.auth.tokenEnv);
       if (s.auth?.emailEnv) need.add(s.auth.emailEnv);
     }
@@ -413,7 +419,7 @@ async function cmdDoctor(flags) {
     for (const n of need) {
       if (!n) continue;
       const optional = config.llm.provider === 'dry' && n === config.llm.apiKeyEnv;
-      checks.push({ name: `env ${n}`, ok: Boolean(process.env[n]) || optional, detail: process.env[n] ? '設定済み' : (optional ? '不要' : '未設定') });
+      checks.push({ name: `env ${n}`, ok: Boolean(readEnv(n)) || optional, detail: readEnv(n) ? '設定済み' : (optional ? '不要' : '未設定') });
     }
     // local ソースの実体があるか（sync まで待たずにここで気づけるように）
     for (const s of config.sources) {

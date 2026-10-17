@@ -1,12 +1,13 @@
 import { htmlToText } from '../util/html.js';
-import { isIncluded } from '../util/misc.js';
+import { isIncluded, readEnv } from '../util/misc.js';
 import { parseConfluenceUrl } from '../util/urls.js';
 import { log } from '../util/log.js';
 import { makeDoc, httpJson, requireEnv } from './base.js';
 
 function authHeader(src) {
   const bearerEnv = src.auth?.bearerEnv || 'ATLASSIAN_BEARER';
-  if (process.env[bearerEnv]) return `Bearer ${process.env[bearerEnv]}`;
+  const bearer = readEnv(bearerEnv);
+  if (bearer) return `Bearer ${bearer}`;
   const email = requireEnv(src.auth?.emailEnv || 'ATLASSIAN_EMAIL', 'Atlassian のログインメールを設定してください。');
   const tk = requireEnv(src.auth?.tokenEnv || 'ATLASSIAN_API_TOKEN',
     'https://id.atlassian.com/manage-profile/security/api-tokens で API トークンを発行してください。');

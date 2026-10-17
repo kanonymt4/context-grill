@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { sha256, retry } from '../util/misc.js';
+import { sha256, retry, readEnv } from '../util/misc.js';
 import { log } from '../util/log.js';
 import { guardedFetch } from '../util/egress.js';
 import { redactMessage, redactText } from '../util/redact.js';
@@ -107,7 +107,7 @@ export function parseEmbeddingResponse(json, expected, dims) {
 }
 
 async function callEmbeddingApi(cfg, inputs, { inputType = 'document' } = {}) {
-  const key = process.env[cfg.apiKeyEnv || 'OPENAI_API_KEY'];
+  const key = readEnv(cfg.apiKeyEnv || 'OPENAI_API_KEY');
   if (!key) throw Object.assign(new Error(`埋め込み用の環境変数 ${cfg.apiKeyEnv} が未設定です`), { noRetry: true });
   const { url, body } = buildEmbeddingRequest(cfg, inputs, inputType);
   const res = await guardedFetch(url, {
