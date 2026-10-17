@@ -96,3 +96,9 @@ export async function retry(fn, { attempts = 4, baseMs = 600, onRetry } = {}) {
   }
   throw last;
 }
+
+/** 環境変数を名前で引く。process.env[name] は toString / constructor / __proto__ 等で関数やオブジェクトを返すため、
+ *  自分のプロパティだけを見る（config.js の expandEnv と同じ判定）。未定義・文字列でない名前は undefined。 */
+export function readEnv(name) {
+  return typeof name === 'string' && Object.hasOwn(process.env, name) ? process.env[name] : undefined;
+}

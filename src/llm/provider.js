@@ -1,4 +1,4 @@
-import { retry } from '../util/misc.js';
+import { retry, readEnv } from '../util/misc.js';
 import { log } from '../util/log.js';
 import { guardedFetch } from '../util/egress.js';
 import { redactMessage } from '../util/redact.js';
@@ -21,7 +21,7 @@ export function createProvider(cfg) {
 
 function apiKey(cfg, fallbackEnv) {
   const name = cfg.apiKeyEnv || fallbackEnv;
-  const v = process.env[name];
+  const v = readEnv(name);
   if (!v) throw Object.assign(new Error(`環境変数 ${name} が未設定です（llm.provider=${cfg.provider}）`), { noRetry: true });
   return v;
 }
