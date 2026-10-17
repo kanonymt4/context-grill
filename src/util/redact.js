@@ -16,8 +16,8 @@ const RULES = [
   { kind: 'JWT', re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g },
   { kind: 'SENDGRID_KEY', re: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/g },
   { kind: 'NPM_TOKEN', re: /\bnpm_[A-Za-z0-9]{30,}\b/g },
-  // URL に埋め込まれたパスワード（DB 接続文字列など）
-  { kind: 'URL_PASSWORD', re: /([a-z][a-z0-9+.-]*:\/\/[^\s/:@]+):([^\s/:@]{3,})@/gi, replace: (m, a) => `${a}:«REDACTED:URL_PASSWORD»@` },
+  // URL に埋め込まれたパスワード（DB 接続文字列など）。スキーム名に上限（32 字）を付けるのは、区切りのない長い 1 行での二乗バックトラックを防ぐため
+  { kind: 'URL_PASSWORD', re: /([a-z][a-z0-9+.-]{0,31}:\/\/[^\s/:@]+):([^\s/:@]{3,})@/gi, replace: (m, a) => `${a}:«REDACTED:URL_PASSWORD»@` },
   // Authorization ヘッダ
   { kind: 'AUTH_HEADER', re: /((?:authorization|proxy-authorization)["']?\s*[:=]\s*["']?\s*(?:Bearer|Basic|Token)\s+)([A-Za-z0-9._~+/=-]{8,})/gi, replace: (m, a) => `${a}«REDACTED:AUTH_HEADER»` },
   // 引用符付きのハードコード認証情報（key = "..."）
