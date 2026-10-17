@@ -99,7 +99,7 @@ export function loadDotEnv(dir) {
     const k = line.slice(0, eq).trim().replace(/^export\s+/, '');
     let v = line.slice(eq + 1).trim();
     if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
-    if (process.env[k] === undefined) process.env[k] = v;
+    if (!Object.hasOwn(process.env, k)) process.env[k] = v;
   }
 }
 
