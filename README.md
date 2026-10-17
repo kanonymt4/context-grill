@@ -560,6 +560,9 @@ zip -er context-grill-dist.zip context-grill-dist       # パスワードは別�
 
 すべての外部通信は単一のゲート（`src/util/egress.js`）を通ります。
 **設定から導出したホスト以外へは、送信そのものが例外になります。**
+ただし `git clone` / `fetch` は外部の `git` コマンドが通信するため、許可の検査は設定上のホストに対して行われ、
+ユーザーの gitconfig（`url.<base>.insteadOf`）や `https_proxy` で実際の接続先が変わる場合は検査されません
+（実測、2026-10-11。`--offline` ではどちらも接続しません）。
 
 | 通信 | 送るもの | 既定 |
 | --- | --- | --- |
@@ -568,7 +571,9 @@ zip -er context-grill-dist.zip context-grill-dist       # パスワードは別�
 | LLM API | 検索でヒットした証拠のみ（全文ではない・墨消し済み） | 有効（`security.allowLlmUpload: false` で全面禁止） |
 
 - HTTP メソッドは `GET` / `HEAD` / `POST` のみ許可。`PUT` / `DELETE` / `PATCH` は例外になります
-- `--offline` または `security.networkMode: "offline"` で全通信を拒否できます（`search` / `scan` / `--dry-run` は動作）
+- `--offline` または `security.networkMode: "offline"` で全通信を拒否できます（`search` / `scan` / `--dry-run` は動作。
+  `local` ソースの `sync` も動きます。埋め込みを設定していると `sync` は終了コード 1 になりますが BM25 の索引は公開されます。
+  CLI では `--no-embed` を付けると成功します。クエリ埋め込みは黙って省略されるため、通常時と検索順位が変わることがあります）
 - `--dry-run` は LLM を呼ばずにプロンプト一式を出力するため、**何を送るかを送信前に全部読めます**
 - 設定値に環境変数の秘密の実値が展開されていた場合（`baseUrl` への混入など）、起動時に拒否します
 

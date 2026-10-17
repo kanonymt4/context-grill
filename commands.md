@@ -53,9 +53,11 @@ APIキーが要るのは `ask` と `run` だけです（どちらも `--dry-run`
 | `--source <id>` | 対象ソースを限定（カンマ区切り） |
 | `--json` | JSON で出力 |
 | `--log <level>` | `silent` / `error` / `warn` / `info` / `debug` |
-| `--offline` | 一切の外部通信を禁止（`search` / `scan` / `--dry-run` のみ動作） |
+| `--offline` | 一切の外部通信を禁止（`search` / `scan` / `--dry-run` / `local` ソースの `sync` が動作） |
 
 `--offline` は、閉じたネットワークで「本当に何も出ていかないこと」を強制したいときに使います。
+埋め込みを設定していると `sync` は終了コード 1 になります（BM25 の索引は公開されます。`--no-embed` で成功します）。
+クエリ埋め込みは通知なしに省略され、通常時と検索順位が変わることがあります。`doctor` は `--offline` を無視します（通信しないため害はありません）。
 
 値を取るオプション（`--config` / `--source` / `--task` / `--effort` / `--model` / `--out` / `--top` / `--severity` / `--log` など）は値が必須です。値なし・空（`--out=`）・`--no-out` の形はエラーになります。
 `--source` の未知の id、`--severity` の不明な値、整数でない `-k` もエラーです（黙って 0 件や全件になることはありません）。
@@ -671,4 +673,6 @@ context-grill privacy     # 何がどこへ送られるかを事前確認
 context-grill status      # 索引の状態を確認
 ```
 
-外部通信の実績は `.context-grill/egress.log` に残ります。
+外部通信の実績は `.context-grill/egress.log` に残ります。記録されるのは許可された要求だけで、ブロックされた要求は
+記録されません（`--offline` ではファイル自体が作られません）。`git` は成功したときだけ記録されます。`bytesSent` は
+送ろうとした本文の計算上のサイズで、実際に送ったバイト数ではありません。stderr の「外部通信: N 回」に埋め込みの通信は含まれません。
