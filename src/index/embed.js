@@ -117,7 +117,12 @@ async function callEmbeddingApi(cfg, inputs, { inputType = 'document' } = {}) {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
     body: JSON.stringify(body),
   }, { purpose: 'embedding' });
-  if (!res.ok) throw new Error(redactMessage(`${cfg.provider} embeddings HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`));
+  if (!res.ok) {
+    const err = new Error(redactMessage(`${cfg.provider} embeddings HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`));
+    // 認証・認可エラーは再試行しても直らない
+    if (res.status === 401 || res.status === 403) err.noRetry = true;
+    throw err;
+  }
   return parseEmbeddingResponse(await res.json(), inputs.length, cfg.dimensions);
 }
 
