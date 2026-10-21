@@ -9,8 +9,16 @@ import { embedChunks } from './embed.js';
 import { log } from '../util/log.js';
 import { initEgress, egressSummary } from '../util/egress.js';
 
-/** ソース取得（ネットワーク）。キャッシュは source 単位で独立。 */
-export async function syncSources(config, { only = null, force = false } = {}) {
+/** 外部通信の集計を 1 行で出す（stderr） */
+export function logEgressSummary(eg) {
+  if (eg) log.info(`外部通信: ${eg.requests} 回 / 送信 ${eg.bytesSent} bytes / 宛先 ${Object.keys(eg.byHost).join(', ') || 'なし'}`);
+}
+
+/**
+ * ソース取得（ネットワーク）。キャッシュは source 単位で独立。
+ * summary: false にすると外部通信の集計を出さない（呼び出し側が索引構築まで含めて出す）。
+ */
+export async function syncSources(config, { only = null, force = false, summary = true } = {}) {
   const p = await ensureDirs(config);
   initEgress(config);
   const report = [];
@@ -30,8 +38,7 @@ export async function syncSources(config, { only = null, force = false } = {}) {
       log.error(`  ${src.id}: 失敗 - ${e.message}`);
     }
   }
-  const eg = egressSummary();
-  if (eg) log.info(`外部通信: ${eg.requests} 回 / 送信 ${eg.bytesSent} bytes / 宛先 ${Object.keys(eg.byHost).join(', ') || 'なし'}`);
+  if (summary) logEgressSummary(egressSummary());
   return report;
 }
 
