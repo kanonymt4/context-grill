@@ -184,7 +184,7 @@ function hasNull(v) {
 const RUN_TASK_SCHEMA = {
   type: 'object',
   properties: {
-    instruction: { type: 'string' },
+    instruction: { type: 'string', minLength: 1, pattern: '\\S' },
     task: { type: 'string', enum: ['spec', 'bug', 'security', 'static', 'design'] },
     // effort の enum は設定の effortPresets のキー。fixture には huge がある（既定値が先、独自の段階が後）
     effort: { type: 'string', enum: ['low', 'normal', 'deep', 'huge'] },

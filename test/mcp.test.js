@@ -697,11 +697,11 @@ test('MCP: static_scan の severity は enum を検査する（hgih は拒否、
 
 test('MCP: 引数の型違い（k / limit / dry_run / include_static / query / instruction）は -32602', async () => {
   await assertRejected('context_grill_search', [
-    [{ query: 'x', k: '12' }, /型が number/, '$.k'],
+    [{ query: 'x', k: '12' }, /型が integer/, '$.k'],
     [{ query: 5 }, /型が string/, '$.query'],
     [{ query: 'x', kinds: 'code' }, /型が array/, '$.kinds'],
   ], { build: false });
-  await assertRejected('context_grill_static_scan', [[{ limit: 'x' }, /型が number/, '$.limit']], { build: false });
+  await assertRejected('context_grill_static_scan', [[{ limit: 'x' }, /型が integer/, '$.limit']], { build: false });
   await assertRejected('context_grill_run_task', [
     [{ instruction: 'x', dry_run: 'false' }, /型が boolean/, '$.dry_run'],
     [{ instruction: 'x', dry_run: 0 }, /型が boolean/, '$.dry_run'],
@@ -1163,4 +1163,152 @@ test('MCP: evidence_pack が作った正常な pack は fetch / verify で従来
   ], 2);
   assert.equal(JSON.parse(textOf(byId(res2, 1))).id, 'E1');
   assert.equal(typeof JSON.parse(textOf(byId(res2, 2))).passed, 'boolean');
+});
+
+// ---- 数値引数・kinds・instruction の inputSchema（minimum / maximum / enum / pattern）----
+// k / limit / start / end は type:number のままだったため、0・負数・小数が黙って通り、件数や行範囲が不定になっていた。
+// kinds の未知の値は 0 件で成功し、空文字や空白だけの instruction は汎用語だけのクエリで進んでいた。
+
+/** 450 行の文書と、静的解析の検出が複数ある code を持つ local ソース 1 つの設定を置く。 */
+async function fixtureRange() {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-mcp-range-'));
+  await fsp.mkdir(path.join(dir, 'repo'), { recursive: true });
+  await fsp.writeFile(path.join(dir, 'repo', 'big.md'),
+    Array.from({ length: 450 }, (_, i) => `line ${i + 1} refundPayment`).join('\n') + '\n');
+  await fsp.writeFile(path.join(dir, 'repo', 'bad.js'),
+    'const https = require("https");\n'
+    + Array.from({ length: 5 }, (_, i) => `https.get(u${i}, { rejectUnauthorized: false });\neval(input${i});\n`).join(''));
+  const configPath = path.join(dir, 'context-grill.config.json');
+  await fsp.writeFile(configPath, JSON.stringify({
+    project: 'mcp-range',
+    sources: [{ id: 'repo', type: 'local', path: path.join(dir, 'repo'), include: ['**/*'], includeUnknownTypes: true }],
+    llm: { provider: 'dry', model: 'dry' },
+  }));
+  const config = await loadConfig(configPath);
+  await syncSources(config, {});
+  await buildIndex(config, { embed: false });
+  return { dir, configPath };
+}
+
+const parseText = (r) => JSON.parse(textOf(r));
+
+test('MCP: search の k は 1〜100 の整数だけを受け付ける（0 / -1 / 0.5 / 101 / "12" は -32602）', async () => {
+  const { dir, configPath } = await fixtureRange();
+  const probe = await writeProbe(dir, configPath);
+  const bad = [0, -1, 0.5, 1.5, 101, '12'];
+  const reqs = bad.map((k, i) => call(i + 1, 'context_grill_search', { query: 'refundPayment', k }));
+  reqs.push(call(20, 'context_grill_search', { query: 'refundPayment', k: 1 }));
+  reqs.push(call(21, 'context_grill_search', { query: 'refundPayment', k: 100 }));
+  const res = await rpc(probe, reqs, reqs.length);
+  bad.forEach((k, i) => {
+    const r = byId(res, i + 1);
+    assertSchemaError(r, 'context_grill_search', `k:${JSON.stringify(k)}`, '$.k');
+  });
+  assert.match(byId(res, 1).error.message, /1 以上/);
+  assert.match(byId(res, 5).error.message, /100 以下/);
+  const one = byId(res, 20);
+  assert.ok(one.error === undefined && one.result?.isError !== true, JSON.stringify(one).slice(0, 300));
+  assert.equal(parseText(one).length, 1);
+  const hundred = byId(res, 21);
+  assert.ok(hundred.error === undefined && hundred.result?.isError !== true, JSON.stringify(hundred).slice(0, 300));
+});
+
+test('MCP: search の kinds は既知の kind だけ（"" / "Code" / "nope" は -32602、code / other / ticket は通る）', async () => {
+  const { dir, configPath } = await fixtureRange();
+  const probe = await writeProbe(dir, configPath);
+  const bad = [[''], ['Code'], ['nope'], ['code', 'nope']];
+  const reqs = bad.map((kinds, i) => call(i + 1, 'context_grill_search', { query: 'refundPayment', kinds }));
+  reqs.push(call(20, 'context_grill_search', { query: 'refundPayment', kinds: ['code', 'other', 'ticket'] }));
+  const res = await rpc(probe, reqs, reqs.length);
+  bad.forEach((kinds, i) => {
+    assertSchemaError(byId(res, i + 1), 'context_grill_search', `kinds:${JSON.stringify(kinds)}`, '許可');
+  });
+  const ok = byId(res, 20);
+  assert.ok(ok.error === undefined && ok.result?.isError !== true, JSON.stringify(ok).slice(0, 300));
+});
+
+test('MCP: static_scan の limit は 1〜1000 の整数だけ（0 / -1 / 0.5 / 1001 は -32602）。limit:1 は 1 件に絞る', async () => {
+  const { dir, configPath } = await fixtureRange();
+  const probe = await writeProbe(dir, configPath);
+  const bad = [0, -1, 0.5, 1001];
+  const reqs = bad.map((limit, i) => call(i + 1, 'context_grill_static_scan', { limit }));
+  reqs.push(call(20, 'context_grill_static_scan', {}));
+  reqs.push(call(21, 'context_grill_static_scan', { limit: 1 }));
+  const res = await rpc(probe, reqs, reqs.length);
+  bad.forEach((limit, i) => assertSchemaError(byId(res, i + 1), 'context_grill_static_scan', `limit:${limit}`, '$.limit'));
+  const all = parseText(byId(res, 20)).findings;
+  assert.ok(all.length >= 2, `fixture に検出が 2 件以上必要: ${all.length}`);
+  assert.equal(parseText(byId(res, 21)).findings.length, 1);
+});
+
+test('MCP: fetch の start / end は 1 以上の整数（start:0 / 1.5、end:-1 / 0 は -32602）', async () => {
+  const { dir, configPath } = await fixtureRange();
+  const probe = await writeProbe(dir, configPath);
+  const base = { source: 'repo', path: 'big.md' };
+  const bad = [{ start: 0 }, { start: 1.5 }, { end: -1 }, { end: 0 }];
+  const res = await rpc(probe, bad.map((a, i) => call(i + 1, 'context_grill_fetch', { ...base, ...a })), bad.length);
+  bad.forEach((a, i) => assertSchemaError(byId(res, i + 1), 'context_grill_fetch', JSON.stringify(a), a.start !== undefined ? '$.start' : '$.end'));
+});
+
+test('MCP: fetch は end < start を isError にし、end を付けても start から 201 行を超えない', async () => {
+  const { dir, configPath } = await fixtureRange();
+  const probe = await writeProbe(dir, configPath);
+  const base = { source: 'repo', path: 'big.md' };
+  const res = await rpc(probe, [
+    call(1, 'context_grill_fetch', { ...base, start: 10, end: 5 }),
+    call(2, 'context_grill_fetch', { ...base, start: 1, end: 400 }),
+    call(3, 'context_grill_fetch', { ...base, start: 1, end: 5 }),
+    call(4, 'context_grill_fetch', base),
+    call(5, 'context_grill_fetch', { ...base, start: 100, end: 400 }),
+    call(6, 'context_grill_fetch', { ...base, end: 3 }),
+  ], 6);
+  const r1 = byId(res, 1);
+  assert.equal(r1.result?.isError, true, JSON.stringify(r1).slice(0, 300));
+  assert.match(textOf(r1), /end は start 以上/);
+  const r2 = parseText(byId(res, 2));
+  assert.equal(r2.lines, '1-201');
+  assert.equal(r2.text.split('\n').length, 201);
+  assert.equal(parseText(byId(res, 3)).lines, '1-5');
+  assert.equal(parseText(byId(res, 4)).lines, '1-201');
+  assert.equal(parseText(byId(res, 5)).lines, '100-300');
+  assert.equal(parseText(byId(res, 6)).lines, '1-3');
+});
+
+test('MCP: run_task / evidence_pack の instruction は空文字・空白だけを -32602 で拒否し、通常の指示は通る', async () => {
+  const { dir, configPath } = await fixtureRange();
+  const probe = await writeProbe(dir, configPath);
+  const bad = ['', '   ', '\t\n'];
+  const reqs = [];
+  bad.forEach((instruction, i) => {
+    reqs.push(call(i * 2 + 1, 'context_grill_run_task', { instruction, dry_run: true }));
+    reqs.push(call(i * 2 + 2, 'context_grill_evidence_pack', { instruction }));
+  });
+  reqs.push(call(20, 'context_grill_run_task', { instruction: 'refundPayment を調べて', dry_run: true }));
+  reqs.push(call(21, 'context_grill_evidence_pack', { instruction: 'refundPayment を調べて' }));
+  const res = await rpc(probe, reqs, reqs.length);
+  bad.forEach((instruction, i) => {
+    assertSchemaError(byId(res, i * 2 + 1), 'context_grill_run_task', `run_task ${JSON.stringify(instruction)}`, '$.instruction');
+    assertSchemaError(byId(res, i * 2 + 2), 'context_grill_evidence_pack', `evidence_pack ${JSON.stringify(instruction)}`, '$.instruction');
+  });
+  for (const id of [20, 21]) {
+    const r = byId(res, id);
+    assert.ok(r.error === undefined && r.result?.isError !== true, `id=${id}: ${JSON.stringify(r).slice(0, 300)}`);
+  }
+});
+
+test('MCP: tools/list の inputSchema に新しい制約が出ている', async () => {
+  const { dir, configPath } = await fixtureRange();
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }], 1);
+  const tools = byId(res, 1).result.tools;
+  const props = (n) => tools.find((t) => t.name === n).inputSchema.properties;
+  assert.deepEqual([props('context_grill_search').k.type, props('context_grill_search').k.minimum, props('context_grill_search').k.maximum], ['integer', 1, 100]);
+  assert.deepEqual(props('context_grill_search').kinds.items.enum, ['code', 'doc', 'config', 'other', 'issue', 'pr', 'ticket']);
+  assert.deepEqual([props('context_grill_static_scan').limit.type, props('context_grill_static_scan').limit.minimum, props('context_grill_static_scan').limit.maximum], ['integer', 1, 1000]);
+  assert.deepEqual([props('context_grill_fetch').start.type, props('context_grill_fetch').start.minimum], ['integer', 1]);
+  assert.deepEqual([props('context_grill_fetch').end.type, props('context_grill_fetch').end.minimum], ['integer', 1]);
+  for (const n of ['context_grill_run_task', 'context_grill_evidence_pack']) {
+    assert.equal(props(n).instruction.minLength, 1, n);
+    assert.equal(props(n).instruction.pattern, '\\S', n);
+  }
 });
