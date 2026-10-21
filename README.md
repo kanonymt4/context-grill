@@ -574,7 +574,8 @@ zip -er context-grill-dist.zip context-grill-dist       # パスワードは別�
 - HTTP メソッドは `GET` / `HEAD` / `POST` のみ許可。`PUT` / `DELETE` / `PATCH` は例外になります
 - `--offline` または `security.networkMode: "offline"` で全通信を拒否できます（`search` / `scan` / `--dry-run` は動作。
   `local` ソースの `sync` も動きます。埋め込みを設定していると `sync` は終了コード 1 になりますが BM25 の索引は公開されます。
-  CLI では `--no-embed` を付けると成功します。クエリ埋め込みは黙って省略されるため、通常時と検索順位が変わることがあります）
+  CLI では `--no-embed` を付けると成功します。MCP の `sync` は、offline のために埋め込みが拒否されても同期結果を返し、
+  `embedding.ok: false` で知らせます。クエリ埋め込みを使えないときは BM25 のみで検索し、stderr に警告を出します（通常時と順位が変わることがあります））
 - `--dry-run` は LLM を呼ばずにプロンプト一式を出力するため、**何を送るかを送信前に全部読めます**
 - 設定値に環境変数の秘密の実値が展開されていた場合（`baseUrl` への混入など）、起動時に拒否します
 

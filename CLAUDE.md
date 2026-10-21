@@ -380,7 +380,8 @@ Confluence の HTML 変換より簡単。
     （省略時の応答が `2024-11-05` から変わった）。**版ごとの仕様の差（バッチの必須性など）は確認できて
     いない**（手元の資料は draft のスキーマだけ）。SDK 1.29 の stdio もバッチを拒否したまま 2025-03-26 に
     対応すると名乗っているので、同じ水準にした
-  - MCP が `resources/list` に応答するのに capability を宣言していない（黙って失われる入力が無いので見送り）。
+  - ~~MCP が `resources/list` に応答するのに capability を宣言していない~~ **2026-10-22 に `resources/list` の分岐を削除した（#57）。**
+    Claude Code が `resources/list` を呼ぶかは未実測のまま（呼ぶクライアントがあれば `-32601` になる）。
     2026-10-11 の実測: `resources/templates/list` と `resources/read` は `-32601` で、`resources/list` とだけ
     挙動が食い違う。SDK の Server は capability を宣言せずにハンドラを登録しようとすると throw する。
     Claude Code が `resources/list` を送るかは未実測（送らないなら削除が最小）
@@ -400,8 +401,9 @@ Confluence の HTML 変換より簡単。
     ✓ を出す／送信前の「未設定」ガードをすり抜けて本文が送られ 401 になる／GitHub の api モードで匿名なら
     成功する取得が 401 になる／`--offline` だと未設定のエラーが出ず誤設定が隠れる、`.env` の
     `toString=X` が黙って無視される。直し方は `util/misc.js` の `readEnv()`（`Object.hasOwn`）
-  - `kinds` の未知の値は 0 件で成功する（実測。`[""]` や大文字違いも `isError:false`）。説明文に `other` が
-    抜けている。CLI には `kinds` 相当のフラグが無く、`--kinds` は次の語を飲み込む
+  - ~~`kinds` の未知の値は 0 件で成功する（実測。`[""]` や大文字違いも `isError:false`）。説明文に `other` が
+    抜けている~~ **修正済み（#55）。** enum（code / doc / config / other / issue / pr / ticket）にして `-32602` にした。
+    CLI には `kinds` 相当のフラグが無く、`--kinds` は次の語を飲み込む（未対応のまま）
   - `test/unit.test.js` の HTTP リクエスト本文の Buffer 連結（ASCII だけなので実害は無いと見ている）。
     `context_grill_verify` の `result` は `type: object` の検査のみで中身は見ない（従来どおり）
 - **未確認（preset）**: Claude Code の対話モード（TUI）の `/` 補完でどう見えるか。デスクトップ
@@ -872,16 +874,22 @@ Confluence の HTML 変換より簡単。
     （125 字）だった。`node -e` のトップレベルより呼び出しが深いため。膨らむこと自体はサーバー内でも確認した
   - 10MB の行は、二乗の外挿から予想するほど遅くなかった
 
-  **残り（未修正。判断が要るもの）**
-  - git が `insteadOf` / proxy で許可リスト外に接続する（実測 1 接続。トークンの送信は未測定）。失敗した
-    git の clone / fetch が egress.log に残らない。`git ls-remote --get-url` で展開後の URL を検査する案がある
-  - `static_scan` の `limit:-1` は `slice(0,-1)` で件数がずれる／`search` の `k` が負・小数、`fetch` の
-    `start` / `end` の負・小数・上限なし（`end` を付けると 200 行の上限が効かない）。スキーマを integer と
-    最小値にする案
-  - `doctor` が `--offline` を無視する、環境変数の検査がオフラインの判定より先に来る、クエリ埋め込みが
-    黙って省略される、offline + 埋め込みで MCP の `sync` が isError になる、`privacy` の文言
-  - `embedQuery` は 401 でも 3 回送信する
-  - `resources/list`・`kinds` の enum（上の「未対応」参照）
+  **残り（2026-10-22 に、判断を受けて #52〜#57 で直した）**
+  - ~~git が `insteadOf` で許可リスト外に接続する／失敗した git が egress.log に残らない~~ 修正済み（#53）。
+    `git ls-remote --get-url` で展開後の URL を求めて許可リストで検査し、失敗も記録する。**proxy 環境変数
+    （`https_proxy`）は塞いでいない**（社内ネットワークで必要）。`insteadOf` で別ホストに書き換えている環境は、
+    そのホストを許可リストに入れる必要がある。トークンが書き換え先まで届くかは未測定のまま
+  - ~~`limit` / `k` / `start` / `end` の入力検査~~ 修正済み（#55）。`jsonschema.js` は `minimum` / `maximum` を
+    **検査していなかった**（指示書の前提が実装と食い違っていて、worker が着手前に止まって気づいた）ので追加した。
+    `k` 1〜100、`limit` 1〜1000、`start` / `end` は 1 以上の整数。`end` は `start` 以上で、`start` から 201 行まで
+  - ~~`doctor` が `--offline` を無視する／`privacy` の文言／「外部通信: N 回」に埋め込みが入らない~~ 修正済み（#54）
+  - ~~環境変数の検査がオフラインの判定より先に来る~~ 修正済み（#52）。外部通信ポリシーが未初期化のときは
+    事前検査を飛ばす（既存テストが `initEgress` なしで「未設定」を期待するため。CLI・MCP・pipeline・ingest は
+    先に `initEgress` を呼ぶ）
+  - ~~クエリ埋め込みが黙って省略される／`embedQuery` が 401 でも 3 回送信する~~ 修正済み（#56）
+  - ~~offline + 埋め込みで MCP の `sync` が isError になる~~ 修正済み（#57）。CLI の終了コードは変えていない
+  - 残り: `--kinds` が次の語を飲み込む（CLI に `kinds` 相当のフラグが無い）、Windows・Node 20.10 での挙動、
+    会話側のモデルが enum 外の `effort` を送るか（認証が切れていて未測定）
 
   **進め方で学んだこと**
   - Plan 型のエージェントは「ファイルを作れない」制約で測定を断ることがある。ファイルを作る測定は
@@ -889,3 +897,9 @@ Confluence の HTML 変換より簡単。
     対して測らせる
   - 変異確認で、`doctor` の bearer 判定を戻しても未検出だった（`bearerEnv` が prototype のキーのときにしか
     差が出ない）。差が出る入力のテストを足して検出できるようにした。最初の変異が通ったら、テストの入力を疑う
+  - 並行して複数の PR を進めるときは、`git worktree`（スクラッチ領域）を作って worker ごとに別の作業ツリーを渡す。
+    ファイルが重ならない PR は並行にできるが、必須チェックが strict なので、マージのたびに残りの PR が BEHIND になり、
+    `gh pr update-branch` と CI の再実行が要る（マージ手順は `mergepr.sh` 相当のスクリプトにまとめると楽）
+  - `macos-latest` の runner が、手順が 1 つも走らないままキャンセル（約 18 分）されることがあった（#54・#56）。
+    コードの失敗ではないので `gh run rerun <run> --failed` で再実行した。ログは取れない（steps が空）
+  - Bash の自動モード分類器が一時的に判定を返さない時間があった。読み取りの作業を先に進め、復旧後に再開した
