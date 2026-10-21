@@ -1,6 +1,8 @@
 import { queryTerms, tokenize } from './tokenize.js';
 import { bridgeTerms } from './glossary.js';
 import { embedQuery } from './embed.js';
+import { log } from '../util/log.js';
+import { redactMessage } from '../util/redact.js';
 
 /** Reciprocal Rank Fusion: 異なるスコア尺度を順位だけで融合する（スケール依存がなく再現性が高い） */
 export function rrf(lists, k = 60) {
@@ -77,6 +79,7 @@ export async function hybridSearch(store, opts) {
   const lists = [];
   const perQuery = h.perQueryTop ?? 60;
   const allTerms = new Map();
+  let embedWarned = false;
 
   for (const q of queries) {
     const terms = queryTerms(q);
@@ -90,7 +93,14 @@ export async function hybridSearch(store, opts) {
       try {
         const qv = await embedQuery(q, embedCfg);
         if (qv) lists.push(store.vectorSearch(qv, perQuery, filter));
-      } catch { /* 埋め込み失敗時は BM25 のみで継続（品質は落ちるが動作は保証） */ }
+      } catch (e) {
+        // 埋め込み失敗時は BM25 のみで継続する（動作は保証）。ただし順位が変わり得るので、1 回の検索につき 1 回だけ知らせる
+        if (!embedWarned) {
+          embedWarned = true;
+          const first = redactMessage(String(e?.message ?? e)).split('\n')[0];
+          log.warn(`クエリ埋め込みを使えないため BM25 のみで検索します: ${first}`);
+        }
+      }
     }
   }
 
