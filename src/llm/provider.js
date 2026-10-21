@@ -1,6 +1,6 @@
 import { retry, readEnv } from '../util/misc.js';
 import { log } from '../util/log.js';
-import { guardedFetch } from '../util/egress.js';
+import { guardedFetch, assertAllowed, getPolicy } from '../util/egress.js';
 import { redactMessage } from '../util/redact.js';
 import { extractJson } from './jsonschema.js';
 
@@ -44,6 +44,8 @@ function anthropicProvider(cfg) {
     model: cfg.model,
     supportsCache: true,
     async complete({ systemStatic, systemDynamic, cacheableUser, user, schema, schemaName = 'emit_report', maxTokens, model }) {
+      // 環境変数の「未設定」より先に、オフライン・許可外を判定する
+      if (getPolicy()) assertAllowed({ url: `${base}/v1/messages`, method: 'POST', purpose: 'llm' });
       const key = apiKey(cfg, 'ANTHROPIC_API_KEY');
       const system = [];
       if (systemStatic) system.push({ type: 'text', text: systemStatic, ...(cfg.promptCache ? { cache_control: { type: 'ephemeral' } } : {}) });
@@ -94,6 +96,8 @@ function openaiProvider(cfg) {
     model: cfg.model,
     supportsCache: false,
     async complete({ systemStatic, systemDynamic, cacheableUser, user, schema, schemaName = 'emit_report', maxTokens, model }) {
+      // 環境変数の「未設定」より先に、オフライン・許可外を判定する
+      if (getPolicy()) assertAllowed({ url: `${base}/chat/completions`, method: 'POST', purpose: 'llm' });
       const key = apiKey(cfg, compat ? 'LLM_API_KEY' : 'OPENAI_API_KEY');
       const sys = [systemStatic, systemDynamic].filter(Boolean).join('\n\n');
       const usr = [cacheableUser, user].filter(Boolean).join('\n\n');

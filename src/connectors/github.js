@@ -22,7 +22,7 @@ const DEFAULT_EXCLUDE = [
 
 // context-grill が実行してよい git サブコマンド。これ以外は実行しない。
 // 特に push / commit / add / checkout / clean / rm は allowWrite でも実行できない。
-const READ_ONLY_GIT = new Set(['rev-parse', 'config', 'log', 'show', 'ls-files', 'ls-tree', 'status', '--version']);
+const READ_ONLY_GIT = new Set(['rev-parse', 'ls-remote', 'config', 'log', 'show', 'ls-files', 'ls-tree', 'status', '--version']);
 const MANAGED_GIT = new Set(['clone', 'fetch', 'reset', 'remote', ...READ_ONLY_GIT]);
 const FORBIDDEN_GIT = new Set(['push', 'commit', 'add', 'rm', 'mv', 'checkout', 'switch', 'clean', 'merge', 'rebase', 'cherry-pick', 'tag', 'am', 'apply', 'stash', 'filter-branch', 'gc', 'prune', 'worktree', 'submodule', 'send-email', 'daemon']);
 
@@ -95,6 +95,27 @@ export async function assertManagedClone(dir, reposDir) {
   }
 }
 
+/**
+ * git が実際に接続する先を、通信せずに求めて許可リストで検査する。
+ * `git ls-remote --get-url` は insteadOf を展開した URL を返す。設定上のホストと
+ * 展開後のホストが違えば、その宛先も assertAllowed を通す（許可外なら EgressBlocked）。
+ * パースできない形（scp 風・ローカルパス・file:// など）はホストを特定できないので、
+ * 展開後の文字列そのものを渡して許可リストに照合させる（= 許可されない）。
+ */
+async function assertEffectiveHostAllowed(src, url, host, cwd) {
+  const effective = await git(['ls-remote', '--get-url', url], cwd, { src, allowWrite: false });
+  if (!effective || effective === url) return;
+  let effHost = null;
+  if (effective.includes('://')) {
+    try { effHost = new URL(effective).host.toLowerCase() || null; } catch { /* 下で effective を使う */ }
+  } else {
+    const m = /^(?:[^@/:]+@)?([^:/]+):/.exec(effective);   // scp 風: [user@]host:path
+    if (m) effHost = m[1].toLowerCase();
+  }
+  if (effHost === host) return;
+  assertAllowed({ host: effHost ?? effective, method: 'GET', purpose: `git:${src.id} (insteadOf)` });
+}
+
 /** clone/pull して作業ディレクトリのパスと HEAD sha を返す */
 async function ensureClone(src, reposDir) {
   // (A) ユーザーのローカル作業リポジトリを参照するモード: 完全に読み取り専用
@@ -120,23 +141,38 @@ async function ensureClone(src, reposDir) {
   await assertManagedClone(dir, reposDir);
   const url = `https://${host}/${src.repo}.git`;   // トークンを含めない
   const ref = src.ref || 'HEAD';
+  const cloned = fs.existsSync(path.join(dir, '.git'));
 
-  if (!fs.existsSync(path.join(dir, '.git'))) {
-    log.step(`clone ${src.repo} (${ref}) — 認証はヘッダ経由、URL には含めません`);
-    await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
-    const args = ['clone', '--filter=blob:none', '--depth', String(src.depth || 1), '--no-tags', '--single-branch'];
-    if (src.ref) args.push('--branch', src.ref);
-    args.push('--', url, dir);
-    await git(args, undefined, { src, allowWrite: true });
-    await fsp.writeFile(path.join(dir, MANAGED_MARKER), `created by context-grill at ${new Date().toISOString()}\n`);
-  } else {
-    log.step(`fetch ${src.repo} (${ref})`);
-    await git(['fetch', '--depth', String(src.depth || 1), '--no-tags', url, ref], dir, { src, allowWrite: true });
-    await git(['reset', '--hard', 'FETCH_HEAD'], dir, { src, allowWrite: true });
+  // ユーザーの gitconfig（url.<base>.insteadOf）で接続先が書き換わっていないかを、通信する前に検査する
+  await assertEffectiveHostAllowed(src, url, host, cloned ? dir : undefined);
+
+  try {
+    if (!cloned) {
+      log.step(`clone ${src.repo} (${ref}) — 認証はヘッダ経由、URL には含めません`);
+      await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+      const args = ['clone', '--filter=blob:none', '--depth', String(src.depth || 1), '--no-tags', '--single-branch'];
+      if (src.ref) args.push('--branch', src.ref);
+      args.push('--', url, dir);
+      await git(args, undefined, { src, allowWrite: true });
+      await fsp.writeFile(path.join(dir, MANAGED_MARKER), `created by context-grill at ${new Date().toISOString()}\n`);
+    } else {
+      log.step(`fetch ${src.repo} (${ref})`);
+      await git(['fetch', '--depth', String(src.depth || 1), '--no-tags', url, ref], dir, { src, allowWrite: true });
+      await git(['reset', '--hard', 'FETCH_HEAD'], dir, { src, allowWrite: true });
+    }
+    const sha = await git(['rev-parse', 'HEAD'], dir, { src, allowWrite: false });
+    auditExternal({ purpose: `git:${src.id}`, host, detail: `${src.repo}@${sha}` });
+    return { dir, sha, managed: true };
+  } catch (e) {
+    // 失敗も監査ログに残す（接続を試みた後に失敗した通信を「0 回」と見せない）。認証情報は残さない
+    const last = String(e?.message || e).split('\n').map((l) => l.trim()).filter(Boolean).pop() || '';
+    auditExternal({
+      purpose: `git:${src.id}`,
+      host: host.replace(/^.*@/, ''),   // host に userinfo が混ざっていても記録しない
+      detail: `failed: ${redactMessage(last)}`,
+    });
+    throw e;
   }
-  const sha = await git(['rev-parse', 'HEAD'], dir, { src, allowWrite: false });
-  auditExternal({ purpose: `git:${src.id}`, host, detail: `${src.repo}@${sha}` });
-  return { dir, sha, managed: true };
 }
 
 async function* walk(root, rel = '') {
