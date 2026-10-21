@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { sha256, retry, readEnv } from '../util/misc.js';
 import { log } from '../util/log.js';
-import { guardedFetch } from '../util/egress.js';
+import { guardedFetch, assertAllowed, getPolicy } from '../util/egress.js';
 import { redactMessage, redactText } from '../util/redact.js';
 
 /**
@@ -107,9 +107,11 @@ export function parseEmbeddingResponse(json, expected, dims) {
 }
 
 async function callEmbeddingApi(cfg, inputs, { inputType = 'document' } = {}) {
+  const { url, body } = buildEmbeddingRequest(cfg, inputs, inputType);
+  // 環境変数の「未設定」より先に、オフライン・許可外を判定する（guardedFetch も後で同じ検査をする）
+  if (getPolicy()) assertAllowed({ url, method: 'POST', purpose: 'embedding' });
   const key = readEnv(cfg.apiKeyEnv || 'OPENAI_API_KEY');
   if (!key) throw Object.assign(new Error(`埋め込み用の環境変数 ${cfg.apiKeyEnv} が未設定です`), { noRetry: true });
-  const { url, body } = buildEmbeddingRequest(cfg, inputs, inputType);
   const res = await guardedFetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
