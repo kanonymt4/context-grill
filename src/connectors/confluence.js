@@ -2,6 +2,7 @@ import { htmlToText } from '../util/html.js';
 import { isIncluded, readEnv } from '../util/misc.js';
 import { parseConfluenceUrl } from '../util/urls.js';
 import { log } from '../util/log.js';
+import { assertAllowed, getPolicy } from '../util/egress.js';
 import { makeDoc, httpJson, requireEnv } from './base.js';
 
 function authHeader(src) {
@@ -146,6 +147,8 @@ function buildCql(src) {
  */
 export async function syncConfluence(src, ctx) {
   const base = String(src.baseUrl).replace(/\/+$/, '');
+  // 環境変数の「未設定」より先に、オフライン・許可外を判定する（誤った案内を避ける）
+  if (getPolicy()) assertAllowed({ url: base, purpose: `confluence:${src.id}` });
   const headers = { Authorization: authHeader(src), Accept: 'application/json' };
   const purpose = `confluence:${src.id}`;
   const limit = src.limit ?? 500;

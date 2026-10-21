@@ -1,5 +1,6 @@
 import { adfToText } from '../util/html.js';
 import { log } from '../util/log.js';
+import { assertAllowed, getPolicy } from '../util/egress.js';
 import { makeDoc, httpJson, requireEnv } from './base.js';
 
 function authHeader(src) {
@@ -12,6 +13,8 @@ function authHeader(src) {
 
 export async function syncJira(src) {
   const base = String(src.baseUrl).replace(/\/+$/, '');
+  // 環境変数の「未設定」より先に、オフライン・許可外を判定する（誤った案内を避ける）
+  if (getPolicy()) assertAllowed({ url: base, method: 'POST', purpose: `jira:${src.id}` });
   const headers = { Authorization: authHeader(src), Accept: 'application/json', 'Content-Type': 'application/json' };
   const jql = src.jql || (src.projectKey ? `project = ${src.projectKey} ORDER BY updated DESC` : 'ORDER BY updated DESC');
   const limit = src.limit ?? 200;
