@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, paths, ensureDirs, DEFAULTS, findConfigPath } from './config.js';
-import { syncSources, buildIndex, allDocs } from './index/ingest.js';
+import { syncSources, buildIndex, allDocs, logEgressSummary } from './index/ingest.js';
 import { IndexStore } from './index/store.js';
 import { hybridSearch } from './index/search.js';
 import { citationLabel } from './index/pack.js';
@@ -14,7 +14,7 @@ import { runTask, resolveSourceIds } from './llm/pipeline.js';
 import { listTasks } from './tasks/index.js';
 import { validatePresets, listPresets, getPreset, resolvePreset, PresetError } from './presets.js';
 import { startMcpServer } from './mcp/server.js';
-import { initEgress, egressPlan } from './util/egress.js';
+import { initEgress, egressPlan, egressSummary } from './util/egress.js';
 import { SENSITIVE_DENY } from './util/sensitive.js';
 import { urlToSource } from './util/urls.js';
 import { log, setLevel } from './util/log.js';
@@ -390,7 +390,7 @@ async function cmdDoctor(flags) {
 
   let config = null;
   if (cfgPath) {
-    try { config = await loadConfig(cfgPath); checks.push({ name: '設定の妥当性', ok: true, detail: `${config.sources.length} ソース` }); }
+    try { config = await loadConfig(cfgPath); if (flags.offline) config.security.networkMode = 'offline'; checks.push({ name: '設定の妥当性', ok: true, detail: `${config.sources.length} ソース` }); }
     catch (e) { checks.push({ name: '設定の妥当性', ok: false, detail: e.message }); }
   }
   if (config) {
@@ -442,7 +442,10 @@ async function cmdDoctor(flags) {
     checks.push({ name: '索引', ok: IndexStore.exists(p.index), detail: IndexStore.exists(p.index) ? p.index : '未構築（context-grill sync）' });
     initEgress(config);
     const plan = egressPlan();
-    checks.push({ name: '送信許可ホスト', ok: true, detail: plan.hosts.map((h) => h.host).join(', ') || 'なし（オフライン相当）' });
+    const offline = plan.mode === 'offline';
+    checks.push({ name: 'ネットワークモード', ok: true, detail: offline ? 'offline（すべての外部通信を拒否）' : 'normal' });
+    // offline では許可リストがあっても全て拒否されるので、ホストを並べて誤解させない
+    checks.push({ name: '送信許可ホスト', ok: true, detail: offline ? 'なし（offline のため現在はすべて拒否）' : (plan.hosts.map((h) => h.host).join(', ') || 'なし（オフライン相当）') });
     checks.push({ name: '機密パス除外', ok: config.security.denySensitivePaths !== false, detail: config.security.denySensitivePaths !== false ? '有効' : '無効（非推奨）' });
     checks.push({ name: 'シークレット墨消し', ok: config.security.redactSecrets !== false, detail: config.security.redactSecrets !== false ? '有効' : '無効（非推奨）' });
   }
@@ -453,12 +456,34 @@ async function cmdDoctor(flags) {
 }
 
 // ---------------------------------------------------------------- sync
+/** 2 つの外部通信集計（egressSummary の戻り値）を足し合わせる */
+function mergeEgress(a, b) {
+  if (!a || !b) return a || b;
+  const byHost = {};
+  for (const src of [a.byHost, b.byHost]) {
+    for (const [h, v] of Object.entries(src)) {
+      byHost[h] = byHost[h] || { requests: 0, bytesSent: 0 };
+      byHost[h].requests += v.requests;
+      byHost[h].bytesSent += v.bytesSent;
+    }
+  }
+  return { requests: a.requests + b.requests, bytesSent: a.bytesSent + b.bytesSent, byHost, mode: b.mode };
+}
+
 async function cmdSync(flags) {
   const config = await load(flags);
   const only = resolveSourceIds(config, listOf(flags.source));
   await ensureDirs(config);
-  const report = await syncSources(config, { only, force: Boolean(flags.full) });
-  const manifest = await buildIndex(config, { embed: flags.embed !== false });
+  // 外部通信の回数は埋め込み（buildIndex）の分まで含めて最後に 1 回だけ出す。
+  // buildIndex は initEgress でカウンタを作り直すので、sync 側の集計を先に控えて足し合わせる
+  const report = await syncSources(config, { only, force: Boolean(flags.full), summary: false });
+  const syncEg = egressSummary();
+  let manifest;
+  try {
+    manifest = await buildIndex(config, { embed: flags.embed !== false });
+  } finally {
+    logEgressSummary(mergeEgress(syncEg, egressSummary()));
+  }
   const out = { sources: report, index: { chunks: manifest.N, terms: manifest.terms, dims: manifest.dims, indexKey: manifest.indexKey } };
   if (flags.json) process.stdout.write(JSON.stringify(out, null, 2) + '\n');
   else process.stdout.write(`同期完了: ${report.filter((r) => r.ok).length}/${report.length} ソース, ${manifest.N} チャンク\n`);
@@ -770,12 +795,13 @@ async function cmdPrivacy(flags) {
   const w = process.stdout.write.bind(process.stdout);
   w(`\nネットワークモード: ${data.networkMode}${data.networkMode === 'offline' ? '（すべての外部通信を拒否）' : ''}\n`);
   w(`監査ログ: ${data.auditLog || '無効'}\n`);
-  w('\n■ 送信が許可されているホスト（これ以外へは送信不可）\n');
+  const offline = data.networkMode === 'offline';
+  w(`\n■ 送信が許可されているホスト（${offline ? 'offline のため現在はすべて拒否' : 'これ以外へは送信不可'}）\n`);
   if (!data.allowedHosts.length) w('  (なし)\n');
   for (const h of data.allowedHosts) w(`  ${h.host.padEnd(34)} ${h.reason}\n`);
   w('\n■ 外部へ出るデータ\n');
   for (const o of data.outbound) {
-    w(`  ${o.enabled ? '送信あり' : '送信なし'}  ${o.target}\n        内容: ${o.sends}\n`);
+    w(`  ${offline ? '送信なし（offline）' : (o.enabled ? '送信あり' : '送信なし')}  ${o.target}\n        内容: ${o.sends}\n`);
     if (o.gate) w(`        制御: ${o.gate}\n`);
   }
   w('\n■ ローカル書き込み先\n');
