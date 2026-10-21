@@ -1,4 +1,4 @@
-// 依存ゼロの JSON Schema サブセット検証器（type/required/properties/items/enum/minLength/minItems/additionalProperties）
+// 依存ゼロの JSON Schema サブセット検証器（type/required/properties/items/enum/minLength/maxLength/pattern/minItems/maxItems/minimum/maximum/additionalProperties）
 export function validate(schema, value, pathStr = '$') {
   const errs = [];
   if (!schema) return errs;
@@ -12,6 +12,11 @@ export function validate(schema, value, pathStr = '$') {
   }
   if (schema.enum && !schema.enum.includes(value)) {
     errs.push(`${pathStr}: 値 ${JSON.stringify(value)} は許可されていません (許可: ${schema.enum.join(', ')})`);
+  }
+  // 数値のときだけ範囲を見る（文字列や NaN / Infinity は type の検査に任せる）
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    if (schema.minimum !== undefined && value < schema.minimum) errs.push(`${pathStr}: ${schema.minimum} 以上にしてください`);
+    if (schema.maximum !== undefined && value > schema.maximum) errs.push(`${pathStr}: ${schema.maximum} 以下にしてください`);
   }
   if (typeof value === 'string') {
     if (schema.minLength !== undefined && value.length < schema.minLength) errs.push(`${pathStr}: ${schema.minLength} 文字以上が必要です`);

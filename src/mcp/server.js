@@ -56,9 +56,9 @@ const TOOLS = [
       type: 'object',
       properties: {
         query: { type: 'string', description: '検索クエリ（日本語可・コード識別子可）' },
-        k: { type: 'number', description: '返す件数（既定 12）' },
+        k: { type: 'integer', minimum: 1, maximum: 100, description: '返す件数（1〜100、既定 12）' },
         sources: { type: 'array', items: { type: 'string' }, description: '対象ソース ID を限定' },
-        kinds: { type: 'array', items: { type: 'string' }, description: 'code/doc/issue/pr/ticket/config で限定' },
+        kinds: { type: 'array', items: { type: 'string', enum: ['code', 'doc', 'config', 'other', 'issue', 'pr', 'ticket'] }, description: 'code/doc/config/other/issue/pr/ticket で限定（other は拡張子で分類できないファイル）' },
       },
       required: ['query'], additionalProperties: false,
     },
@@ -69,7 +69,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        instruction: { type: 'string', description: '調査したい内容。検索クエリはこの文から機械的に組み立てられるため、調べたい概念を「」や "" で囲むと、それぞれが独立したクエリになり証拠が広く集まる（囲まないと実質4クエリで頭打ち）。ファイル名や識別子は囲まなくても抽出される' },
+        instruction: { type: 'string', minLength: 1, pattern: '\\S', description: '調査したい内容。検索クエリはこの文から機械的に組み立てられるため、調べたい概念を「」や "" で囲むと、それぞれが独立したクエリになり証拠が広く集まる（囲まないと実質4クエリで頭打ち）。ファイル名や識別子は囲まなくても抽出される' },
         task: { type: 'string', enum: ['spec', 'bug', 'security', 'static', 'design'], description: 'タスク種別（既定 spec）' },
         effort: { type: 'string', enum: ['low', 'normal', 'deep'], description: '深さ（既定 normal）' },
         sources: { type: 'array', items: { type: 'string' } },
@@ -98,7 +98,7 @@ const TOOLS = [
       properties: {
         sources: { type: 'array', items: { type: 'string' } },
         severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low', 'info'] },
-        limit: { type: 'number' },
+        limit: { type: 'integer', minimum: 1, maximum: 1000, description: '返す検出の件数（1〜1000、既定 200）' },
       },
       additionalProperties: false,
     },
@@ -113,7 +113,8 @@ const TOOLS = [
         evidence_id: { type: 'string', description: '例: E3' },
         source: { type: 'string' },
         path: { type: 'string' },
-        start: { type: 'number' }, end: { type: 'number' },
+        start: { type: 'integer', minimum: 1, description: '開始行（1 始まり、既定 1）' },
+        end: { type: 'integer', minimum: 1, description: '終了行。start 以上にする。付けても start から 201 行を超えない（既定の窓と同じ）' },
       },
       additionalProperties: false,
     },
@@ -124,7 +125,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        instruction: { type: 'string' },
+        instruction: { type: 'string', minLength: 1, pattern: '\\S' },
         task: { type: 'string', enum: ['spec', 'bug', 'security', 'static', 'design'] },
         effort: { type: 'string', enum: ['low', 'normal', 'deep'] },
         sources: { type: 'array', items: { type: 'string' } },
@@ -518,7 +519,7 @@ export async function startMcpServer({ configPath, offline } = {}) {
         const only = normalizeSources(args.sources);
         const kinds = args.kinds?.length ? args.kinds : null;
         const results = await hybridSearch(s, {
-          queries: [args.query], config, k: args.k || 12,
+          queries: [args.query], config, k: args.k ?? 12,
           filter: (m) => (!only || only.includes(m.sourceId)) && (!kinds || kinds.includes(m.kind)),
           kindPriors: {}, sourcePriority: {},
         });
@@ -592,7 +593,7 @@ export async function startMcpServer({ configPath, offline } = {}) {
       case 'context_grill_static_scan': {
         const docs = await allDocs(config, normalizeSources(args.sources));
         const findings = scanAll(docs, { minSeverity: args.severity || 'low' });
-        const limit = args.limit || 200;
+        const limit = args.limit ?? 200;
         return textResult({
           summary: summarize(findings),
           findings: findings.slice(0, limit),
@@ -614,8 +615,10 @@ export async function startMcpServer({ configPath, offline } = {}) {
         const doc = docs.find((d) => d.path === args.path && (!onlySource || onlySource.includes(d.sourceId)));
         if (!doc) return textResult({ error: `パスが見つかりません: ${args.path}` });
         const lines = doc.text.split('\n');
-        const start = Math.max(1, args.start || 1);
-        const end = Math.min(lines.length, args.end || Math.min(lines.length, start + 200));
+        const start = args.start ?? 1;
+        if (args.end !== undefined && args.end < start) throw new Error('end は start 以上にしてください');
+        // end を付けても、既定の窓（start から 201 行）を超えない
+        const end = Math.min(lines.length, args.end ?? start + 200, start + 200);
         return textResult({
           source: doc.sourceId, path: doc.path, url: doc.url, version: doc.version,
           lines: `${start}-${end}`, total_lines: lines.length,
