@@ -560,9 +560,10 @@ zip -er context-grill-dist.zip context-grill-dist       # パスワードは別�
 
 すべての外部通信は単一のゲート（`src/util/egress.js`）を通ります。
 **設定から導出したホスト以外へは、送信そのものが例外になります。**
-ただし `git clone` / `fetch` は外部の `git` コマンドが通信するため、許可の検査は設定上のホストに対して行われ、
-ユーザーの gitconfig（`url.<base>.insteadOf`）や `https_proxy` で実際の接続先が変わる場合は検査されません
-（実測、2026-10-11。`--offline` ではどちらも接続しません）。
+ただし `git clone` / `fetch` は外部の `git` コマンドが通信します。ユーザーの gitconfig の `url.<base>.insteadOf` で
+接続先が書き換わる場合は、通信せずに展開後の URL を求め（`git ls-remote --get-url`）、そのホストも許可リストで検査します。
+**`https_proxy` などの proxy 環境変数で変わる接続先は検査されません**（社内ネットワークで必要なため。実測、2026-10-11。
+`--offline` ではどちらも接続しません）。失敗した `git` も `egress.log` に残ります。
 
 | 通信 | 送るもの | 既定 |
 | --- | --- | --- |
@@ -616,7 +617,7 @@ service-account*.json / secrets.* / *.tfstate* / .terraform/** / .htpasswd / *.g
 
 git については、実行しうるサブコマンドを許可リストで固定しています。
 
-| 実際に実行される | `clone` / `fetch` / `reset --hard` / `rev-parse` の 4 つのみ |
+| 実際に実行される | `clone` / `fetch` / `ls-remote --get-url`（通信しない読み取り専用） / `reset --hard` / `rev-parse` の 5 つのみ |
 | --- | --- |
 | **到達不能** | `push` `commit` `add` `rm` `checkout` `switch` `clean` `merge` `rebase` `stash` `tag` `submodule` ほか |
 
@@ -674,4 +675,4 @@ npm test        # node --test
 - **preset** — `presets` の定義の検証（task / effort / sources / 引数・プレースホルダの形式）と解決、CLI の `run` / `presets`（引数の境界値、フラグの順序、エラー文）、MCP の `prompts/list` / `prompts/get`、`allowLlmUpload=false` の安全ゲートを迂回できないこと
 - **入力検査** — CLI の値なしオプションと未知の値（`--source` / `--severity` / `-k` / タスク / effort）の拒否、実行オプション（タスク・effort・ソース id）を索引を開く前に検証すること、設定読み込み時の `__proto__` の拒否と未定義の環境変数（`${VAR}`）の拒否
 - **MCP** — プロトコル処理（不正な JSON・method への耐性）、ツール引数の `inputSchema` 検査（未知のキー・型違い・必須欠落・`__proto__`）、ストアの二重オープンや `sync` との競合、`--offline` の維持
-- **構造的保証** — `src/` 内に egress ゲートを迂回する `fetch` が存在しないこと、git のサブコマンドが 4 つだけであること（将来の変更で穴が空くのを防ぐ）
+- **構造的保証** — `src/` 内に egress ゲートを迂回する `fetch` が存在しないこと、git のサブコマンドが 5 つだけであること（将来の変更で穴が空くのを防ぐ）
