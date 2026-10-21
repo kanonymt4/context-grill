@@ -13,7 +13,7 @@ import { validate } from '../llm/jsonschema.js';
 import { runTaskWithStore, resolveTask, resolveEffort, resolveSourceIds } from '../llm/pipeline.js';
 import { listPresets, validatePresets, resolvePreset, getPreset, PresetError } from '../presets.js';
 import { shortHash } from '../util/misc.js';
-import { initEgress, egressPlan } from '../util/egress.js';
+import { initEgress, egressPlan, getPolicy } from '../util/egress.js';
 import { redactText } from '../util/redact.js';
 
 // 新しい順。先頭が最新で、交渉に失敗したときの既定。
@@ -643,7 +643,21 @@ export async function startMcpServer({ configPath, offline } = {}) {
         // ファイルを rename の宛先にできず EPERM になる。作り直した索引を publish する
         // 側が自分で握っているハンドルに阻まれる形なので、リトライしても回復しない。
         await invalidateStore();
-        const manifest = await buildIndex(config, {});
+        let manifest;
+        try {
+          manifest = await buildIndex(config, {});
+        } catch (e) {
+          // offline のため埋め込みの送信がブロックされた場合だけ握る。buildIndex は失敗前に
+          // BM25 の索引を公開済みなので、同期結果（report）を失わずに返す。
+          // 同意不足・許可外ホストなど、offline 以外の失敗は従来どおりエラーにする。
+          if (e?.name !== 'EgressBlocked' || getPolicy()?.mode !== 'offline') throw e;
+          let index = null;
+          try {
+            const s = await IndexStore.open(paths(config).index, { postings: false });
+            try { index = { chunks: s.stats().chunks, indexKey: s.stats().indexKey }; } finally { await s.close(); }
+          } catch { /* 索引が開けなければ null */ }
+          return textResult({ sources: report, index, embedding: { ok: false, error: redactText(String(e.message).split('\n')[0]).text } });
+        }
         return textResult({ sources: report, index: { chunks: manifest.N, indexKey: manifest.indexKey } });
       }
       default:
@@ -721,7 +735,6 @@ export async function startMcpServer({ configPath, offline } = {}) {
       if (method === 'notifications/initialized' || method === 'notifications/cancelled') return;
       if (method === 'ping') return ok(id, {});
       if (method === 'tools/list') return ok(id, { tools: toolList });
-      if (method === 'resources/list') return ok(id, { resources: [] });
       if (method === 'prompts/list') return ok(id, { prompts: promptList() });
       if (method === 'prompts/get') {
         if (id === undefined) return;
