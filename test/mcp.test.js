@@ -1312,3 +1312,84 @@ test('MCP: tools/list の inputSchema に新しい制約が出ている', async 
     assert.equal(props(n).instruction.pattern, '\\S', n);
   }
 });
+
+// --- resources の扱いと、offline + 埋め込みの sync ---
+
+test('MCP: resources 系メソッドはすべて -32601（capability を宣言していないものに応答しない）', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [
+    { jsonrpc: '2.0', id: 1, method: 'resources/list' },
+    { jsonrpc: '2.0', id: 2, method: 'resources/templates/list' },
+    { jsonrpc: '2.0', id: 3, method: 'resources/read', params: { uri: 'x://y' } },
+  ], 3);
+  for (const id of [1, 2, 3]) {
+    const r = res.responses.find((x) => x.id === id);
+    assert.ok(r, `id=${id} の応答が無い`);
+    assert.equal(r.error?.code, -32601, `id=${id}: ${JSON.stringify(r)}`);
+  }
+});
+
+/** local ソース + 埋め込み（到達不能な 127.0.0.1:1）の設定を置く。 */
+async function embedFixture({ allowEmbeddingUpload, baseUrl = 'http://127.0.0.1:1/v1' }) {
+  const { dir } = await fixture({ build: false });
+  const keyEnv = 'CG_MCP_EMBED_TEST_KEY';
+  const configPath = path.join(dir, 'embed.config.json');
+  await fsp.writeFile(configPath, JSON.stringify({
+    project: 'mcp-embed',
+    sources: [{ id: 'repo', type: 'local', path: dir, include: ['src/**'] }],
+    llm: { provider: 'dry', model: 'dry' },
+    retrieval: { embedding: { provider: 'openai-compat', model: 'm', dimensions: 8, baseUrl, apiKeyEnv: keyEnv } },
+    security: { allowEmbeddingUpload },
+  }));
+  return { dir, configPath, env: { [keyEnv]: 'dummy-not-a-real-key' } };
+}
+
+test('MCP: --offline + 埋め込み設定の sync は report と公開済みの索引統計を返し、embedding.ok=false を添える', async () => {
+  const { dir, configPath, env } = await embedFixture({ allowEmbeddingUpload: true });
+  const res = await rpcBin(dir, ['--offline', 'mcp', '-c', configPath], [INIT, call(2, 'context_grill_sync', {})], 2,
+    { env, then: [call(3, 'context_grill_search', { query: 'refundPayment' })] });
+  const sync = res.responses.find((r) => r.id === 2);
+  assert.ok(sync, 'sync の応答が無い: ' + res.stderr.slice(-300));
+  assert.notEqual(sync.result?.isError, true, 'sync が isError になった: ' + JSON.stringify(sync.result).slice(0, 300));
+  const body = JSON.parse(sync.result.content[0].text);
+  assert.equal(body.sources[0].ok, true);
+  assert.equal(body.embedding?.ok, false);
+  assert.ok(typeof body.embedding?.error === 'string' && body.embedding.error.length > 0 && !body.embedding.error.includes('\n'));
+  assert.ok(body.index && body.index.chunks >= 1, JSON.stringify(body.index));
+  assert.ok(body.index.indexKey);
+  const search = res.responses.find((r) => r.id === 3);
+  assert.ok(search, 'search の応答が無い');
+  assert.notEqual(search.result?.isError, true, JSON.stringify(search.result).slice(0, 300));
+  assert.match(search.result.content[0].text, /refundPayment/);
+});
+
+test('MCP: allowEmbeddingUpload=false の sync は offline でも従来どおり isError（同意不足は握らない）', async () => {
+  const { dir, configPath, env } = await embedFixture({ allowEmbeddingUpload: false });
+  const res = await rpcBin(dir, ['--offline', 'mcp', '-c', configPath], [INIT, call(2, 'context_grill_sync', {})], 2, { env });
+  const sync = res.responses.find((r) => r.id === 2);
+  assert.ok(sync, 'sync の応答が無い: ' + res.stderr.slice(-300));
+  assert.equal(sync.result?.isError, true, JSON.stringify(sync.result).slice(0, 300));
+  assert.match(sync.result.content[0].text, /allowEmbeddingUpload/);
+});
+
+test('MCP: offline でない EgressBlocked（宛先ホストを解決できない）は握らず isError のまま', async () => {
+  // スキーム無しの baseUrl は URL として解釈できず、normal モードでも EgressBlocked になる
+  const { dir, configPath, env } = await embedFixture({ allowEmbeddingUpload: true, baseUrl: '127.0.0.1:1/v1' });
+  const res = await rpcBin(dir, ['mcp', '-c', configPath], [INIT, call(2, 'context_grill_sync', {})], 2, { env });
+  const sync = res.responses.find((r) => r.id === 2);
+  assert.ok(sync, 'sync の応答が無い: ' + res.stderr.slice(-300));
+  assert.equal(sync.result?.isError, true, JSON.stringify(sync.result).slice(0, 300));
+  assert.match(sync.result.content[0].text, /宛先ホストを解決できません/);
+});
+
+test('MCP: 通常の sync の応答に embedding キーは無い', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const res = await rpcBin(dir, ['mcp', '-c', configPath], [INIT, call(2, 'context_grill_sync', {})], 2);
+  const sync = res.responses.find((r) => r.id === 2);
+  assert.ok(sync, 'sync の応答が無い: ' + res.stderr.slice(-300));
+  assert.notEqual(sync.result?.isError, true, JSON.stringify(sync.result).slice(0, 300));
+  const body = JSON.parse(sync.result.content[0].text);
+  assert.ok(!('embedding' in body), JSON.stringify(body));
+  assert.ok(body.index.chunks >= 1);
+});
