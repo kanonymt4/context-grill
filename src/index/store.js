@@ -6,6 +6,8 @@ import { tokenize } from './tokenize.js';
 const SHARDS = 32;
 const FORMAT_VERSION = 2;   // 2: ファイル名に世代番号を持たせた（1 とは互換性がない）
 
+const MAX_GEN_TRIES = 1000;   // 世代番号の確保を諦めるまでの試行回数
+
 const pad = (g) => String(g).padStart(4, '0');
 
 /**
@@ -53,12 +55,15 @@ export function latestGen(dir) {
   return max;
 }
 
-/** 指定した世代以外のファイルを消す。消せなくても致命的ではないので握り潰す。 */
+/**
+ * 指定した世代より古いファイルを消す。消せなくても致命的ではないので握り潰す。
+ * keep より新しい世代は、並行する別の builder が作業中かもしれないので消さない。
+ */
 async function pruneGenerations(dir, keep) {
   const kill = async (base, name) => {
     const m = /^(?:manifest|docs\.meta|df|lens)\.(\d{4})\.json(?:\.tmp)?$|^docs\.(\d{4})\.txt$|^vectors\.(\d{4})\.bin$/.exec(name);
     const g = m && (m[1] ?? m[2] ?? m[3]);
-    if (g === undefined || g === null || Number(g) === keep) return;
+    if (g === undefined || g === null || Number(g) >= keep) return;
     try { await fsp.unlink(path.join(base, name)); } catch (e) { /* 使用中なら次回に回す */ }
   };
   try {
@@ -68,7 +73,7 @@ async function pruneGenerations(dir, keep) {
   try {
     await Promise.all((await fsp.readdir(pd)).map(async (n) => {
       const m = /^(\d{4})\.\d{1,2}\.json$/.exec(n);
-      if (!m || Number(m[1]) === keep) return;
+      if (!m || Number(m[1]) >= keep) return;
       try { await fsp.unlink(path.join(pd, n)); } catch (e) { /* 同上 */ }
     }));
   } catch (e) { /* postings が無い */ }
@@ -96,9 +101,20 @@ export class IndexBuilder {
   }
   async start() {
     await fsp.mkdir(path.join(this.dir, 'postings'), { recursive: true });
-    this.L = layout(this.dir, (latestGen(this.dir) ?? 0) + 1);
-    // 世代番号つきの名前はまだ誰も開いていないので、tmp を経由せず直接書ける
-    this.fd = fs.openSync(this.L.docs, 'w');
+    // 並行する builder（別プロセスを含む）が同じ世代を取り合うので、docs を排他的に作って
+    // 確保する。EEXIST なら他の builder が使用中（またはクラッシュの残骸）なので次の世代へ進む。
+    let gen = (latestGen(this.dir) ?? 0) + 1;
+    for (let tries = 0; ; tries++, gen++) {
+      if (tries >= MAX_GEN_TRIES) throw new Error(`索引の世代番号を確保できませんでした (${this.dir})`);
+      const L = layout(this.dir, gen);
+      try {
+        this.fd = fs.openSync(L.docs, 'wx');
+        this.L = L;
+        return;
+      } catch (e) {
+        if (e.code !== 'EEXIST') throw e;
+      }
+    }
   }
   add(chunk) {
     const idx = this.meta.length;
