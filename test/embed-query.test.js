@@ -78,6 +78,7 @@ function fakeStore() {
 
 function searchConfig(embedding) {
   return {
+    security: { allowEmbeddingUpload: true },
     retrieval: {
       embedding,
       glossaryBridge: false,
