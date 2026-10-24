@@ -103,31 +103,74 @@ function audit(entry) {
   } catch { /* 監査ログの失敗で本処理は止めない */ }
 }
 
-/** 唯一の fetch ラッパー。src/ 内で fetch() を直接呼ぶことは禁止。 */
-export async function guardedFetch(url, init = {}, { purpose = 'unknown', timeoutMs = 60000 } = {}) {
-  const method = (init.method || 'GET').toUpperCase();
-  const host = assertAllowed({ url, method, purpose });
-  const bytes = init.body ? Buffer.byteLength(typeof init.body === 'string' ? init.body : JSON.stringify(init.body)) : 0;
-  POLICY.counters.requests++;
-  POLICY.counters.bytesSent += bytes;
-  POLICY.counters.byHost[host] = POLICY.counters.byHost[host] || { requests: 0, bytesSent: 0 };
-  POLICY.counters.byHost[host].requests++;
-  POLICY.counters.byHost[host].bytesSent += bytes;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_REDIRECTS = 5;
 
-  const started = Date.now();
+/**
+ * 唯一の fetch ラッパー。src/ 内で fetch() を直接呼ぶことは禁止。
+ * リダイレクトは自前で処理する。fetch の既定の追従に任せると、許可外のホストへ本文とヘッダ
+ * （API キーなど）がそのまま送られるため。追従するのは同じ origin への転送だけ。
+ */
+export async function guardedFetch(url, init = {}, { purpose = 'unknown', timeoutMs = 60000 } = {}) {
   const ctrl = new AbortController();
   const to = setTimeout(() => ctrl.abort(), timeoutMs);
-  let status = 0;
+  let curUrl = String(url);
+  let curInit = init;
+  let hopPurpose = purpose;
   try {
-    const res = await fetch(url, { ...init, signal: ctrl.signal });
-    status = res.status;
-    return res;
+    for (let hop = 0; ; hop++) {
+      const method = (curInit.method || 'GET').toUpperCase();
+      const host = assertAllowed({ url: curUrl, method, purpose: hopPurpose });
+      const bytes = curInit.body ? Buffer.byteLength(typeof curInit.body === 'string' ? curInit.body : JSON.stringify(curInit.body)) : 0;
+      POLICY.counters.requests++;
+      POLICY.counters.bytesSent += bytes;
+      POLICY.counters.byHost[host] = POLICY.counters.byHost[host] || { requests: 0, bytesSent: 0 };
+      POLICY.counters.byHost[host].requests++;
+      POLICY.counters.byHost[host].bytesSent += bytes;
+
+      const started = Date.now();
+      let status = 0;
+      let res;
+      try {
+        // redirect は呼び出し元の指定で上書きさせない
+        res = await fetch(curUrl, { ...curInit, redirect: 'manual', signal: ctrl.signal });
+        status = res.status;
+      } finally {
+        // クエリ文字列は記録しない（トークンが載る可能性があるため）
+        let pathOnly = curUrl;
+        try { const u = new URL(curUrl); pathOnly = u.origin + u.pathname; } catch { /* noop */ }
+        audit({ ts: new Date().toISOString(), purpose: hopPurpose, method, url: pathOnly, bytesSent: bytes, status, ms: Date.now() - started });
+      }
+
+      const loc = REDIRECT_STATUSES.has(res.status) ? res.headers.get('location') : null;
+      if (!loc) return res; // リダイレクトでない、または Location が無い応答はそのまま返す
+
+      let next;
+      try { next = new URL(loc, curUrl); } catch { return res; }
+      // 転送先でも許可リストを必ず通す（userinfo・クエリはメッセージに出さない）
+      assertAllowed({ url: next.href, method, purpose: `${purpose} (redirect)` });
+      if (next.origin !== new URL(curUrl).origin) {
+        throw new EgressBlocked(
+          `リダイレクトを拒否しました: 転送先 ${next.host} は元の宛先と origin が異なります (${purpose})。` +
+          '許可リストにあるホストでも、別ホストへのリダイレクトは追従しません。転送先を直接指定してください。');
+      }
+      if (hop >= MAX_REDIRECTS) {
+        throw new EgressBlocked(`リダイレクトの回数が上限 (${MAX_REDIRECTS} 回) を超えました: ${next.host} (${purpose})`);
+      }
+      // fetch 標準と同じ扱い: 303 は GET へ、301/302 は POST のとき GET へ。307/308 は維持する
+      if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === 'POST')) {
+        const headers = new Headers(curInit.headers || {});
+        for (const h of ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location']) headers.delete(h);
+        const { body: _body, ...rest } = curInit;
+        curInit = { ...rest, method: method === 'HEAD' ? 'HEAD' : 'GET', headers };
+      }
+      curUrl = next.href;
+      hopPurpose = `${purpose} (redirect)`;
+      // 本文は読まずに捨てる（接続を解放する）
+      try { await res.body?.cancel(); } catch { /* noop */ }
+    }
   } finally {
     clearTimeout(to);
-    // クエリ文字列は記録しない（トークンが載る可能性があるため）
-    let pathOnly = url;
-    try { const u = new URL(url); pathOnly = u.origin + u.pathname; } catch { /* noop */ }
-    audit({ ts: new Date().toISOString(), purpose, method, url: pathOnly, bytesSent: bytes, status, ms: Date.now() - started });
   }
 }
 

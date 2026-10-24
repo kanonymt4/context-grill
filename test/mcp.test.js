@@ -13,6 +13,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /** probe が IndexStore.open() 1 回につき stderr に出す印。 */
 const OPEN_MARK = '__CONTEXT_GRILL_OPEN__';
+/** probe が rename に入るたびに stderr に出す印（直後に、その時点で実行中の rename の数が続く）。 */
+const INFLIGHT_MARK = '__CONTEXT_GRILL_INFLIGHT__';
 
 /**
  * MCP サーバーを子プロセスで起動する。
@@ -22,7 +24,7 @@ const OPEN_MARK = '__CONTEXT_GRILL_OPEN__';
  * （manifest / docs.meta / df / lens の JSON 読み込み）は fd を使わないため、
  * 既存カウンタでは二重オープンを検知できない。
  */
-async function writeProbe(dir, configPath, { openDelayMs = 0 } = {}) {
+async function writeProbe(dir, configPath, { openDelayMs = 0, renameDelayMs = 0 } = {}) {
   const probe = path.join(dir, 'probe.mjs');
   // 終了処理に依存せず、open() のたびに stderr へ印を出す。
   //
@@ -36,6 +38,13 @@ async function writeProbe(dir, configPath, { openDelayMs = 0 } = {}) {
 import { IndexStore } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'src/index/store.js')).href)};
 const orig = IndexStore.open.bind(IndexStore);
 let opens = 0;
+if (${Number(renameDelayMs)} > 0) {
+  // 索引の publish（fsp.rename）を遅らせ、入った時点で実行中の rename の数を stderr に出す（sync の並行度の観測用）。
+  const fsp = (await import('node:fs/promises')).default;
+  const origRename = fsp.rename.bind(fsp);
+  let inflight = 0;
+  fsp.rename = async (...a) => { inflight++; process.stderr.write('\\n' + ${JSON.stringify(INFLIGHT_MARK)} + inflight + '\\n'); await new Promise((r) => setTimeout(r, ${Number(renameDelayMs)})); try { return await origRename(...a); } finally { inflight--; } };
+}
 IndexStore.open = async (d) => { opens++; process.stderr.write('\\n' + ${JSON.stringify(OPEN_MARK)} + '\\n'); const s = await orig(d); if (opens === 1 && ${Number(openDelayMs)} > 0) await new Promise((r) => setTimeout(r, ${Number(openDelayMs)})); return s; };
 const { startMcpServer } = await import(${JSON.stringify(pathToFileURL(path.join(ROOT, 'src/mcp/server.js')).href)});
 startMcpServer({ configPath: ${JSON.stringify(configPath)} });
@@ -1392,4 +1401,175 @@ test('MCP: 通常の sync の応答に embedding キーは無い', async () => {
   const body = JSON.parse(sync.result.content[0].text);
   assert.ok(!('embedding' in body), JSON.stringify(body));
   assert.ok(body.index.chunks >= 1);
+});
+
+// ---- pack_id の衝突・通知の扱い・fetch/verify の失敗の形・packs の上限・sync の直列化 ----
+// evidence_pack の pack_id は instruction + task + indexKey + Date.now() のハッシュで、sources などを含まず、
+// 同じ instruction を同時に呼ぶと同じ ID になって pack を上書きし合っていた。
+
+/** 同じ語を含む 2 つのソース（a / b）を持つ索引済みの設定を置く。 */
+async function fixtureTwoSources() {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-mcp-two-'));
+  for (const id of ['a', 'b']) {
+    await fsp.mkdir(path.join(dir, id), { recursive: true });
+    await fsp.writeFile(path.join(dir, id, `login-${id}.js`),
+      `// login handler of ${id}\nfunction login_${id}(user) { return 'MARKER_${id.toUpperCase()}'; }\n`);
+  }
+  const configPath = path.join(dir, 'context-grill.config.json');
+  await fsp.writeFile(configPath, JSON.stringify({
+    project: 'mcp-two',
+    sources: ['a', 'b'].map((id) => ({ id, type: 'local', path: path.join(dir, id), include: ['**'] })),
+    llm: { provider: 'dry', model: 'dry' },
+  }));
+  const config = await loadConfig(configPath);
+  await syncSources(config, {});
+  await buildIndex(config, { embed: false });
+  return { dir, configPath };
+}
+
+test('MCP: 同じ instruction で sources だけ違う evidence_pack を同時に送っても pack_id は衝突せず、自分の証拠を返す', async () => {
+  const { dir, configPath } = await fixtureTwoSources();
+  const probe = await writeProbe(dir, configPath);
+  const N = 10;
+  const wanted = Array.from({ length: N }, (_, i) => (i % 2 === 0 ? 'a' : 'b'));
+  const packs = await rpc(probe, wanted.map((s, i) => call(i + 1, 'context_grill_evidence_pack', { instruction: 'login', sources: [s] })), N);
+  const ids = wanted.map((_, i) => JSON.parse(textOf(byId(packs, i + 1))).pack_id);
+  assert.equal(new Set(ids).size, N, `pack_id が衝突している: ${ids.join(', ')}`);
+  const fetched = await rpc(probe, ids.map((pid, i) => call(i + 1, 'context_grill_fetch', { pack_id: pid, evidence_id: 'E1' })), N);
+  wanted.forEach((s, i) => {
+    const r = byId(fetched, i + 1);
+    assert.notEqual(r.result?.isError, true, `${ids[i]}: ${textOf(r).slice(0, 300)}`);
+    assert.equal(JSON.parse(textOf(r)).sourceId, s, `${ids[i]} が別ソースの証拠を返した: ${textOf(r).slice(0, 300)}`);
+  });
+});
+
+test('MCP: id の無いメッセージ（通知）には応答せず、何も実行しない。id が文字列・整数以外なら -32600', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const badIds = [null, {}, true, 1.5, [], { a: 1 }];
+  const reqs = [
+    { jsonrpc: '2.0', method: 'ping' },
+    { jsonrpc: '2.0', method: 'tools/list' },
+    { jsonrpc: '2.0', method: 'tools/call', params: { name: 'context_grill_status', arguments: {} } },
+    { jsonrpc: '2.0', method: 'prompts/get', params: { name: 'nope' } },
+    ...badIds.map((id) => ({ jsonrpc: '2.0', id, method: 'ping' })),
+    { jsonrpc: '1.0', id: 'str-id', method: 'ping' },
+    { jsonrpc: '2.0', id: 100, method: 'ping' },
+  ];
+  const expected = badIds.length + 2;
+  const res = await rpc(probe, reqs, expected);
+  assert.equal(res.responses.length, expected, `応答の個数が違う（通知に応答している可能性）: ${JSON.stringify(res.responses).slice(0, 600)}`);
+  const invalid = res.responses.filter((r) => r.error);
+  assert.equal(invalid.length, badIds.length, JSON.stringify(res.responses).slice(0, 600));
+  for (const r of invalid) {
+    assert.ok(r.id === null && r.error.code === -32600 && r.result === undefined, `-32600 / id:null のはず: ${JSON.stringify(r)}`);
+    assert.equal(r.error.message, 'Invalid Request: id は文字列または整数で指定してください');
+  }
+  assert.deepEqual(byId(res, 100).result, {});
+  assert.deepEqual(byId(res, 'str-id').result, {}, 'jsonrpc:"1.0" は従来どおり受け付ける');
+});
+
+test('MCP: fetch の start が行数超え・pack_id と evidence_id の片方だけは isError', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [
+    call(1, 'context_grill_fetch', { source: 'repo', path: 'src/payment.js', start: 100 }),
+    call(2, 'context_grill_fetch', { pack_id: 'pack-0123456789' }),
+    call(3, 'context_grill_fetch', { evidence_id: 'E1' }),
+    call(4, 'context_grill_fetch', { source: 'repo', path: 'src/payment.js', start: 1 }),
+  ], 4);
+  const r1 = byId(res, 1);
+  assert.equal(r1.result?.isError, true, textOf(r1).slice(0, 300));
+  assert.match(textOf(r1), /^エラー: start が行数 \d+ を超えています$/);
+  for (const id of [2, 3]) {
+    const r = byId(res, id);
+    assert.equal(r.result?.isError, true, `id=${id}: ${textOf(r).slice(0, 300)}`);
+    assert.equal(textOf(r), 'エラー: pack_id と evidence_id は両方指定してください');
+  }
+  assert.notEqual(byId(res, 4).result?.isError, true, '先頭からの fetch は成功のまま');
+});
+
+test('MCP: 見つからない pack・証拠 ID・パスは成功の形でなく isError で返す', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const first = await rpc(probe, [call(1, 'context_grill_evidence_pack', { instruction: 'refundPayment' })], 1);
+  const packId = JSON.parse(textOf(byId(first, 1))).pack_id;
+  const res = await rpc(probe, [
+    call(1, 'context_grill_verify', { pack_id: 'pack-0000000000', result: {} }),
+    call(2, 'context_grill_fetch', { pack_id: 'pack-0000000000', evidence_id: 'E1' }),
+    call(3, 'context_grill_fetch', { pack_id: packId, evidence_id: 'E999' }),
+    call(4, 'context_grill_fetch', { source: 'repo', path: 'src/nothing.js' }),
+  ], 4);
+  const want = [
+    [1, 'エラー: pack_id pack-0000000000 が見つかりません'],
+    [2, 'エラー: pack が見つかりません'],
+    [3, 'エラー: E999 は pack にありません'],
+    [4, 'エラー: パスが見つかりません: src/nothing.js'],
+  ];
+  for (const [id, text] of want) {
+    const r = byId(res, id);
+    assert.equal(r.result?.isError, true, `id=${id} が成功の形: ${textOf(r).slice(0, 300)}`);
+    assert.equal(textOf(r), text, `id=${id}`);
+  }
+});
+
+test('MCP: search の query が空・空白だけなら -32602', async () => {
+  const { dir, configPath } = await fixture({ build: false });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [
+    call(1, 'context_grill_search', { query: '' }),
+    call(2, 'context_grill_search', { query: '   ' }),
+  ], 2);
+  for (const id of [1, 2]) {
+    const r = byId(res, id);
+    assert.ok(r.error?.code === -32602 && r.result === undefined, `id=${id} は -32602 のはず: ${JSON.stringify(r).slice(0, 300)}`);
+    assert.match(r.error.message, /inputSchema/);
+  }
+});
+
+test('MCP: evidence_pack は packs が 200 件を超えたら古いものから消し、pack- 以外のファイルには触れない', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const packs = await packsDirOf(configPath);
+  const base = Date.now() / 1000 - 86400;
+  const name = (i) => `pack-${i.toString(16).padStart(10, '0')}.json`;
+  for (let i = 0; i < 250; i++) {
+    const f = path.join(packs, name(i));
+    await fsp.writeFile(f, '{}');
+    await fsp.utimes(f, base + i, base + i); // i が大きいほど新しい
+  }
+  const other = path.join(packs, 'notes.json');
+  await fsp.writeFile(other, '{}');
+  await fsp.utimes(other, base - 1000, base - 1000); // 全 pack より古い
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [call(1, 'context_grill_evidence_pack', { instruction: 'refundPayment' })], 1);
+  const packId = JSON.parse(textOf(byId(res, 1))).pack_id;
+  await new Promise((r) => setTimeout(r, 200)); // 間引きは保存の後に走るので、念のため待つ
+  const left = (await fsp.readdir(packs)).filter((n) => /^pack-.*\.json$/.test(n));
+  assert.equal(left.length, 200, `pack が 200 件になっていない: ${left.length}`);
+  assert.ok(left.includes(`${packId}.json`), '新しい pack が消えている');
+  assert.ok(left.includes(name(249)), '直前の新しい pack が消えている');
+  assert.ok(!left.includes(name(0)), '最も古い pack が残っている');
+  assert.ok(!left.includes(name(50)), '古い pack が残っている（251 件から 51 件消えるはず）');
+  assert.ok(left.includes(name(51)), '消しすぎている');
+  await fsp.access(other); // pack- で始まらない .json は残る
+});
+
+test('MCP: sync を同時に複数本送っても全部成功し、その後の search が動く', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  // publish の rename を遅らせて、並行して走ったときに重なるようにする
+  const probe = await writeProbe(dir, configPath, { renameDelayMs: 100 });
+  const ids = [1, 2, 3, 4, 5, 6, 7, 8];
+  const res = await rpc(probe, ids.map((id) => call(id, 'context_grill_sync', {})), ids.length,
+    { then: [call(100, 'context_grill_search', { query: 'refundPayment' })] });
+  const inflight = [...res.stderr.matchAll(new RegExp(`${INFLIGHT_MARK}(\\d+)`, 'g'))].map((m) => Number(m[1]));
+  assert.ok(inflight.length >= ids.length, `rename が観測できていない（probe が効いていない）: ${inflight.length} 回`);
+  assert.equal(Math.max(...inflight), 1, `sync が並行して走っている（rename の同時実行数: ${Math.max(...inflight)}）`);
+  for (const id of ids) {
+    const r = byId(res, id);
+    assert.notEqual(r.result?.isError, true, `sync id=${id} が失敗: ${textOf(r).slice(0, 300)}`);
+    assert.ok(JSON.parse(textOf(r)).index.chunks >= 1, textOf(r).slice(0, 300));
+  }
+  const s = byId(res, 100);
+  assert.notEqual(s.result?.isError, true, textOf(s).slice(0, 300));
+  assert.ok(JSON.parse(textOf(s)).length >= 1, 'search が結果を返さない');
 });

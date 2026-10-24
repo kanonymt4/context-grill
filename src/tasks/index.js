@@ -1,4 +1,5 @@
 import { sha256 } from '../util/misc.js';
+import { log } from '../util/log.js';
 
 // ===== 全タスク共通の「契約」 =========================================
 // この文面はモデルに依らず固定。プロンプトキャッシュのヒット率を上げるため
@@ -163,29 +164,52 @@ export const TASKS = {
  * これが「どのモデルでも同じ品質」の土台。
  */
 export function planQueries(taskId, instruction, { max = 6 } = {}) {
+  const { queries, queriesDropped } = planQueriesDetailed(taskId, instruction, { max });
+  if (queriesDropped.length) {
+    log.info(`検索クエリの上限（${Math.max(1, max)}）を超えたため、次の概念は使いません: ${queriesDropped.join(' / ')}`);
+  }
+  return queries;
+}
+
+/**
+ * planQueries の本体。上限で落とした「概念」（引用符で囲んだ語・識別子）も返す。
+ * 指示文そのものやタスク定型のクエリは概念に含めない。
+ */
+export function planQueriesDetailed(taskId, instruction, { max = 6 } = {}) {
   const task = TASKS[taskId];
   const queries = [];
-  const push = (q) => { const t = q.trim(); if (t && !queries.includes(t)) queries.push(t); };
+  const concepts = [];
+  const push = (q, isConcept = false) => {
+    const t = q.trim();
+    if (t && !queries.includes(t)) { queries.push(t); if (isConcept) concepts.push(t); }
+  };
 
   push(instruction);
 
   // 引用符で囲まれた語・識別子らしき語・パスらしき語を独立クエリにする
   // 「額」「税」のように漢字・仮名は1文字でも意味を持つため独立クエリにする。
   // 一方 "a" "I" のような英数字1文字は検索語として無意味なので除く。
-  const quoted = [...instruction.matchAll(/["'「『`]([^"'」』`]{1,80})["'」』`]/g)].map((m) => m[1]);
+  const found = [...instruction.matchAll(/["「『`]([^"'」』`]{1,80})["'」』`]/g)].map((m) => ({ at: m.index, text: m[1] }));
+  // 半角の単引用符は、語内のアポストロフィ（user's / isn't）と区別するため、
+  // 前後が単語の境界で、中身が 2 語以上または識別子様のときだけ引用符として扱う。
+  for (const m of instruction.matchAll(/(?<![A-Za-z0-9_])'([^"'」』`\n]{1,80})'(?![A-Za-z0-9_])/g)) {
+    if (/^\S.*\s.*\S$/.test(m[1]) || /^[A-Za-z_][\w./-]*$/.test(m[1])) found.push({ at: m.index, text: m[1] });
+  }
+  const quoted = found.sort((a, b) => a.at - b.at).map((f) => f.text);
   for (const q of quoted) {
     if (q.length === 1 && !/[\u3040-\u30ff\u3400-\u9fff]/.test(q)) continue;
-    push(q);
+    push(q, true);
   }
-  const idents = [...instruction.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*(?:[./][A-Za-z0-9_.-]+)+|[A-Z][a-z]+[A-Z][A-Za-z0-9]+|[a-z]+_[a-z_]+)\b/g)].map((m) => m[1]);
-  for (const q of [...new Set(idents)].slice(0, 4)) push(q);
+  const idents = [...instruction.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*(?:[./][A-Za-z0-9_.-]+)+|[A-Z][a-z]+[A-Z][A-Za-z0-9]+|[a-z]+(?:[A-Z][a-z0-9]*)+|[a-z]+_[a-z_]+)\b/g)].map((m) => m[1]);
+  for (const q of [...new Set(idents)].slice(0, 4)) push(q, true);
 
   const kw = JA_EN[taskId] || [];
   push(`${instruction} ${kw.slice(0, 5).join(' ')}`);
   push(`${instruction} ${kw.slice(5).join(' ')}`);
   push(`${task.label} ${instruction}`);
 
-  return queries.slice(0, Math.max(1, max));
+  const kept = queries.slice(0, Math.max(1, max));
+  return { queries: kept, queriesDropped: concepts.filter((c) => !kept.includes(c)) };
 }
 
 export function taskPromptHash(taskId) {

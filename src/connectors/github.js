@@ -7,8 +7,8 @@ import { isIncluded, readEnv } from '../util/misc.js';
 import { log } from '../util/log.js';
 import { redactMessage } from '../util/redact.js';
 import { isSensitiveDir, isInside } from '../util/sensitive.js';
-import { assertAllowed, auditExternal } from '../util/egress.js';
-import { classify, isProbablyBinary, makeDoc, httpJson, isIndexable } from './base.js';
+import { assertAllowed, auditExternal, EgressBlocked } from '../util/egress.js';
+import { classify, isProbablyBinary, makeDoc, httpJson, isIndexable, emptySkipped } from './base.js';
 
 const exec = promisify(execFile);
 
@@ -23,12 +23,21 @@ const DEFAULT_EXCLUDE = [
 // context-grill が実行してよい git サブコマンド。これ以外は実行しない。
 // 特に push / commit / add / checkout / clean / rm は allowWrite でも実行できない。
 const READ_ONLY_GIT = new Set(['rev-parse', 'ls-remote', 'config', 'log', 'show', 'ls-files', 'ls-tree', 'status', '--version']);
-const MANAGED_GIT = new Set(['clone', 'fetch', 'reset', 'remote', ...READ_ONLY_GIT]);
+const MANAGED_GIT = new Set(['init', 'fetch', 'reset', 'remote', ...READ_ONLY_GIT]);
 const FORBIDDEN_GIT = new Set(['push', 'commit', 'add', 'rm', 'mv', 'checkout', 'switch', 'clean', 'merge', 'rebase', 'cherry-pick', 'tag', 'am', 'apply', 'stash', 'filter-branch', 'gc', 'prune', 'worktree', 'submodule', 'send-email', 'daemon']);
 
 const MANAGED_MARKER = '.context-grill-managed';
 const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
-const REF_RE = /^[A-Za-z0-9._\/-]{1,200}$/;
+// 先頭が - だと git のオプションとして解釈されるため許さない
+const REF_RE = /^(?!-)[A-Za-z0-9._\/-]{1,200}$/;
+
+// 継承させない環境変数。対象リポジトリの位置や設定を、利用者の環境（git フックの中など）から
+// 差し込めてしまうため。GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM は社内 CA・proxy の設定を
+// 運ぶことがあるので消さない
+const INHERITED_GIT_ENV_DROP = new Set([
+  'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_COMMON_DIR', 'GIT_NAMESPACE', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG_COUNT',
+]);
 
 function token(src) {
   const envName = src.auth?.tokenEnv || 'GITHUB_TOKEN';
@@ -37,8 +46,12 @@ function token(src) {
 
 /** トークンを argv / URL / .git/config に一切載せず、環境変数経由でのみ git に渡す */
 export function gitEnv(src) {
+  const inherited = { ...process.env };
+  for (const k of Object.keys(inherited)) {
+    if (INHERITED_GIT_ENV_DROP.has(k) || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(k)) delete inherited[k];
+  }
   const env = {
-    ...process.env,
+    ...inherited,
     GIT_TERMINAL_PROMPT: '0',        // 認証プロンプトでハングしない
     GIT_ASKPASS: '',
     GCM_INTERACTIVE: 'never',
@@ -107,7 +120,20 @@ async function assertEffectiveHostAllowed(src, url, host, cwd) {
   if (!effective || effective === url) return;
   let effHost = null;
   if (effective.includes('://')) {
-    try { effHost = new URL(effective).host.toLowerCase() || null; } catch { /* 下で effective を使う */ }
+    try {
+      const u = new URL(effective);
+      // https 以外へ書き換えられると、同じホストでも http.extraHeader のトークンが平文で送られる
+      if (u.protocol !== 'https:') {
+        throw new EgressBlocked(
+          `insteadOf により https 以外のスキームへ書き換えられています (git:${src.id} (insteadOf): ${u.protocol}//${u.host}). ` +
+          `gitconfig の url.<base>.insteadOf を確認してください。`
+        );
+      }
+      effHost = u.host.toLowerCase() || null;
+    } catch (e) {
+      if (e instanceof EgressBlocked) throw e;
+      /* パースできない形は下で effective を使う */
+    }
   } else {
     const m = /^(?:[^@/:]+@)?([^:/]+):/.exec(effective);   // scp 風: [user@]host:path
     if (m) effHost = m[1].toLowerCase();
@@ -143,23 +169,22 @@ async function ensureClone(src, reposDir) {
   const ref = src.ref || 'HEAD';
   const cloned = fs.existsSync(path.join(dir, '.git'));
 
+  if (!cloned) {
+    // 初回も既存クローンと同じ経路（init → fetch → reset）で取得する。先にクローンの入れ物を作るのは、
+    // 次の insteadOf 検査を実際の取得と同じ cwd で行うため（includeIf "gitdir:" 内の設定は、
+    // そのリポジトリの中でしか効かない）。この段階では通信しない
+    await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+    await git(['init', '-q'], dir, { src, allowWrite: true });
+    await fsp.writeFile(path.join(dir, MANAGED_MARKER), `created by context-grill at ${new Date().toISOString()}\n`);
+  }
+
   // ユーザーの gitconfig（url.<base>.insteadOf）で接続先が書き換わっていないかを、通信する前に検査する
-  await assertEffectiveHostAllowed(src, url, host, cloned ? dir : undefined);
+  await assertEffectiveHostAllowed(src, url, host, dir);
 
   try {
-    if (!cloned) {
-      log.step(`clone ${src.repo} (${ref}) — 認証はヘッダ経由、URL には含めません`);
-      await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
-      const args = ['clone', '--filter=blob:none', '--depth', String(src.depth || 1), '--no-tags', '--single-branch'];
-      if (src.ref) args.push('--branch', src.ref);
-      args.push('--', url, dir);
-      await git(args, undefined, { src, allowWrite: true });
-      await fsp.writeFile(path.join(dir, MANAGED_MARKER), `created by context-grill at ${new Date().toISOString()}\n`);
-    } else {
-      log.step(`fetch ${src.repo} (${ref})`);
-      await git(['fetch', '--depth', String(src.depth || 1), '--no-tags', url, ref], dir, { src, allowWrite: true });
-      await git(['reset', '--hard', 'FETCH_HEAD'], dir, { src, allowWrite: true });
-    }
+    log.step(`${cloned ? 'fetch' : 'clone'} ${src.repo} (${ref})${cloned ? '' : ' — 認証はヘッダ経由、URL には含めません'}`);
+    await git(['fetch', '--depth', String(src.depth || 1), '--no-tags', '--', url, ref], dir, { src, allowWrite: true });
+    await git(['reset', '--hard', 'FETCH_HEAD'], dir, { src, allowWrite: true });
     const sha = await git(['rev-parse', 'HEAD'], dir, { src, allowWrite: false });
     auditExternal({ purpose: `git:${src.id}`, host, detail: `${src.repo}@${sha}` });
     return { dir, sha, managed: true };
@@ -197,6 +222,7 @@ function permalink(src, sha, p, start, end) {
 export async function syncGithub(src, ctx) {
   const security = ctx?.config?.security || {};
   let blocked = 0;
+  const skipped = emptySkipped();
   const include = src.include || [];
   const exclude = [...DEFAULT_EXCLUDE, ...(src.exclude || [])];
   const maxBytes = src.maxFileBytes ?? 400_000;
@@ -213,11 +239,11 @@ export async function syncGithub(src, ctx) {
       if (!isIncluded(rel, include, exclude)) continue;
       const abs = path.join(dir, rel);
       const st = await fsp.stat(abs);
-      if (st.size > maxBytes) continue;
+      if (st.size > maxBytes) { skipped.tooLarge++; continue; }
       const buf = await fsp.readFile(abs);
-      if (isProbablyBinary(buf)) continue;
+      if (isProbablyBinary(buf)) { skipped.binary++; continue; }
       const { kind, lang } = classify(rel);
-      if (kind === 'other' && !src.includeUnknownTypes) continue;
+      if (kind === 'other' && !src.includeUnknownTypes) { skipped.unknownType++; continue; }
       docs.push(makeDoc({
         sourceId: src.id, sourceType: 'github', docPath: rel, title: rel,
         kind, lang, text: buf.toString('utf8'),
@@ -237,17 +263,19 @@ export async function syncGithub(src, ctx) {
     sha = refInfo.sha;
     const tree = await httpJson(`${api}/repos/${src.repo}/git/trees/${sha}?recursive=1`, { headers, purpose: `github:${src.id}` });
     const files = (tree.tree || []).filter((t) => {
-      if (t.type !== 'blob' || t.size > maxBytes) return false;
+      if (t.type !== 'blob') return false;
       if (!isIndexable(t.path, security)) { blocked++; return false; }
-      return isIncluded(t.path, include, exclude);
+      if (!isIncluded(t.path, include, exclude)) return false;
+      if (t.size > maxBytes) { skipped.tooLarge++; return false; }
+      return true;
     });
     const limited = src.maxFiles ? files.slice(0, src.maxFiles) : files;
     for (const f of limited) {
       const { kind, lang } = classify(f.path);
-      if (kind === 'other' && !src.includeUnknownTypes) continue;
+      if (kind === 'other' && !src.includeUnknownTypes) { skipped.unknownType++; continue; }
       const blob = await httpJson(`${api}/repos/${src.repo}/git/blobs/${f.sha}`, { headers, purpose: `github:${src.id}` });
       const buf = Buffer.from(blob.content || '', blob.encoding === 'base64' ? 'base64' : 'utf8');
-      if (isProbablyBinary(buf)) continue;
+      if (isProbablyBinary(buf)) { skipped.binary++; continue; }
       docs.push(makeDoc({
         sourceId: src.id, sourceType: 'github', docPath: f.path, title: f.path,
         kind, lang, text: buf.toString('utf8'),
@@ -263,21 +291,26 @@ export async function syncGithub(src, ctx) {
     const api = src.apiBaseUrl || 'https://api.github.com';
     const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'context-grill' };
     if (tk) headers.Authorization = `Bearer ${tk}`;
-    const limit = Math.max(src.issues?.limit || 0, src.pulls?.limit || 0) || 100;
-    const state = src.issues?.state || src.pulls?.state || 'all';
-    let page = 1;
+    // issues と pulls は別々に取得し、それぞれの limit / state を守る。
+    // /issues は PR も返すので、issues 側では pull_request を持つものを数えずに除く。
+    const fetchKind = async (endpoint, cfg, accept, isPr) => {
+      const limit = cfg.limit || 100;
+      const state = cfg.state || 'all';
+      const collected = [];
+      let page = 1;
+      while (collected.length < limit) {
+        const items = await httpJson(`${api}/repos/${src.repo}/${endpoint}?state=${state}&per_page=100&page=${page}&sort=updated`, { headers, purpose: `github:${src.id}` });
+        if (!items || items.length === 0) break;
+        collected.push(...items.filter(accept));
+        if (items.length < 100) break;
+        page++;
+      }
+      return collected.slice(0, limit).map((it) => ({ it, isPr }));
+    };
     const collected = [];
-    while (collected.length < limit) {
-      const items = await httpJson(`${api}/repos/${src.repo}/issues?state=${state}&per_page=100&page=${page}&sort=updated`, { headers, purpose: `github:${src.id}` });
-      if (!items || items.length === 0) break;
-      collected.push(...items);
-      if (items.length < 100) break;
-      page++;
-    }
-    for (const it of collected.slice(0, limit)) {
-      const isPr = Boolean(it.pull_request);
-      if (isPr && !src.pulls?.enabled) continue;
-      if (!isPr && !src.issues?.enabled) continue;
+    if (src.issues?.enabled) collected.push(...await fetchKind('issues', src.issues, (it) => !it.pull_request, false));
+    if (src.pulls?.enabled) collected.push(...await fetchKind('pulls', src.pulls, () => true, true));
+    for (const { it, isPr } of collected) {
       const body = [
         `# ${isPr ? 'PR' : 'Issue'} #${it.number}: ${it.title}`,
         `state: ${it.state} / author: ${it.user?.login} / created: ${it.created_at} / updated: ${it.updated_at}`,
@@ -294,7 +327,7 @@ export async function syncGithub(src, ctx) {
     }
   }
 
-  return { docs, state: { sha, syncedAt: new Date().toISOString(), count: docs.length, mode, blockedSensitive: blocked } };
+  return { docs, state: { sha, syncedAt: new Date().toISOString(), count: docs.length, mode, blockedSensitive: blocked, skipped } };
 }
 
 export function githubLineUrl(doc, start, end) {

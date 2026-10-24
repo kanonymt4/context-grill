@@ -70,7 +70,7 @@ function readAudit(workspaceDir) {
 test('git: insteadOf で許可リスト外のホストへ書き換わる clone は、接続する前にブロックされる', async () => {
   const sink = await startSink();
   try {
-    await withIsolatedGit([[`http://127.0.0.1:${sink.port}/`, 'https://git.example.invalid/']], async ({ repos, workspaceDir }) => {
+    await withIsolatedGit([[`https://127.0.0.1:${sink.port}/`, 'https://git.example.invalid/']], async ({ repos, workspaceDir }) => {
       const { src, ctx } = makeCtx({ host: 'git.example.invalid', workspaceDir, repos });
       await assert.rejects(
         () => syncGithub(src, ctx),
@@ -91,7 +91,7 @@ test('git: insteadOf で許可リスト外のホストへ書き換わる clone �
 test('git: insteadOf で書き換わった fetch（既存クローン）も、接続する前にブロックされる', async () => {
   const sink = await startSink();
   try {
-    await withIsolatedGit([[`http://127.0.0.1:${sink.port}/`, 'https://git.example.invalid/']], async ({ repos, workspaceDir }) => {
+    await withIsolatedGit([[`https://127.0.0.1:${sink.port}/`, 'https://git.example.invalid/']], async ({ repos, workspaceDir }) => {
       const { src, ctx } = makeCtx({ host: 'git.example.invalid', workspaceDir, repos });
       // 管理下の既存クローンを模す（.git とマーカー）
       const dir = path.join(repos, 'g');
@@ -128,7 +128,7 @@ test('git(回帰): insteadOf が無ければ従来どおり許可されたホス
 test('git(回帰): 書き換え先が allowHosts にあれば insteadOf でも通る（接続する）', async () => {
   const sink = await startSink();
   try {
-    await withIsolatedGit([[`http://127.0.0.1:${sink.port}/`, 'https://git.example.invalid/']], async ({ repos, workspaceDir }) => {
+    await withIsolatedGit([[`https://127.0.0.1:${sink.port}/`, 'https://git.example.invalid/']], async ({ repos, workspaceDir }) => {
       const { src, ctx } = makeCtx({
         host: 'git.example.invalid', allowHosts: [`127.0.0.1:${sink.port}`], workspaceDir, repos,
       });

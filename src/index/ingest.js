@@ -2,7 +2,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { paths, ensureDirs } from '../config.js';
 import { syncSource } from '../connectors/index.js';
-import { readDocsCache, writeDocsCache, readState } from '../connectors/base.js';
+import { readDocsCache, writeDocsCache, readState, formatSkipped } from '../connectors/base.js';
 import { chunkDocument } from './chunk.js';
 import { IndexBuilder, writeVectors } from './store.js';
 import { embedChunks } from './embed.js';
@@ -32,7 +32,7 @@ export async function syncSources(config, { only = null, force = false, summary 
       const { docs, state } = await syncSource(src, { paths: p, config, previousDocs, prevState, force });
       await writeDocsCache(dir, docs, { ...state, sourceId: src.id, type: src.type });
       report.push({ id: src.id, type: src.type, documents: docs.length, ok: true, state });
-      log.info(`  ${src.id}: ${docs.length} ドキュメント` + (state?.blockedSensitive ? ` (機密扱いで除外 ${state.blockedSensitive} 件)` : ''));
+      log.info(`  ${src.id}: ${docs.length} ドキュメント${formatSkipped(state?.skipped)}` + (state?.blockedSensitive ? ` (機密扱いで除外 ${state.blockedSensitive} 件)` : ''));
     } catch (e) {
       report.push({ id: src.id, type: src.type, ok: false, error: e.message });
       log.error(`  ${src.id}: 失敗 - ${e.message}`);
