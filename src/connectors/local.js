@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isIncluded } from '../util/misc.js';
 import { isSensitiveDir } from '../util/sensitive.js';
-import { classify, isProbablyBinary, makeDoc, isIndexable } from './base.js';
+import { classify, isProbablyBinary, makeDoc, isIndexable, emptySkipped } from './base.js';
 
 async function* walk(root, rel = '') {
   const entries = await fsp.readdir(path.join(root, rel), { withFileTypes: true });
@@ -25,21 +25,22 @@ export async function syncLocal(src, ctx = {}) {
   const security = ctx.config?.security || {};
   const docs = [];
   let blocked = 0;
+  const skipped = emptySkipped();
   for await (const rel of walk(root)) {
     if (!isIndexable(rel, security)) { blocked++; continue; }
     if (!isIncluded(rel, src.include || [], src.exclude || [])) continue;
     const abs = path.join(root, rel);
     const st = await fsp.stat(abs);
-    if (st.size > maxBytes) continue;
+    if (st.size > maxBytes) { skipped.tooLarge++; continue; }
     const buf = await fsp.readFile(abs);
-    if (isProbablyBinary(buf)) continue;
+    if (isProbablyBinary(buf)) { skipped.binary++; continue; }
     const { kind, lang } = classify(rel);
-    if (kind === 'other' && !src.includeUnknownTypes) continue;
+    if (kind === 'other' && !src.includeUnknownTypes) { skipped.unknownType++; continue; }
     docs.push(makeDoc({
       sourceId: src.id, sourceType: 'local', docPath: rel, title: rel, kind, lang,
       text: buf.toString('utf8'), url: pathToFileURL(abs).href, version: String(st.mtimeMs),
       meta: { root, bytes: st.size },
     }));
   }
-  return { docs, state: { syncedAt: new Date().toISOString(), count: docs.length, root, blockedSensitive: blocked } };
+  return { docs, state: { syncedAt: new Date().toISOString(), count: docs.length, root, blockedSensitive: blocked, skipped } };
 }
