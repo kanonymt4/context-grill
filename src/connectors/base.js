@@ -27,6 +27,21 @@ export function isProbablyBinary(buf) {
   return false;
 }
 
+/** 取り込まなかったファイルの理由別の件数（挙動は変えず、数えるだけ） */
+export function emptySkipped() {
+  return { unknownType: 0, tooLarge: 0, binary: 0 };
+}
+
+/** sync の出力に添える内訳。0 の理由は省略し、全部 0 なら空文字を返す */
+export function formatSkipped(skipped) {
+  if (!skipped) return '';
+  const parts = [];
+  if (skipped.unknownType) parts.push(`種別不明で除外 ${skipped.unknownType} 件`);
+  if (skipped.tooLarge) parts.push(`サイズ超過 ${skipped.tooLarge} 件`);
+  if (skipped.binary) parts.push(`バイナリ ${skipped.binary} 件`);
+  return parts.length ? `（${parts.join(' / ')}）` : '';
+}
+
 /**
  * 生ドキュメント（チャンク前）の正規形。
  * 索引はこのキャッシュから毎回決定的に再構築されるので、
