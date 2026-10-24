@@ -290,6 +290,11 @@ function validate(c) {
         (m ? `\n      URL ではなく "${m[1]}" と書いてください` : '')
       );
     }
+    // host は "ホスト名" か "ホスト名:ポート" だけ。userinfo・パス・スキームを許すと、表示・許可リストと
+    // 実際の接続先が食い違う（github.com@127.0.0.1:1 は 127.0.0.1 へ接続する）。値は出さない
+    if (s.type === 'github' && s.host != null && s.host !== '' && !/^[A-Za-z0-9.-]+(:\d+)?$/.test(String(s.host))) {
+      errs.push(`${where}.host の形式が不正です（"ホスト名" または "ホスト名:ポート" のみ。スキーム・ユーザー情報・パスは書けません）`);
+    }
     if (s.type === 'github' && s.ref && !/^[A-Za-z0-9._\/-]{1,200}$/.test(String(s.ref))) {
       errs.push(`${where}.ref の形式が不正です: ${s.ref}`);
     }

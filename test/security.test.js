@@ -359,7 +359,8 @@ test('構造: 破壊的な git コマンドの文字列がコード上に存在�
   const built = [...gh.matchAll(/const args = \[\s*'([a-z-]+)'/g)].map((m) => m[1]);
   const calls = [...new Set([...literal, ...built])].sort();
   // ls-remote は insteadOf 展開後の接続先を通信せずに求めるための読み取り専用コマンド（--get-url）
-  const ALLOWED = ['clone', 'fetch', 'ls-remote', 'reset', 'rev-parse'];
+  // 初回も init → fetch → reset で取得する（clone は呼ばない）
+  const ALLOWED = ['fetch', 'init', 'ls-remote', 'reset', 'rev-parse'];
   for (const c of calls) assert.ok(ALLOWED.includes(c), `想定外の git サブコマンドが呼ばれている: ${c}`);
   assert.deepEqual(calls, ALLOWED, '実際に呼ばれる git サブコマンドは 5 つだけ');
   for (const bad of ['push', 'commit', ' add', 'checkout', 'clean']) {
