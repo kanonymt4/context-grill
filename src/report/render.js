@@ -1,12 +1,17 @@
 const SEV_MARK = { critical: '🔴 critical', high: '🟠 high', medium: '🟡 medium', low: '🔵 low', info: '⚪ info' };
 const CONF_MARK = { high: '確度: 高', medium: '確度: 中', low: '確度: 低' };
 
+/** 配列でなければ空配列として扱う（型の違反は verify が報告している。描画では落ちないことを優先） */
+const arr = (v) => (Array.isArray(v) ? v : []);
+/** 配列のうち、プレーンなオブジェクトの要素だけを返す */
+const objs = (v) => arr(v).filter((x) => x && typeof x === 'object' && !Array.isArray(x));
+
 /** 最終レポート（Markdown）。すべての主張に一次資料へのリンクが付く。 */
 export function renderMarkdown(run) {
   const { task, instruction, result, pack, verification, meta, staticSummary } = run;
   const L = [];
   const evMap = new Map(pack.items.map((e) => [e.id, e]));
-  const cite = (ids = []) => ids.map((id) => {
+  const cite = (ids) => arr(ids).map((id) => {
     const e = evMap.get(id);
     if (!e) return `\`${id}\``;
     return e.url ? `[${id}](${e.url})` : `\`${id}\` (${e.label})`;
@@ -16,6 +21,10 @@ export function renderMarkdown(run) {
   L.push('');
   L.push('> このレポートの全ての主張は、下部の「証拠一覧」にある一次資料に紐付いています。');
   L.push('> 証拠のない記述は機械的に除去されています（除去分は「棄却された主張」を参照）。');
+  if (verification?.ok === false) {
+    L.push('');
+    L.push(`> ⚠ 機械検証は通過していません（違反 ${verification.stats?.hardViolations} 件）。以下の主張は一部が除去されている可能性があります。`);
+  }
   L.push('');
   L.push('## 実行メタデータ');
   L.push('');
@@ -49,7 +58,7 @@ export function renderMarkdown(run) {
     L.push('');
   }
 
-  const items = result.items || [];
+  const items = objs(result.items);
   if (items.length) {
     L.push('## 調査結果');
     L.push('');
@@ -70,7 +79,7 @@ export function renderMarkdown(run) {
         L.push(it.statement);
         if (it.impact) { L.push(''); L.push(`**影響**: ${it.impact}`); }
         if (it.remediation) { L.push(''); L.push(`**対応方針**: ${it.remediation}`); }
-        for (const q of (it.quotes || [])) {
+        for (const q of objs(it.quotes)) {
           const e = evMap.get(q.evidence);
           L.push('');
           L.push(`> \`${e ? e.label : q.evidence}\``);
@@ -80,7 +89,7 @@ export function renderMarkdown(run) {
         }
         L.push('');
         L.push(`**根拠**: ${cite(it.evidence)}`);
-        if (it.contradicting_evidence?.length) L.push(`**反証候補**: ${cite(it.contradicting_evidence)}`);
+        if (arr(it.contradicting_evidence).length) L.push(`**反証候補**: ${cite(it.contradicting_evidence)}`);
         L.push('');
       }
     }
@@ -91,17 +100,19 @@ export function renderMarkdown(run) {
     L.push('');
   }
 
-  if (result.contradictions?.length) {
+  const contradictions = objs(result.contradictions);
+  if (contradictions.length) {
     L.push('## 資料間の矛盾');
     L.push('');
-    for (const c of result.contradictions) L.push(`- ${c.description}\n  - 根拠: ${cite(c.evidence)}`);
+    for (const c of contradictions) L.push(`- ${c.description}\n  - 根拠: ${cite(c.evidence)}`);
     L.push('');
   }
 
   L.push('## 未解決の論点（証拠が不足している事項）');
   L.push('');
-  if (result.open_questions?.length) {
-    for (const q of result.open_questions) {
+  const openQuestions = objs(result.open_questions);
+  if (openQuestions.length) {
+    for (const q of openQuestions) {
       L.push(`- **${q.question}**`);
       L.push(`  - 未解決の理由: ${q.why_unresolved}`);
       L.push(`  - 次に見るべき場所: ${q.where_to_look}`);
@@ -109,11 +120,12 @@ export function renderMarkdown(run) {
   } else L.push('- なし');
   L.push('');
 
-  if (result.next_actions?.length) {
+  const nextActions = objs(result.next_actions);
+  if (nextActions.length) {
     L.push('## 推奨アクション');
     L.push('');
-    for (const a of result.next_actions) {
-      L.push(`- ${a.action}${a.rationale ? ` — ${a.rationale}` : ''}${a.evidence?.length ? ` (${cite(a.evidence)})` : ''}`);
+    for (const a of nextActions) {
+      L.push(`- ${a.action}${a.rationale ? ` — ${a.rationale}` : ''}${arr(a.evidence).length ? ` (${cite(a.evidence)})` : ''}`);
     }
     L.push('');
   }
@@ -144,13 +156,17 @@ export function renderMarkdown(run) {
   return L.join('\n');
 }
 
-/** LLM を呼ばずに、そのまま任意のチャットに貼れるバンドルを作る（--dry-run） */
+/**
+ * LLM を呼ばずに、そのまま任意のチャットに貼れるバンドルを作る（--dry-run）。
+ * EVIDENCE と USER の本文は、実際の送信（provider.complete の cacheableUser と user）と同じ。
+ * cacheableUser は証拠に加えて静的解析の節を含むので、evidenceBlock ではなくそちらを出す。
+ */
 export function renderBundle(run) {
-  const { systemStatic, systemDynamic, evidenceBlock, userPrompt, schema } = run.prompt;
+  const { systemStatic, systemDynamic, cacheableUser, userPrompt, schema } = run.prompt;
   return [
     '<!-- context-grill dry-run bundle -->',
     '# SYSTEM', '', '```', systemStatic, '', systemDynamic, '```', '',
-    '# EVIDENCE', '', '```xml', evidenceBlock, '```', '',
+    '# EVIDENCE', '', '```', cacheableUser, '```', '',
     '# USER', '', '```', userPrompt, '```', '',
     '# OUTPUT JSON SCHEMA', '', '```json', JSON.stringify(schema, null, 2), '```',
   ].join('\n');
