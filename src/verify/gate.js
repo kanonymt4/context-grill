@@ -18,12 +18,24 @@ export function verify(result, { pack, schema, policy, taskId }) {
 
   if (!result || typeof result !== 'object') {
     add('E_NO_JSON', '$', 'JSON を取得できませんでした', 'スキーマ通りの JSON のみを出力してください');
-    return { ok: false, violations, cleaned: null, stats: {} };
+    // 後段（render など）が null で落ちないよう、空の envelope と 0 埋めの stats を返す
+    return {
+      ok: false,
+      violations,
+      cleaned: { summary: '', items: [], open_questions: [], contradictions: [], next_actions: [], _rejected: [] },
+      stats: {
+        itemsTotal: 0, itemsAccepted: 0, itemsRejected: 0, quotesChecked: 0, quotesFailed: 0,
+        hardViolations: violations.length, softViolations: 0, citedEvidence: 0, evidenceOffered: pack.items.length,
+      },
+    };
   }
 
   for (const e of validate(schema, result)) add('E_SCHEMA', '$', e, 'スキーマに厳密に従ってください');
 
   const items = Array.isArray(result.items) ? result.items : [];
+  // item 単位のスキーマ検査用。違反メッセージはトップレベルの validate が既に報告しているので、
+  // ここでは item の棄却理由にだけ使い、violations には重ねて積まない（第4要素 true = 報告済み）
+  const itemSchema = schema?.properties?.items?.items;
   const seenIds = new Set();
   const rejected = [];
   const accepted = [];
@@ -34,6 +46,9 @@ export function verify(result, { pack, schema, policy, taskId }) {
     const problems = [];
 
     if (!it || typeof it !== 'object') { add('E_ITEM', where, 'item がオブジェクトではありません'); continue; }
+    for (const e of validate(itemSchema, it, `$.items[${i}]`)) {
+      problems.push(['E_SCHEMA', e, 'スキーマに厳密に従ってください', true]);
+    }
     if (it.id) {
       if (seenIds.has(it.id)) problems.push(['E_DUP_ID', `item id ${it.id} が重複しています`, 'id は一意にしてください']);
       seenIds.add(it.id);
@@ -71,7 +86,13 @@ export function verify(result, { pack, schema, policy, taskId }) {
       quotesChecked++;
       const src = evidenceMap.get(q.evidence);
       if (!src) { quotesFailed++; problems.push(['E_QUOTE_SRC', `quote の証拠 ID ${q.evidence} が存在しません`, '実在する証拠から引用してください']); continue; }
-      if (policy.requireVerbatimQuote && !norm(src.text).includes(norm(q.text))) {
+      if (ev.length && !ev.includes(q.evidence)) {
+        problems.push(['E_QUOTE_NOT_CITED', `quote の証拠 ID ${q.evidence} が item の evidence に含まれていません`, '引用する証拠 ID を evidence にも書いてください']);
+      }
+      if (norm(q.text) === '') {
+        quotesFailed++;
+        problems.push(['E_QUOTE_EMPTY', `${q.evidence} の引用が空です`, '引用は証拠本文から実際の文言をコピーしてください']);
+      } else if (policy.requireVerbatimQuote && !norm(src.text).includes(norm(q.text))) {
         quotesFailed++;
         problems.push(['E_QUOTE_MISMATCH', `${q.evidence} の本文に一致しない引用があります: "${String(q.text).slice(0, 80)}"`, '引用は証拠本文からコピーしてください（要約は statement に）']);
       }
@@ -80,7 +101,7 @@ export function verify(result, { pack, schema, policy, taskId }) {
     if (policy.forbidSpeculativeLanguage) {
       const blob = `${it.title ?? ''} ${it.statement ?? ''} ${it.remediation ?? ''}`.toLowerCase();
       const hit = SPECULATIVE.filter((w) => blob.includes(w.toLowerCase()));
-      if (hit.length && it.confidence === 'high') {
+      if (hit.length && String(it.confidence).toLowerCase() === 'high') {
         problems.push(['E_SPECULATION', `推測表現(${hit.join(', ')})を含む item の confidence が high です`, '推測表現を削るか confidence を下げるか open_questions に移してください']);
       } else if (hit.length) {
         problems.push(['W_SPECULATION', `推測表現を含みます: ${hit.join(', ')}`, '断定できない内容は open_questions に移してください']);
@@ -88,12 +109,22 @@ export function verify(result, { pack, schema, policy, taskId }) {
     }
 
     const hard = problems.filter(([c]) => c.startsWith('E_'));
-    for (const [code, msg, fix] of problems) add(code, where, msg, fix);
+    for (const [code, msg, fix, reported] of problems) if (!reported) add(code, where, msg, fix);
     if (hard.length) rejected.push({ item: it, reasons: hard.map(([c, m]) => `${c}: ${m}`) });
     else accepted.push(it);
   }
 
+  if (policy.forbidSpeculativeLanguage && typeof result.summary === 'string') {
+    const lower = result.summary.toLowerCase();
+    const hit = SPECULATIVE.filter((w) => lower.includes(w.toLowerCase()));
+    // summary には確度が無いので、item と違いハード違反にはしない
+    if (hit.length) add('W_SPECULATION', '$.summary', `summary に推測表現を含みます: ${hit.join(', ')}`, '断定できない内容は open_questions に移してください');
+  }
+
   // 配列でない・要素がオブジェクトでない・evidence が配列でない場合は E_SCHEMA にして、その要素の検査は飛ばす
+  // 存在しない証拠 ID を持つ contradictions は cleaned から外して _rejected に記録し、next_actions は不正な ID だけを落とす
+  const cleanedLists = {};
+  const rejectedExtra = [];
   for (const key of ['contradictions', 'next_actions']) {
     const list = result[key];
     if (list == null) continue;
@@ -101,18 +132,30 @@ export function verify(result, { pack, schema, policy, taskId }) {
       add('E_SCHEMA', `$.${key}`, `${key} は配列である必要があります`, 'オブジェクトの配列にしてください');
       continue;
     }
+    const kept = [];
     for (const [i, c] of list.entries()) {
       if (!c || typeof c !== 'object' || Array.isArray(c)) {
         add('E_SCHEMA', `${key}[${i}]`, `${key}[${i}] がオブジェクトではありません`, '要素はオブジェクトにしてください');
+        kept.push(c);
         continue;
       }
       if (c.evidence != null && !Array.isArray(c.evidence)) {
         add('E_SCHEMA', `${key}[${i}]`, `${key}[${i}].evidence は配列である必要があります`, '証拠 ID の配列にしてください');
+        kept.push(c);
         continue;
       }
       const bad = (c.evidence || []).filter((id) => !evidenceMap.has(id));
-      if (bad.length) add(key === 'contradictions' ? 'E_BAD_EVIDENCE' : 'W_BAD_EVIDENCE', `${key}[${i}]`, `存在しない証拠 ID: ${bad.join(', ')}`, '実在する証拠 ID のみ使ってください');
+      if (!bad.length) { kept.push(c); continue; }
+      const message = `存在しない証拠 ID: ${bad.join(', ')}`;
+      add(key === 'contradictions' ? 'E_BAD_EVIDENCE' : 'W_BAD_EVIDENCE', `${key}[${i}]`, message, '実在する証拠 ID のみ使ってください');
+      if (!policy.dropUnverifiedItems) { kept.push(c); continue; }
+      if (key === 'contradictions') {
+        rejectedExtra.push({ kind: 'contradiction', item: { ...c, title: `(矛盾) ${c.description ?? ''}` }, reasons: [`E_BAD_EVIDENCE: ${message}`] });
+      } else {
+        kept.push({ ...c, evidence: c.evidence.filter((id) => evidenceMap.has(id)) });
+      }
     }
+    cleanedLists[key] = kept;
   }
   if (!Array.isArray(result.open_questions)) {
     add('E_SCHEMA', '$.open_questions', 'open_questions は配列である必要があります');
@@ -121,8 +164,9 @@ export function verify(result, { pack, schema, policy, taskId }) {
   const hardCount = violations.filter((v) => v.code.startsWith('E_')).length;
   const cleaned = {
     ...result,
+    ...cleanedLists,
     items: policy.dropUnverifiedItems ? accepted : items,
-    _rejected: rejected,
+    _rejected: [...rejected, ...rejectedExtra],
   };
   return {
     ok: hardCount === 0,
@@ -136,7 +180,7 @@ export function verify(result, { pack, schema, policy, taskId }) {
       quotesFailed,
       hardViolations: hardCount,
       softViolations: violations.length - hardCount,
-      citedEvidence: new Set(items.flatMap((i) => i?.evidence || []).filter((id) => evidenceMap.has(id))).size,
+      citedEvidence: new Set(accepted.flatMap((i) => i?.evidence || []).filter((id) => evidenceMap.has(id))).size,
       evidenceOffered: pack.items.length,
     },
   };
