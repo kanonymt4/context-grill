@@ -70,8 +70,9 @@ function fakeStore() {
     vecAt: () => null,
     chunkAt(i) { return { ...meta[i], idx: i, text: `text ${i}` }; },
     // BM25 は 0 → 1 → 2、ベクトル検索は 2 → 1 → 0 の順位にして、融合結果が変わるようにする
-    bm25: () => [{ idx: 0 }, { idx: 1 }, { idx: 2 }],
-    vectorSearch: () => [{ idx: 2 }, { idx: 1 }, { idx: 0 }],
+    // 融合はスコアの大きさを使うので、実物の store と同じく降順の score を持たせる
+    bm25: () => [{ idx: 0, score: 3 }, { idx: 1, score: 2 }, { idx: 2, score: 1 }],
+    vectorSearch: () => [{ idx: 2, score: 0.9 }, { idx: 1, score: 0.5 }, { idx: 0, score: 0.1 }],
   };
 }
 

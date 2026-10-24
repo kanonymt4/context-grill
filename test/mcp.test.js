@@ -1283,6 +1283,47 @@ test('MCP: fetch は end < start を isError にし、end を付けても start 
   assert.equal(parseText(byId(res, 6)).lines, '1-3');
 });
 
+test('MCP: fetch は末尾の改行を行として数えない（total_lines と end の上限が実際の行数になる）', async () => {
+  const { dir, configPath } = await fixtureRange();
+  const lines = (n) => Array.from({ length: n }, (_, i) => `row ${i + 1} refundPayment`);
+  await fsp.writeFile(path.join(dir, 'repo', 'nl12.md'), lines(12).join('\n') + '\n');
+  await fsp.writeFile(path.join(dir, 'repo', 'nonl3.md'), lines(3).join('\n'));
+  await fsp.writeFile(path.join(dir, 'repo', 'twonl.md'), 'alpha refundPayment\n\n');
+  await fsp.writeFile(path.join(dir, 'repo', 'empty.md'), '');
+  const config = await loadConfig(configPath);
+  await syncSources(config, {});
+  await buildIndex(config, { embed: false });
+  const probe = await writeProbe(dir, configPath);
+  const f = (id, p, extra = {}) => call(id, 'context_grill_fetch', { source: 'repo', path: p, ...extra });
+  const res = await rpc(probe, [
+    f(1, 'nl12.md', { start: 1, end: 100 }),
+    f(2, 'nonl3.md', { start: 1, end: 100 }),
+    f(3, 'twonl.md', { start: 1, end: 100 }),
+    f(4, 'nl12.md', { start: 13 }),
+    f(5, 'empty.md'),
+  ], 5);
+  const a = parseText(byId(res, 1));
+  assert.equal(a.total_lines, 12);
+  assert.equal(a.lines, '1-12');
+  assert.equal(a.text.split('\n').length, 12);
+  const b = parseText(byId(res, 2));
+  assert.equal(b.total_lines, 3);
+  assert.equal(b.lines, '1-3');
+  // 末尾が改行 2 つ: split の末尾の 1 要素だけを除くので、最後の空行は 1 行として残る
+  const c = parseText(byId(res, 3));
+  assert.equal(c.total_lines, 2);
+  assert.equal(c.lines, '1-2');
+  assert.equal(c.text, 'alpha refundPayment\n');
+  // 存在しない 13 行目は行数超えの isError
+  const d = byId(res, 4);
+  assert.equal(d.result?.isError, true, JSON.stringify(d).slice(0, 300));
+  assert.match(textOf(d), /行数 12 を超えています/);
+  // 空ファイルは 0 行で、start:1 は行数超え
+  const e = byId(res, 5);
+  assert.equal(e.result?.isError, true, JSON.stringify(e).slice(0, 300));
+  assert.match(textOf(e), /行数 0 を超えています/);
+});
+
 test('MCP: run_task / evidence_pack の instruction は空文字・空白だけを -32602 で拒否し、通常の指示は通る', async () => {
   const { dir, configPath } = await fixtureRange();
   const probe = await writeProbe(dir, configPath);

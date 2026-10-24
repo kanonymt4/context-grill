@@ -693,6 +693,8 @@ export async function startMcpServer({ configPath, offline } = {}) {
         const doc = docs.find((d) => d.path === args.path && (!onlySource || onlySource.includes(d.sourceId)));
         if (!doc) throw new Error(`パスが見つかりません: ${args.path}`);
         const lines = doc.text.split('\n');
+        // 末尾が改行のファイルは split の最後が空要素になる。存在しない行として数えない（空ファイルは 0 行）
+        if (lines[lines.length - 1] === '') lines.pop();
         const start = args.start ?? 1;
         if (start > lines.length) throw new Error(`start が行数 ${lines.length} を超えています`);
         if (args.end !== undefined && args.end < start) throw new Error('end は start 以上にしてください');

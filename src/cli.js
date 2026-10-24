@@ -17,7 +17,7 @@ import { startMcpServer } from './mcp/server.js';
 import { initEgress, egressPlan, egressSummary } from './util/egress.js';
 import { SENSITIVE_DENY } from './util/sensitive.js';
 import { urlToSource } from './util/urls.js';
-import { log, setLevel } from './util/log.js';
+import { log, setLevel, LOG_LEVEL_NAMES } from './util/log.js';
 import { readEnv } from './util/misc.js';
 
 const HELP = `context-grill — GitHub と Atlassian の一次資料に基づいて調査・設計を行うツール
@@ -47,6 +47,7 @@ const HELP = `context-grill — GitHub と Atlassian の一次資料に基づい
   --json                    JSON で出力
   --log <level>             silent|error|warn|info|debug
   --offline                 一切の外部通信を禁止（検索・静的解析・--dry-run のみ動作）
+  -v, --version             バージョンを表示
 
 sync:
   --full                    キャッシュを無視して全件再取得
@@ -59,6 +60,7 @@ search:
 scan:
   --severity <lv>           critical|high|medium|low|info（既定 low 以上）
   --out <file>              結果を書き出す
+  --include-tests           test / docs / examples などのパスも対象に含める
 
 ask:
   -t, --task <id>           spec|bug|security|static|design（既定 spec）
@@ -87,7 +89,7 @@ run:
 // `context-grill --offline search "..."` の search がフラグの値に吸われてしまう。
 const BOOL_FLAGS = new Set([
   'offline', 'dry-run', 'dryRun', 'json', 'force', 'full', 'raw',
-  'help', 'add', 'embed', 'includeTests', 'include-tests',
+  'help', 'add', 'embed', 'includeTests', 'include-tests', 'version', 'v',
 ]);
 
 function parseArgs(argv) {
@@ -141,15 +143,92 @@ function checkValueFlags(flags) {
   return null;
 }
 
+// 全コマンドで受け付けるフラグ（main が共通で扱うもの。--no-offline は offline として届く）
+const COMMON_FLAGS = ['config', 'json', 'log', 'offline', 'help'];
+// コマンドごとに受け付けるフラグ（各 cmdXxx が読む flags.xxx）。ここに無いものは未知のオプションとして拒否する。
+// 黙って無視すると、押したつもりの安全側の指定（--dry-run / --offline）が効かないまま実行されてしまう。
+// run は cmdRun に専用の許可リスト（RUN_FLAGS）があるため、ここには載せない。
+const COMMAND_FLAGS = {
+  init: ['dir', 'force'],
+  resolve: ['id', 'add'],
+  tasks: [],
+  doctor: [],
+  privacy: [],
+  sync: ['source', 'full', 'embed'],
+  build: ['embed'],
+  status: [],
+  search: ['source', 'top', 'raw'],
+  scan: ['source', 'severity', 'out', 'include-tests', 'includeTests'],
+  ask: ['source', 'task', 'effort', 'model', 'dry-run', 'dryRun', 'out'],
+  presets: [],
+  mcp: [],
+};
+
+/** 編集距離（Levenshtein。隣接する文字の入れ替えは 2 と数える） */
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/** 未知のフラグに近い許可済みフラグを 1 つだけ返す（なければ null）。camelCase の別名は候補にしない */
+function suggestFlag(name, allowed) {
+  const cands = [...new Set(allowed)].filter((k) => !/[A-Z]/.test(k));
+  const norm = (s) => s.toLowerCase().replace(/[-_]/g, '');
+  const same = cands.filter((k) => norm(k) === norm(name));
+  if (same.length === 1) return same[0];
+  if (same.length > 1 || name.length < 4) return null;
+  const scored = cands.map((k) => [k, editDistance(name, k)]).filter(([, d]) => d <= 2);
+  if (!scored.length) return null;
+  const best = Math.min(...scored.map(([, d]) => d));
+  const top = scored.filter(([, d]) => d === best);
+  return top.length === 1 ? top[0][0] : null;
+}
+
+/** そのコマンドが受け付けないフラグのメッセージを返す（なければ null） */
+function checkUnknownFlags(cmd, flags) {
+  if (!Object.hasOwn(COMMAND_FLAGS, cmd)) return null;
+  const allowed = [...COMMON_FLAGS, ...COMMAND_FLAGS[cmd]];
+  const lines = [];
+  for (const k of Object.keys(flags)) {
+    if (allowed.includes(k)) continue;
+    const s = suggestFlag(k, allowed);
+    lines.push(`未知のオプション: ${flagText(k)}${s ? `（--${s} のことですか？）` : ''}`);
+  }
+  return lines.length ? lines.join('\n') : null;
+}
+
+/** --log が水準名のいずれかか検査する（値の有無は checkValueFlags / cmdRun が見る） */
+function checkLogLevel(flags) {
+  if (typeof flags.log === 'string' && flags.log !== '' && !LOG_LEVEL_NAMES.includes(flags.log)) {
+    return `--log には ${LOG_LEVEL_NAMES.join(' / ')} のいずれかを指定してください`;
+  }
+  return null;
+}
+
 export async function main(argv) {
   const { _: pos, flags } = parseArgs(argv);
   const cmd = pos[0];
+  if (flags.version === true || flags.v === true || cmd === 'version') {
+    const pkgPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+    process.stdout.write(`${JSON.parse(fs.readFileSync(pkgPath, 'utf8')).version}\n`);
+    return 0;
+  }
   if (!cmd || flags.help || cmd === 'help') { process.stdout.write(HELP); return 0; }
   // run は cmdRun に専用の検査とメッセージがあるため、共通検査を通さない
   if (cmd !== 'run') {
-    const err = checkValueFlags(flags);
+    const err = checkUnknownFlags(cmd, flags) || checkValueFlags(flags);
     if (err) { process.stderr.write(err + '\n'); return 1; }
   }
+  // run の --log は cmdRun が検査する（引数を吸い込んだ値のメッセージを優先するため）
+  const logErr = cmd === 'run' ? null : checkLogLevel(flags);
+  if (logErr) { process.stderr.write(logErr + '\n'); return 1; }
   if (flags.log) setLevel(String(flags.log));
 
   switch (cmd) {
@@ -235,12 +314,23 @@ async function cmdInit(flags) {
   if (!fs.existsSync(envPath)) {
     await fsp.writeFile(envPath, [
       '# 認証情報（.env は必ず .gitignore に入れてください）',
+      '# 値と同じ行にコメントを書かないでください（コメントが値に含まれることがあります）',
+      '',
+      '# GitHub（private リポジトリを読む場合）: fine-grained PAT（Contents: Read-only）を使う',
       'GITHUB_TOKEN=',
+      '',
+      '# Atlassian（Confluence / Jira 共通）',
       'ATLASSIAN_EMAIL=',
       'ATLASSIAN_API_TOKEN=',
+      '',
+      '# 推論用 LLM（llm.provider に応じて 1 つ）',
       'ANTHROPIC_API_KEY=',
-      '# OPENAI_API_KEY=   # OpenAI / 埋め込みを使う場合',
-      '# LLM_API_KEY=      # openai-compat（ローカル LLM など）を使う場合',
+      '# OpenAI / 埋め込みを使う場合',
+      '# OPENAI_API_KEY=',
+      '# openai-compat（ローカル LLM など）を使う場合',
+      '# LLM_API_KEY=',
+      '# 埋め込みに Voyage を使う場合',
+      '# VOYAGE_API_KEY=',
     ].join('\n') + '\n');
   }
   const dir = path.dirname(target);
@@ -565,7 +655,7 @@ async function cmdScan(flags) {
   const config = await load(flags);
   const only = resolveSourceIds(config, listOf(flags.source));
   const docs = await allDocs(config, only);
-  const findings = scanAll(docs, { minSeverity: severity, includeTestPaths: Boolean(flags.includeTests) });
+  const findings = scanAll(docs, { minSeverity: severity, includeTestPaths: Boolean(flags.includeTests || flags['include-tests']) });
   const out = { summary: summarize(findings), findings, facts: projectFacts(docs), endpoints: extractEndpoints(docs) };
   if (flags.out) {
     await fsp.writeFile(path.resolve(String(flags.out)), JSON.stringify(out, null, 2));
@@ -583,6 +673,7 @@ async function cmdScan(flags) {
 // ----------------------------------------------------------------- ask
 async function cmdAsk(instruction, flags) {
   if (!instruction) { process.stderr.write('指示を指定してください。例: context-grill ask "認証の仕様を整理して" --task spec\n'); return 1; }
+  if (instruction.trim() === '') { process.stderr.write('指示が空です\n'); return 1; }
   const config = await load(flags);
   // タスク名・effort・ソースの検証は runTask が索引を開く前に行う
   const taskId = String(flags.task || 'spec');
@@ -664,6 +755,9 @@ async function cmdRun(name, tokens, flags) {
       flagErrors.push(`--${k} には値が必要です（例: --${k} ${{ model: '<モデル名>', out: '<ファイル>', log: '<level>', config: '<path>' }[k]}）`);
     }
   }
+  // 水準名でない値。ただし `名前=値` の形は引数を吸い込んだ可能性があるので、後段の専用メッセージに任せる
+  const logErr = typeof flags.log === 'string' && flags.log.includes('=') ? null : checkLogLevel(flags);
+  if (logErr) flagErrors.push(logErr);
   // 2) 位置引数の解析
   const { args, errors: argErrors } = parseRunArgs(tokens);
   if (flagErrors.length || argErrors.length) {
@@ -769,13 +863,17 @@ async function cmdPrivacy(flags) {
   const sec = config.security;
   const embOn = config.retrieval.embedding.provider !== 'none';
   const llmOn = config.llm.provider !== 'dry' && sec.allowLlmUpload !== false;
+  // ソース取得で認証情報が外へ出るのは、リモートのソースがあるときだけ（local は外部通信なし）
+  const remoteSources = config.sources.some((s) => ['github', 'confluence', 'jira'].includes(s.type));
 
   const data = {
     networkMode: plan.mode,
     allowedHosts: plan.hosts,
     auditLog: plan.auditLog,
     outbound: [
-      { target: 'ソース取得 (GitHub / Confluence / Jira)', sends: '認証情報のみ（資料は受信方向）', enabled: true },
+      remoteSources
+        ? { target: 'ソース取得 (GitHub / Confluence / Jira)', sends: '認証情報のみ（資料は受信方向）', enabled: true }
+        : { target: 'ソース取得（ローカルのみ）', sends: 'なし（手元のファイルを読むだけ）', enabled: false },
       { target: `埋め込み API (${config.retrieval.embedding.provider})`, sends: '索引対象の全チャンク本文（墨消し済み）', enabled: embOn,
         gate: sec.allowEmbeddingUpload ? 'security.allowEmbeddingUpload=true で許可済み' : 'security.allowEmbeddingUpload=false のためブロック' },
       { target: `LLM API (${config.llm.provider} / ${config.llm.model})`, sends: '検索でヒットした証拠のみ（墨消し済み・全文ではない）', enabled: llmOn,
