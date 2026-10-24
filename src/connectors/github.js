@@ -8,7 +8,7 @@ import { log } from '../util/log.js';
 import { redactMessage } from '../util/redact.js';
 import { isSensitiveDir, isInside } from '../util/sensitive.js';
 import { assertAllowed, auditExternal } from '../util/egress.js';
-import { classify, isProbablyBinary, makeDoc, httpJson, isIndexable } from './base.js';
+import { classify, isProbablyBinary, makeDoc, httpJson, isIndexable, emptySkipped } from './base.js';
 
 const exec = promisify(execFile);
 
@@ -197,6 +197,7 @@ function permalink(src, sha, p, start, end) {
 export async function syncGithub(src, ctx) {
   const security = ctx?.config?.security || {};
   let blocked = 0;
+  const skipped = emptySkipped();
   const include = src.include || [];
   const exclude = [...DEFAULT_EXCLUDE, ...(src.exclude || [])];
   const maxBytes = src.maxFileBytes ?? 400_000;
@@ -213,11 +214,11 @@ export async function syncGithub(src, ctx) {
       if (!isIncluded(rel, include, exclude)) continue;
       const abs = path.join(dir, rel);
       const st = await fsp.stat(abs);
-      if (st.size > maxBytes) continue;
+      if (st.size > maxBytes) { skipped.tooLarge++; continue; }
       const buf = await fsp.readFile(abs);
-      if (isProbablyBinary(buf)) continue;
+      if (isProbablyBinary(buf)) { skipped.binary++; continue; }
       const { kind, lang } = classify(rel);
-      if (kind === 'other' && !src.includeUnknownTypes) continue;
+      if (kind === 'other' && !src.includeUnknownTypes) { skipped.unknownType++; continue; }
       docs.push(makeDoc({
         sourceId: src.id, sourceType: 'github', docPath: rel, title: rel,
         kind, lang, text: buf.toString('utf8'),
@@ -237,17 +238,19 @@ export async function syncGithub(src, ctx) {
     sha = refInfo.sha;
     const tree = await httpJson(`${api}/repos/${src.repo}/git/trees/${sha}?recursive=1`, { headers, purpose: `github:${src.id}` });
     const files = (tree.tree || []).filter((t) => {
-      if (t.type !== 'blob' || t.size > maxBytes) return false;
+      if (t.type !== 'blob') return false;
       if (!isIndexable(t.path, security)) { blocked++; return false; }
-      return isIncluded(t.path, include, exclude);
+      if (!isIncluded(t.path, include, exclude)) return false;
+      if (t.size > maxBytes) { skipped.tooLarge++; return false; }
+      return true;
     });
     const limited = src.maxFiles ? files.slice(0, src.maxFiles) : files;
     for (const f of limited) {
       const { kind, lang } = classify(f.path);
-      if (kind === 'other' && !src.includeUnknownTypes) continue;
+      if (kind === 'other' && !src.includeUnknownTypes) { skipped.unknownType++; continue; }
       const blob = await httpJson(`${api}/repos/${src.repo}/git/blobs/${f.sha}`, { headers, purpose: `github:${src.id}` });
       const buf = Buffer.from(blob.content || '', blob.encoding === 'base64' ? 'base64' : 'utf8');
-      if (isProbablyBinary(buf)) continue;
+      if (isProbablyBinary(buf)) { skipped.binary++; continue; }
       docs.push(makeDoc({
         sourceId: src.id, sourceType: 'github', docPath: f.path, title: f.path,
         kind, lang, text: buf.toString('utf8'),
@@ -263,21 +266,26 @@ export async function syncGithub(src, ctx) {
     const api = src.apiBaseUrl || 'https://api.github.com';
     const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'context-grill' };
     if (tk) headers.Authorization = `Bearer ${tk}`;
-    const limit = Math.max(src.issues?.limit || 0, src.pulls?.limit || 0) || 100;
-    const state = src.issues?.state || src.pulls?.state || 'all';
-    let page = 1;
+    // issues と pulls は別々に取得し、それぞれの limit / state を守る。
+    // /issues は PR も返すので、issues 側では pull_request を持つものを数えずに除く。
+    const fetchKind = async (endpoint, cfg, accept, isPr) => {
+      const limit = cfg.limit || 100;
+      const state = cfg.state || 'all';
+      const collected = [];
+      let page = 1;
+      while (collected.length < limit) {
+        const items = await httpJson(`${api}/repos/${src.repo}/${endpoint}?state=${state}&per_page=100&page=${page}&sort=updated`, { headers, purpose: `github:${src.id}` });
+        if (!items || items.length === 0) break;
+        collected.push(...items.filter(accept));
+        if (items.length < 100) break;
+        page++;
+      }
+      return collected.slice(0, limit).map((it) => ({ it, isPr }));
+    };
     const collected = [];
-    while (collected.length < limit) {
-      const items = await httpJson(`${api}/repos/${src.repo}/issues?state=${state}&per_page=100&page=${page}&sort=updated`, { headers, purpose: `github:${src.id}` });
-      if (!items || items.length === 0) break;
-      collected.push(...items);
-      if (items.length < 100) break;
-      page++;
-    }
-    for (const it of collected.slice(0, limit)) {
-      const isPr = Boolean(it.pull_request);
-      if (isPr && !src.pulls?.enabled) continue;
-      if (!isPr && !src.issues?.enabled) continue;
+    if (src.issues?.enabled) collected.push(...await fetchKind('issues', src.issues, (it) => !it.pull_request, false));
+    if (src.pulls?.enabled) collected.push(...await fetchKind('pulls', src.pulls, () => true, true));
+    for (const { it, isPr } of collected) {
       const body = [
         `# ${isPr ? 'PR' : 'Issue'} #${it.number}: ${it.title}`,
         `state: ${it.state} / author: ${it.user?.login} / created: ${it.created_at} / updated: ${it.updated_at}`,
@@ -294,7 +302,7 @@ export async function syncGithub(src, ctx) {
     }
   }
 
-  return { docs, state: { sha, syncedAt: new Date().toISOString(), count: docs.length, mode, blockedSensitive: blocked } };
+  return { docs, state: { sha, syncedAt: new Date().toISOString(), count: docs.length, mode, blockedSensitive: blocked, skipped } };
 }
 
 export function githubLineUrl(doc, start, end) {
