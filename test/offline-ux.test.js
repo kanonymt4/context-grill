@@ -97,7 +97,8 @@ test('privacy: normal の出力は従来どおり（回帰ガード）', async (
   const r = runCli(dir, file, ['privacy']);
   assert.equal(r.code, 0);
   assert.match(r.out, /■ 送信が許可されているホスト（これ以外へは送信不可）\n/);
-  assert.match(r.out, /送信あり {2}ソース取得/);
+  // この project は local ソースだけなので、ソース取得で外へ出るものは無い
+  assert.match(r.out, /送信なし {2}ソース取得（ローカルのみ）/);
   assert.match(r.out, /送信なし {2}埋め込み API/);
   assert.doesNotMatch(r.out, /offline のため/);
   assert.doesNotMatch(r.out, /（offline）/);
