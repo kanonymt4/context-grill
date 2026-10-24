@@ -1,6 +1,7 @@
 import fsp from 'node:fs/promises';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { loadConfig, paths, ensureDirs } from '../config.js';
 import { IndexStore } from '../index/store.js';
 import { hybridSearch } from '../index/search.js';
@@ -12,7 +13,6 @@ import { verify } from '../verify/gate.js';
 import { validate } from '../llm/jsonschema.js';
 import { runTaskWithStore, resolveTask, resolveEffort, resolveSourceIds } from '../llm/pipeline.js';
 import { listPresets, validatePresets, resolvePreset, getPreset, PresetError } from '../presets.js';
-import { shortHash } from '../util/misc.js';
 import { initEgress, egressPlan, getPolicy } from '../util/egress.js';
 import { redactText } from '../util/redact.js';
 
@@ -55,7 +55,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: '検索クエリ（日本語可・コード識別子可）' },
+        query: { type: 'string', minLength: 1, pattern: '\\S', description: '検索クエリ（日本語可・コード識別子可）' },
         k: { type: 'integer', minimum: 1, maximum: 100, description: '返す件数（1〜100、既定 12）' },
         sources: { type: 'array', items: { type: 'string' }, description: '対象ソース ID を限定' },
         kinds: { type: 'array', items: { type: 'string', enum: ['code', 'doc', 'config', 'other', 'issue', 'pr', 'ticket'] }, description: 'code/doc/config/other/issue/pr/ticket で限定（other は拡張子で分類できないファイル）' },
@@ -231,6 +231,15 @@ function promptText(p, toolArgs) {
 const PACK_ID_HEX_LEN = 10;
 const PACK_ID_RE = new RegExp(`^pack-[0-9a-f]{${PACK_ID_HEX_LEN}}$`);
 
+// packs ディレクトリに残す pack の最大件数。保存のたびに、超えた分を更新時刻の古いものから消す。
+const MAX_PACKS = 200;
+// pack_id の確保を、衝突（EEXIST）したときに作り直す回数の上限。
+const PACK_ID_ATTEMPTS = 10;
+
+// context_grill_sync を直列化するチェーン。並行 sync は 1 つの索引ディレクトリを互いに壊し合うため、
+// 2 本目以降は前の完了を待つ（前が失敗しても次は走る）。
+let syncChain = Promise.resolve();
+
 // stdin の 1 行（未完の行を含む）の上限。超えた行は捨てて -32700 を返す。
 const MAX_LINE_CHARS = 16 * 1024 * 1024;
 
@@ -276,6 +285,44 @@ export async function startMcpServer({ configPath, offline } = {}) {
     const f = path.resolve(packDir, `${packId}.json`);
     if (!f.startsWith(root)) throw new Error('pack_id が packs ディレクトリの外を指しています');
     return f;
+  };
+
+  /**
+   * pack を新しい pack_id で保存し、pack_id を返す。
+   *
+   * pack_id は乱数で作り、排他作成（wx）で書く。内容のハッシュから作ると、同じ instruction を
+   * sources などだけ変えて同時に呼んだときに同じ ID になり、pack を上書きし合って別の呼び出しの
+   * 証拠を返してしまう。EEXIST（乱数の衝突）なら作り直す。
+   */
+  const savePack = async (body) => {
+    for (let i = 0; i < PACK_ID_ATTEMPTS; i++) {
+      const packId = `pack-${crypto.randomBytes(PACK_ID_HEX_LEN / 2).toString('hex')}`;
+      try {
+        await fsp.writeFile(path.join(packDir, `${packId}.json`), JSON.stringify({ packId, ...body }, null, 2), { flag: 'wx' });
+        return packId;
+      } catch (e) {
+        if (e.code !== 'EEXIST') throw e;
+      }
+    }
+    throw new Error('pack_id を確保できませんでした');
+  };
+
+  /**
+   * packs の件数を MAX_PACKS に保つ。更新時刻の古い pack- で始まる .json から消す。
+   * 保存の後に呼び、失敗は握り潰す（間引きの失敗で evidence_pack を失敗させない）。
+   */
+  const prunePacks = async () => {
+    try {
+      const names = (await fsp.readdir(packDir)).filter((n) => n.startsWith('pack-') && n.endsWith('.json'));
+      if (names.length <= MAX_PACKS) return;
+      const stats = (await Promise.all(names.map(async (n) => {
+        try { return { n, t: (await fsp.lstat(path.join(packDir, n))).mtimeMs }; } catch { return null; }
+      }))).filter(Boolean);
+      stats.sort((a, b) => a.t - b.t || (a.n < b.n ? -1 : 1));
+      for (const { n } of stats.slice(0, Math.max(0, stats.length - MAX_PACKS))) {
+        await fsp.unlink(path.join(packDir, n)).catch(() => {});
+      }
+    } catch { /* 握り潰す */ }
   };
 
   /**
@@ -501,6 +548,32 @@ export async function startMcpServer({ configPath, offline } = {}) {
     }
   };
 
+  /** context_grill_sync の本体。呼び出し側（callTool）が syncChain で直列化する。 */
+  const syncOnce = async (args) => {
+    const report = await syncSources(config, { only: normalizeSources(args.sources), force: Boolean(args.full) });
+    // 索引を作り直す前にストアを手放して docs.txt の fd を解放する。
+    // finish() は docs.txt.tmp を rename で置き換えるが、Windows では開いている
+    // ファイルを rename の宛先にできず EPERM になる。作り直した索引を publish する
+    // 側が自分で握っているハンドルに阻まれる形なので、リトライしても回復しない。
+    await invalidateStore();
+    let manifest;
+    try {
+      manifest = await buildIndex(config, {});
+    } catch (e) {
+      // offline のため埋め込みの送信がブロックされた場合だけ握る。buildIndex は失敗前に
+      // BM25 の索引を公開済みなので、同期結果（report）を失わずに返す。
+      // 同意不足・許可外ホストなど、offline 以外の失敗は従来どおりエラーにする。
+      if (e?.name !== 'EgressBlocked' || getPolicy()?.mode !== 'offline') throw e;
+      let index = null;
+      try {
+        const s = await IndexStore.open(paths(config).index, { postings: false });
+        try { index = { chunks: s.stats().chunks, indexKey: s.stats().indexKey }; } finally { await s.close(); }
+      } catch { /* 索引が開けなければ null */ }
+      return textResult({ sources: report, index, embedding: { ok: false, error: redactText(String(e.message).split('\n')[0]).text } });
+    }
+    return textResult({ sources: report, index: { chunks: manifest.N, indexKey: manifest.indexKey } });
+  };
+
   /**
    * ツールの実体。索引が要るものは引数の getStore() で取得する。
    * getStore() は runRequest がリクエストごとに用意し、呼んだ時点で参照を確保するので、
@@ -544,8 +617,8 @@ export async function startMcpServer({ configPath, offline } = {}) {
           kindPriors: task.kindPriors, sourcePriority,
         });
         const pack = buildEvidencePack(results, { budgetTokens: preset.evidenceTokens ?? config.budget.evidenceTokens, redact: config.security?.redactSecrets !== false });
-        const packId = `pack-${shortHash(args.instruction + taskId + s.manifest.indexKey + Date.now(), PACK_ID_HEX_LEN)}`;
-        await fsp.writeFile(path.join(packDir, `${packId}.json`), JSON.stringify({ packId, taskId, instruction: args.instruction, pack }, null, 2));
+        const packId = await savePack({ taskId, instruction: args.instruction, pack });
+        await prunePacks();
 
         const includeStatic = args.include_static ?? task.staticNeeds.findings;
         let staticBlock = null;
@@ -576,7 +649,7 @@ export async function startMcpServer({ configPath, offline } = {}) {
         // 応答が膨らむ入力は、pack を開く前に拒否する（検証後の result をそのまま返すため）。
         if (!isWithinResultLimits(args.result)) throw new Error('result が大きすぎるか深すぎます（深さ 64・2MB まで）');
         const f = packFile(args.pack_id);
-        if (!fs.existsSync(f)) return textResult({ error: `pack_id ${args.pack_id} が見つかりません` });
+        if (!fs.existsSync(f)) throw new Error(`pack_id ${args.pack_id} が見つかりません`);
         const saved = await readPack(args.pack_id);
         const task = TASKS[saved.taskId] || TASKS.spec;
         const schema = envelopeSchema(task.itemTypes);
@@ -603,19 +676,25 @@ export async function startMcpServer({ configPath, offline } = {}) {
         });
       }
       case 'context_grill_fetch': {
-        if (args.pack_id && args.evidence_id) {
+        // pack 経路は pack_id と evidence_id がそろったときだけ。片方だけを path 経路に落とすと
+        // 「パスが見つかりません: undefined」という無関係なエラーになる。
+        const hasPack = args.pack_id !== undefined;
+        if (hasPack !== (args.evidence_id !== undefined)) throw new Error('pack_id と evidence_id は両方指定してください');
+        if (hasPack) {
           const f = packFile(args.pack_id);
-          if (!fs.existsSync(f)) return textResult({ error: 'pack が見つかりません' });
+          if (!fs.existsSync(f)) throw new Error('pack が見つかりません');
           const saved = await readPack(args.pack_id);
           const e = saved.pack.items.find((x) => x.id === args.evidence_id);
-          return textResult(e || { error: `${args.evidence_id} は pack にありません` });
+          if (!e) throw new Error(`${args.evidence_id} は pack にありません`);
+          return textResult(e);
         }
         const onlySource = normalizeSource(args.source);
         const docs = await allDocs(config, onlySource);
         const doc = docs.find((d) => d.path === args.path && (!onlySource || onlySource.includes(d.sourceId)));
-        if (!doc) return textResult({ error: `パスが見つかりません: ${args.path}` });
+        if (!doc) throw new Error(`パスが見つかりません: ${args.path}`);
         const lines = doc.text.split('\n');
         const start = args.start ?? 1;
+        if (start > lines.length) throw new Error(`start が行数 ${lines.length} を超えています`);
         if (args.end !== undefined && args.end < start) throw new Error('end は start 以上にしてください');
         // end を付けても、既定の窓（start から 201 行）を超えない
         const end = Math.min(lines.length, args.end ?? start + 200, start + 200);
@@ -637,28 +716,10 @@ export async function startMcpServer({ configPath, offline } = {}) {
         return textResult(safe(res.markdown));
       }
       case 'context_grill_sync': {
-        const report = await syncSources(config, { only: normalizeSources(args.sources), force: Boolean(args.full) });
-        // 索引を作り直す前にストアを手放して docs.txt の fd を解放する。
-        // finish() は docs.txt.tmp を rename で置き換えるが、Windows では開いている
-        // ファイルを rename の宛先にできず EPERM になる。作り直した索引を publish する
-        // 側が自分で握っているハンドルに阻まれる形なので、リトライしても回復しない。
-        await invalidateStore();
-        let manifest;
-        try {
-          manifest = await buildIndex(config, {});
-        } catch (e) {
-          // offline のため埋め込みの送信がブロックされた場合だけ握る。buildIndex は失敗前に
-          // BM25 の索引を公開済みなので、同期結果（report）を失わずに返す。
-          // 同意不足・許可外ホストなど、offline 以外の失敗は従来どおりエラーにする。
-          if (e?.name !== 'EgressBlocked' || getPolicy()?.mode !== 'offline') throw e;
-          let index = null;
-          try {
-            const s = await IndexStore.open(paths(config).index, { postings: false });
-            try { index = { chunks: s.stats().chunks, indexKey: s.stats().indexKey }; } finally { await s.close(); }
-          } catch { /* 索引が開けなければ null */ }
-          return textResult({ sources: report, index, embedding: { ok: false, error: redactText(String(e.message).split('\n')[0]).text } });
-        }
-        return textResult({ sources: report, index: { chunks: manifest.N, indexKey: manifest.indexKey } });
+        // 同一プロセス内の sync は直列化する。前の sync が失敗しても、次は走らせる。
+        const run = syncChain.then(() => syncOnce(args));
+        syncChain = run.catch(() => {});
+        return run;
       }
       default:
         throw new Error(`未知のツール: ${name}`);
@@ -712,10 +773,15 @@ export async function startMcpServer({ configPath, offline } = {}) {
     if (msg === null || typeof msg !== 'object' || Array.isArray(msg)) {
       return err(null, -32600, 'Invalid Request: リクエストは JSON オブジェクトで指定してください');
     }
+    // id の無いメッセージは通知。応答を返さず、何も実行しない（tools/call や prompts/get も含む）。
+    if (!Object.hasOwn(msg, 'id')) return;
     const { id, method, params } = msg;
+    // id は文字列か整数のみ（null・小数・真偽値・オブジェクト・配列は不可）。応答の id は特定できないので null。
+    if (typeof id !== 'string' && !Number.isInteger(id)) {
+      return err(null, -32600, 'Invalid Request: id は文字列または整数で指定してください');
+    }
     if (typeof method !== 'string') {
-      if (id !== undefined) err(id, -32600, 'Invalid Request: method は文字列で指定してください');
-      return;
+      return err(id, -32600, 'Invalid Request: method は文字列で指定してください');
     }
     try {
       if (method === 'initialize') {
@@ -736,10 +802,7 @@ export async function startMcpServer({ configPath, offline } = {}) {
       if (method === 'ping') return ok(id, {});
       if (method === 'tools/list') return ok(id, { tools: toolList });
       if (method === 'prompts/list') return ok(id, { prompts: promptList() });
-      if (method === 'prompts/get') {
-        if (id === undefined) return;
-        return getPrompt(id, params);
-      }
+      if (method === 'prompts/get') return getPrompt(id, params);
       if (method === 'tools/call') {
         const name = params?.name;
         // 未知のツールは JSON-RPC のエラーで返す（isError はツール実行の失敗用）。
@@ -765,15 +828,13 @@ export async function startMcpServer({ configPath, offline } = {}) {
         const result = await runRequest((getStore) => callTool(name, args, getStore));
         return ok(id, result);
       }
-      if (id !== undefined) err(id, -32601, `Method not found: ${method}`);
+      err(id, -32601, `Method not found: ${method}`);
     } catch (e) {
-      if (id !== undefined) {
-        // isError の形は tools/call の結果スキーマ。他のメソッドで返すとクライアントの検証に通らない。
-        if (method === 'tools/call') {
-          ok(id, { content: [{ type: 'text', text: `エラー: ${e.message}` }], isError: true });
-        } else {
-          err(id, -32603, `内部エラー: ${e.message}`);
-        }
+      // isError の形は tools/call の結果スキーマ。他のメソッドで返すとクライアントの検証に通らない。
+      if (method === 'tools/call') {
+        ok(id, { content: [{ type: 'text', text: `エラー: ${e.message}` }], isError: true });
+      } else {
+        err(id, -32603, `内部エラー: ${e.message}`);
       }
     }
   }
