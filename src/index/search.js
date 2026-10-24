@@ -4,16 +4,34 @@ import { embedQuery } from './embed.js';
 import { log } from '../util/log.js';
 import { redactMessage } from '../util/redact.js';
 
-/** Reciprocal Rank Fusion: 異なるスコア尺度を順位だけで融合する（スケール依存がなく再現性が高い） */
-export function rrf(lists, k = 60) {
+/**
+ * 正規化したスコアの平均で融合する（CombSUM をリスト数で割ったもの）。
+ *
+ * 以前は RRF（順位だけで融合）だった。RRF は「BM25 で 15.7 対 1.0」と「15.7 対 15.6」を区別できず、
+ * 隣り合う順位の差（1/61 − 1/62 ≒ 0.00026）より大きい加点で順位が入れ替わっていた。
+ * ここでは各リストのスコアの大きさを残す。
+ *  - BM25: score / max。0 が「一致なし」という自然な原点なので、比がそのまま意味を持つ
+ *  - ベクトル: (score − min) / (max − min)。cos 類似度には自然な原点がなく、無関係な文書でも
+ *    0.2〜0.4 程度になるため、max で割るだけでは上位がほぼ同じ値に潰れる
+ * 各リストは降順に並んでいる前提（store.bm25 / store.vectorSearch の topN）。
+ * 結果は [0, 1]。同点は idx 昇順 → 決定的。
+ */
+export function fuseScores(lists) {
   const acc = new Map();
-  for (const list of lists) {
-    for (let rank = 0; rank < list.length; rank++) {
-      const { idx } = list[rank];
-      acc.set(idx, (acc.get(idx) || 0) + 1 / (k + rank + 1));
+  for (const { items, kind } of lists) {
+    if (!items.length) continue;
+    const max = items[0].score, min = items[items.length - 1].score;
+    for (const { idx, score } of items) {
+      if (!Number.isFinite(score)) throw new Error(`検索結果のスコアが数値ではありません (idx=${idx})`);
+      let v;
+      if (kind === 'vector') v = max > min ? (score - min) / (max - min) : 1;
+      else v = max > 0 ? score / max : 0;
+      acc.set(idx, (acc.get(idx) || 0) + v);
     }
   }
-  return [...acc.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).map(([idx, score]) => ({ idx, score }));
+  const n = lists.length || 1;
+  return [...acc.entries()].map(([idx, s]) => ({ idx, score: s / n }))
+    .sort((a, b) => b.score - a.score || a.idx - b.idx);
 }
 
 function overlapRatio(aTokens, bTokens) {
@@ -27,6 +45,9 @@ function overlapRatio(aTokens, bTokens) {
   }
   return hit / aTokens.size;
 }
+
+/** MMR で「ほぼ同一」とみなす類似度（トークンの Jaccard またはベクトルの内積） */
+const DUP_SIM = 0.95;
 
 /** MMR: 関連度と多様性のバランス。同じファイルばかり返るのを防ぎ、トークン当たりの情報量を上げる。 */
 function mmrSelect(store, candidates, { lambda = 0.72, k = 24, useVectors = false }) {
@@ -56,7 +77,10 @@ function mmrSelect(store, candidates, { lambda = 0.72, k = 24, useVectors = fals
       for (const s of selected) div = Math.max(div, sim(pool[i].idx, s.idx));
       // 同一ファイル内の連続チャンクは冗長になりやすいので追加ペナルティ
       const sameDoc = selected.some((s) => store.meta[s.idx].docId === store.meta[pool[i].idx].docId) ? 0.08 : 0;
-      const val = lambda * rel - (1 - lambda) * div - sameDoc;
+      // ほぼ同一の本文は、別の本文の候補が残っている間は選ばない（足りなければ後で埋める）。
+      // スコアに大きさを残したので、関連度の差が λ の重みだけでは重複の罰を上回ることがある
+      const dup = div >= DUP_SIM ? 1 : 0;
+      const val = lambda * rel - (1 - lambda) * div - sameDoc - dup;
       if (val > bestVal) { bestVal = val; best = i; }
     }
     selected.push(pool.splice(best, 1)[0]);
@@ -66,7 +90,7 @@ function mmrSelect(store, candidates, { lambda = 0.72, k = 24, useVectors = fals
 
 /**
  * ハイブリッド検索。BM25（語彙一致・コード識別子に強い）とベクトル（言い換えに強い）を
- * RRF で融合 → 決定的なフィーチャ加点 → MMR で多様化。
+ * 正規化スコアで融合（fuseScores）→ 決定的なフィーチャ補正（乗法）→ MMR で多様化。
  * 埋め込み無効時も BM25 のみで同じ手順が成立する。
  */
 export async function hybridSearch(store, opts) {
@@ -88,11 +112,11 @@ export async function hybridSearch(store, opts) {
       for (const [t, w] of bridgeTerms(q)) if (!terms.has(t)) terms.set(t, w);
     }
     for (const [t, c] of terms) allTerms.set(t, (allTerms.get(t) || 0) + c);
-    lists.push(store.bm25(terms, perQuery, filter));
+    lists.push({ kind: 'bm25', items: store.bm25(terms, perQuery, filter) });
     if (store.dims && embedCfg.provider !== 'none') {
       try {
         const qv = await embedQuery(q, embedCfg);
-        if (qv) lists.push(store.vectorSearch(qv, perQuery, filter));
+        if (qv) lists.push({ kind: 'vector', items: store.vectorSearch(qv, perQuery, filter) });
       } catch (e) {
         // 埋め込み失敗時は BM25 のみで継続する（動作は保証）。ただし順位が変わり得るので、1 回の検索につき 1 回だけ知らせる
         if (!embedWarned) {
@@ -104,16 +128,17 @@ export async function hybridSearch(store, opts) {
     }
   }
 
-  let fused = rrf(lists, h.rrfK);
+  // 加点は乗法の補正にする。スコアの比を 1 + Σ(係数 × 特徴) 倍しか動かせないので、
+  // 僅差の順位付けには効き、BM25 が桁違いに強い文書を追い越すことはない。
   const boosts = config.retrieval.boosts;
-  fused = fused.map((r) => {
+  const fused = fuseScores(lists).map((r) => {
     const m = store.meta[r.idx];
-    let s = r.score;
     const pathTokens = tokenize(`${m.path} ${m.title}`);
-    s += boosts.pathMatch * overlapRatio(allTerms, pathTokens) * (1 / (h.rrfK + 1)) * 30;
-    s += (boosts.kindPrior * (kindPriors[m.kind] ?? 0)) * (1 / (h.rrfK + 1)) * 30;
-    s += (boosts.sourcePriority * (sourcePriority[m.sourceId] ?? 0)) * (1 / (h.rrfK + 1)) * 30;
-    return { ...r, score: s };
+    const factor = 1
+      + boosts.pathMatch * overlapRatio(allTerms, pathTokens)
+      + boosts.kindPrior * (kindPriors[m.kind] ?? 0)
+      + boosts.sourcePriority * (sourcePriority[m.sourceId] ?? 0);
+    return { ...r, score: r.score * factor };
   }).sort((a, b) => b.score - a.score || a.idx - b.idx);
 
   const picked = mmrSelect(store, fused, { lambda: h.mmrLambda, k: finalK, useVectors: Boolean(store.dims) });
