@@ -7,7 +7,6 @@ import { parseConfluenceUrl } from './util/urls.js';
 export const DEFAULTS = {
   project: 'untitled',
   workspace: '.context-grill',
-  language: 'ja',
   sources: [],
   retrieval: {
     chunk: {
@@ -15,8 +14,8 @@ export const DEFAULTS = {
       doc: { maxChars: 2200, overlapChars: 220 },
     },
     glossaryBridge: true,
-    hybrid: { bm25Top: 150, vectorTop: 150, rrfK: 60, mmrLambda: 0.72, final: 28, perQueryTop: 60 },
-    boosts: { pathMatch: 0.35, titleMatch: 0.25, sourcePriority: 0.15, kindPrior: 0.2 },
+    hybrid: { rrfK: 60, mmrLambda: 0.72, final: 28, perQueryTop: 60 },
+    boosts: { pathMatch: 0.35, sourcePriority: 0.15, kindPrior: 0.2 },
     embedding: {
       provider: 'none',          // none | openai | voyage | openai-compat
       model: 'text-embedding-3-small',
@@ -29,7 +28,6 @@ export const DEFAULTS = {
   llm: {
     provider: 'anthropic',       // anthropic | openai | openai-compat | dry
     model: 'claude-sonnet-5',
-    plannerModel: null,          // 省略時は決定的プランナのみを使用
     baseUrl: null,
     apiKeyEnv: 'ANTHROPIC_API_KEY',
     temperature: 0,
@@ -61,7 +59,6 @@ export const DEFAULTS = {
     requireVerbatimQuote: true,
     dropUnverifiedItems: true,
     forbidSpeculativeLanguage: true,
-    language: 'ja',
   },
   presets: [],                   // 名前付きの調査テンプレート（形式は src/presets.js。effortPresets とは別物）
   effortPresets: {
@@ -210,7 +207,7 @@ export async function loadConfig(explicitPath) {
   merged.workspaceDir = path.resolve(rootDir, merged.workspace);
   // 配列を期待するフィールドに文字列が1つだけ書かれても動くようにする。
   // （文字列のまま for...of すると1文字ずつ反復してしまうため、ここで吸収する）
-  const ARRAY_FIELDS = ['pageUrls', 'pageIds', 'labels', 'include', 'exclude', 'titleGlobs', 'spaceKeys'];
+  const ARRAY_FIELDS = ['pageUrls', 'pageIds', 'labels', 'include', 'exclude'];
   for (const s of merged.sources || []) {
     for (const f of ARRAY_FIELDS) {
       if (typeof s[f] === 'string') s[f] = [s[f]];
@@ -363,8 +360,9 @@ function validate(c) {
     }
   }
   // 展開後の設定値に秘密の実値が紛れ込んでいないか（URL 等への混入で外部に漏れるのを防ぐ）
+  // 名前の集合は util/redact.js の redactMessage と同じにそろえる
   const secretValues = Object.entries(process.env)
-    .filter(([k, v]) => v && v.length >= 12 && /TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL/i.test(k))
+    .filter(([k, v]) => v && v.length >= 12 && /TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|SESSION|BEARER/i.test(k))
     .map(([k, v]) => [k, v]);
   const scan = (node, at) => {
     if (typeof node === 'string') {
@@ -376,11 +374,12 @@ function validate(c) {
     } else if (Array.isArray(node)) node.forEach((n, i) => scan(n, `${at}[${i}]`));
     else if (node && typeof node === 'object') for (const [k, v] of Object.entries(node)) scan(v, `${at}.${k}`);
   };
-  scan(c.sources, 'sources');
-  scan(c.llm, 'llm');
-  scan(c.retrieval, 'retrieval');
-  scan(c.security, 'security');
-  scan(c.presets, 'presets');
+  // マージ後の設定の全体を走査する（project / workspace / budget / policy / effortPresets と未知のキーも含む）。
+  // loadConfig が後から足す実パスの導出値（rootDir / configPath / workspaceDir）は、元の値を走査済みなので除く
+  for (const [k, v] of Object.entries(c)) {
+    if (k === 'rootDir' || k === 'configPath' || k === 'workspaceDir') continue;
+    scan(v, k);
+  }
   if (errs.length) throw new Error('設定エラー:\n  - ' + errs.join('\n  - '));
 }
 

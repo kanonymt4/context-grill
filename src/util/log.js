@@ -2,7 +2,11 @@
 const LEVELS = { silent: 0, error: 1, warn: 2, info: 3, debug: 4 };
 let current = LEVELS[process.env.CONTEXT_GRILL_LOG_LEVEL] ?? LEVELS.info;
 
-export function setLevel(name) { if (name in LEVELS) current = LEVELS[name]; }
+/** --log に指定できる水準名（CLI の検査が参照する） */
+export const LOG_LEVEL_NAMES = Object.keys(LEVELS);
+
+// `in` は constructor / toString などの prototype のキーでも真になるため、自分のキーだけを見る
+export function setLevel(name) { if (Object.hasOwn(LEVELS, name)) current = LEVELS[name]; }
 function emit(level, prefix, args) {
   if (current < LEVELS[level]) return;
   process.stderr.write(prefix + ' ' + args.map(fmt).join(' ') + '\n');
