@@ -71,6 +71,14 @@ export const DEFAULTS = {
   },
 };
 
+const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+// 真偽値として使われるキー。"false" のような文字列を通すと真偽判定が逆になる
+const SECURITY_BOOL_FIELDS = ['allowEmbeddingUpload', 'allowLlmUpload', 'redactSecrets', 'denySensitivePaths', 'auditLog'];
+const POLICY_BOOL_FIELDS = ['requireCitations', 'requireVerbatimQuote', 'forbidSpeculativeLanguage', 'dropUnverifiedItems'];
+// 文字列の配列として使われる security のキー
+const SECURITY_ARRAY_FIELDS = ['allowHosts', 'extraDenyPaths'];
+
 const CONFIG_NAMES = ['context-grill.config.json', '.context-grill.config.json', 'context-grill.json'];
 
 export function findConfigPath(startDir = process.cwd()) {
@@ -97,8 +105,19 @@ export function loadDotEnv(dir) {
     const eq = line.indexOf('=');
     if (eq < 0) continue;
     const k = line.slice(0, eq).trim().replace(/^export\s+/, '');
-    let v = line.slice(eq + 1).trim();
-    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+    const rest = line.slice(eq + 1);
+    let v = rest.trim();
+    const q = v[0];
+    const close = (q === '"' || q === "'") ? v.indexOf(q, 1) : -1;
+    if (close > 0 && /^\s*(#.*)?$/.test(v.slice(close + 1))) {
+      // 引用符で囲まれた値。閉じ引用符の後ろの行末コメントは捨て、中の # は保持する
+      v = v.slice(1, close);
+    } else if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      v = v.slice(1, -1);
+    } else {
+      // 引用符なしの値は、空白の直後の # 以降を行末コメントとして捨てる（dotenv 互換）。abc#def は保持する
+      v = rest.replace(/\s+#.*$/, '').trim();
+    }
     if (!Object.hasOwn(process.env, k)) process.env[k] = v;
   }
 }
@@ -197,6 +216,13 @@ export async function loadConfig(explicitPath) {
       if (typeof s[f] === 'string') s[f] = [s[f]];
     }
   }
+  // sources 以外で配列として使われるキーも、文字列 1 つなら配列に直す
+  // （直さないと for...of が 1 文字ずつ反復し、許可ホストや除外パターンが壊れる）
+  if (isObj(merged.security)) {
+    for (const f of SECURITY_ARRAY_FIELDS) {
+      if (typeof merged.security[f] === 'string') merged.security[f] = [merged.security[f]];
+    }
+  }
 
   validate(merged);
   // 索引の再現性キー: ソース定義とチャンク設定のみが影響する
@@ -217,6 +243,10 @@ function validate(c) {
   for (const [i, s] of (c.sources || []).entries()) {
     const where = `sources[${i}]`;
     if (!s.id) errs.push(`${where}.id が必要です`);
+    else if (typeof s.id !== 'string' || !/^[A-Za-z0-9._-]+$/.test(s.id) || s.id === '.' || s.id === '..') {
+      // id はキャッシュのディレクトリ名に使われる。../ を含むとワークスペースの外に書かれる
+      errs.push(`${where}.id は英数字と . _ - だけで指定してください（. と .. 単体は不可）`);
+    }
     if (ids.has(s.id)) errs.push(`${where}.id "${s.id}" が重複しています`);
     ids.add(s.id);
     if (!['github', 'confluence', 'jira', 'local'].includes(s.type)) {
@@ -292,6 +322,40 @@ function validate(c) {
   }
   if (!['normal', 'offline'].includes(c.security.networkMode)) {
     errs.push('security.networkMode は normal|offline のいずれかです');
+  }
+  // 真偽値のキー: 文字列 "false" が有効のまま残る（送信の同意が開く）のを防ぐ。null / 未定義は既定値
+  for (const [sec, fields] of [['security', SECURITY_BOOL_FIELDS], ['policy', POLICY_BOOL_FIELDS]]) {
+    if (!isObj(c[sec])) continue;
+    for (const f of fields) {
+      const v = c[sec][f];
+      if (v !== undefined && v !== null && typeof v !== 'boolean') {
+        errs.push(`${sec}.${f} は true / false で指定してください（文字列 "false" は使えません）`);
+      }
+    }
+  }
+  if (isObj(c.security)) {
+    for (const f of SECURITY_ARRAY_FIELDS) {
+      const v = c.security[f];
+      if (v === undefined || v === null) continue;
+      if (!Array.isArray(v) || v.some((x) => typeof x !== 'string')) {
+        errs.push(`security.${f} は文字列、または文字列の配列で指定してください`);
+      }
+    }
+  }
+  // effortPresets: マージ後の値で検査する（既定の段階の部分指定は既定の値が残る）
+  if (!isObj(c.effortPresets)) {
+    errs.push('effortPresets はオブジェクトで指定してください');
+  } else {
+    const posInt = (v) => Number.isInteger(v) && v > 0;
+    for (const [name, p] of Object.entries(c.effortPresets)) {
+      if (!isObj(p)) { errs.push(`effortPresets.${name} はオブジェクトで指定してください`); continue; }
+      for (const f of ['queries', 'final']) {
+        if (!posInt(p[f])) errs.push(`effortPresets.${name}.${f} は正の整数で指定してください`);
+      }
+      if (p.evidenceTokens !== undefined && !posInt(p.evidenceTokens)) {
+        errs.push(`effortPresets.${name}.evidenceTokens は正の整数で指定してください`);
+      }
+    }
   }
   // 展開後の設定値に秘密の実値が紛れ込んでいないか（URL 等への混入で外部に漏れるのを防ぐ）
   const secretValues = Object.entries(process.env)
