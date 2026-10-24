@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // CLI のフラグの扱い。打ち間違えたフラグが黙って無視され、押したつもりの安全側の指定
 // （--dry-run / --offline）が効かないまま LLM に送信される、という問題を防ぐ。
@@ -243,7 +243,7 @@ for (const ok of ['silent', 'error', 'warn', 'info', 'debug']) {
 
 test('log.js の setLevel: prototype のキー（constructor）では水準が変わらない', async () => {
   const code = `
-    import { setLevel, log } from ${JSON.stringify(path.join(ROOT, 'src', 'util', 'log.js'))};
+    import { setLevel, log } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'src', 'util', 'log.js')).href)};
     setLevel('constructor');
     log.debug('DEBUG_VISIBLE');
   `;
