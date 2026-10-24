@@ -1,5 +1,9 @@
 import { estimateTokens } from '../util/tokens.js';
 import { sha256 } from '../util/misc.js';
+import { redactPemBlocks } from '../util/redact.js';
+
+// DECL_RE は \s+ と \s* が重なり二乗になるため、極端に長い行は宣言行として扱わない
+const DECL_MAX_LINE = 2000;
 
 const DECL_RE = /^(\s{0,4})(export\s+|public\s+|private\s+|protected\s+|internal\s+|static\s+|final\s+|async\s+|@)*\s*(function|class|interface|type|enum|struct|const|let|var|def|func|fn|module|namespace|impl|trait|package|describe|it|test|CREATE\s+TABLE|CREATE\s+OR\s+REPLACE)\b/;
 const HEADING_RE = /^(#{1,6})\s+(.*)$/;
@@ -9,7 +13,10 @@ const HEADING_RE = /^(#{1,6})\s+(.*)$/;
  * 文書: 見出し階層で分割 → 長い節はさらに文字数で分割
  * どちらも決定的（同じ入力なら常に同じチャンク）。
  */
-export function chunkDocument(doc, cfg) {
+export function chunkDocument(rawDoc, cfg) {
+  // PEM 秘密鍵は分割の前に文書単位で伏せる（チャンク単位の redactText では BEGIN の無い後続チャンクが素通りする）。
+  // 行数は保たれるので分割位置・行番号は変わらない。キャッシュ済みの doc.text は書き換えない。
+  const doc = { ...rawDoc, text: redactPemBlocks(rawDoc.text) };
   if (doc.kind === 'doc' || doc.kind === 'issue' || doc.kind === 'pr' || doc.kind === 'ticket') {
     return chunkText(doc, cfg.doc);
   }
@@ -43,7 +50,7 @@ export function chunkCode(doc, cfg) {
   const overlap = cfg.overlapLines ?? 12;
   const maxChars = cfg.maxChars ?? 6000;
   const boundaries = new Set();
-  for (let i = 0; i < lines.length; i++) if (DECL_RE.test(lines[i])) boundaries.add(i);
+  for (let i = 0; i < lines.length; i++) if (lines[i].length <= DECL_MAX_LINE && DECL_RE.test(lines[i])) boundaries.add(i);
 
   const out = [];
   let start = 0;

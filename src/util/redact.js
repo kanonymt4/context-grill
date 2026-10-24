@@ -122,3 +122,40 @@ export function redactMessage(message, extraSecrets = []) {
   }
   return redactText(s).text;
 }
+
+/**
+ * PEM 秘密鍵ブロックの本文を伏せる（文書単位。チャンク分割の前に呼ぶ用）。
+ * redactText はチャンク単位で状態（inPem）を持つため、BEGIN を含まない後続チャンクが素通りする。
+ * 行数は保つ（チャンクの行番号とパーマリンクを壊さない）。BEGIN の位置に印を 1 つ置き、
+ * 続く行は END まで空にする。1 行形式は BEGIN〜END を印に置き換え、前後の文字は残す。
+ * END が無い BEGIN は文書の終わりまで伏せる。公開鍵・証明書は対象外。
+ * @param {string} text
+ * @returns {string}
+ */
+export function redactPemBlocks(text) {
+  const s = String(text ?? '');
+  if (!s.includes('PRIVATE KEY')) return s;
+  const begin = /-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
+  const end = /-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
+  let inBlock = false;
+  return s.split('\n').map((line) => {
+    let out = '';
+    let pos = 0;
+    for (;;) {
+      if (inBlock) {
+        end.lastIndex = pos;
+        const e = end.exec(line);
+        if (!e) return out;
+        pos = e.index + e[0].length;
+        inBlock = false;
+      } else {
+        begin.lastIndex = pos;
+        const b = begin.exec(line);
+        if (!b) return out + line.slice(pos);
+        out += line.slice(pos, b.index) + '«REDACTED:PRIVATE_KEY»';
+        pos = b.index + b[0].length;
+        inBlock = true;
+      }
+    }
+  }).join('\n');
+}

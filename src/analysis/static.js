@@ -1,5 +1,6 @@
 import { scanDocument } from './rules.js';
 import { estimateTokens } from '../util/tokens.js';
+import { redactText } from '../util/redact.js';
 
 const SEV_ORDER = { critical: 4, high: 3, medium: 2, low: 1, info: 0 };
 
@@ -76,10 +77,13 @@ export function extractEndpoints(docs, limit = 300) {
         const before = d.text.slice(0, m.index);
         const line = before.split('\n').length;
         const method = (m[2] !== undefined ? m[1] : 'ANY').toUpperCase();
-        const route = m[2] !== undefined ? m[2] : m[1];
+        // route / snippet は CLI の出力・MCP の応答・LLM への入力に出るため、findings と同じく必ず墨消しする
+        // （snippet は墨消ししてから切る。先に切るとトークンが途中で切れて検出されず、断片が残る。
+        //   ミニファイ済みの巨大な 1 行で同じ行を何度も処理しないよう、墨消し前に 2000 字で上限だけ置く）
+        const route = redactText(m[2] !== undefined ? m[2] : m[1]).text;
         out.push({ method, route, framework: fw, sourceId: d.sourceId, path: d.path, line,
           url: d.url && d.sourceType === 'github' ? `${d.url}#L${line}` : d.url,
-          snippet: (lines[line - 1] || '').trim().slice(0, 200) });
+          snippet: redactText((lines[line - 1] || '').trim().slice(0, 2000)).text.slice(0, 200) });
         if (out.length >= limit) return out;
       }
     }
