@@ -161,8 +161,7 @@
     "minEvidencePerItem": 1,
     "requireVerbatimQuote": true,
     "dropUnverifiedItems": true,
-    "forbidSpeculativeLanguage": true,
-    "language": "ja"
+    "forbidSpeculativeLanguage": true
   },
 
   "effortPresets": {
