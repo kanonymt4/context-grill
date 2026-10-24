@@ -15,6 +15,26 @@ export function citationLabel(c) {
 }
 
 /**
+ * 隣接チャンクを行単位の重なりとして結合してよいか。
+ * 行の途中で切れたチャンク（partial）や、重なる行の本文が一致しないチャンク（旧索引の、
+ * 文字数で切ったもの）を行数で切り落とすと、行の後半が黙って消えて逐語引用が合わなくなる。
+ * その場合は結合せず、別の item のまま残す。
+ */
+function canJoin(last, r) {
+  if (last.partial || r.partial) return false;
+  const n = last.end - r.start + 1;
+  if (n <= 0) return true;
+  const lastLines = last.text.split('\n');
+  const rLines = r.text.split('\n');
+  if (lastLines.length < n) return false;
+  const k = Math.min(n, rLines.length);
+  for (let i = 0; i < k; i++) {
+    if (lastLines[lastLines.length - n + i] !== rLines[i]) return false;
+  }
+  return true;
+}
+
+/**
  * 検索結果 → 証拠パック。
  *  - トークン予算内に収める（超過分は落とす。要約で潰さないので逐語照合が常に可能）
  *  - E1..En の安定 ID を振る（LLM はこの ID でしか引用できない）
@@ -25,7 +45,7 @@ export function buildEvidencePack(results, { budgetTokens, maxItems = 200, heade
   const sorted = [...results].sort((a, b) => (a.docId < b.docId ? -1 : a.docId > b.docId ? 1 : a.start - b.start));
   for (const r of sorted) {
     const last = merged[merged.length - 1];
-    if (last && last.docId === r.docId && r.start <= last.end + 3) {
+    if (last && last.docId === r.docId && r.start <= last.end + 3 && canJoin(last, r)) {
       if (r.end > last.end) {
         const overlapLines = Math.max(0, last.end - r.start + 1);
         const extra = r.text.split('\n').slice(overlapLines).join('\n');
