@@ -217,7 +217,12 @@ export async function runTaskWithStore(store, config, opts) {
       '証拠収集のみ行う場合は --dry-run を使用してください（外部送信は発生しません）。');
   }
   if (promptTokens > config.budget.maxTotalTokensPerRun) {
-    throw new Error(`推定プロンプト ${promptTokens} トークンが上限 ${config.budget.maxTotalTokensPerRun} を超えます。--effort low か budget.evidenceTokens を調整してください。`);
+    // 証拠の予算は effortPresets.<effort>.evidenceTokens が優先される（budget.evidenceTokens は、その effort に
+    // evidenceTokens が無いときの既定値にすぎない）ので、効かない budget.evidenceTokens は案内しない
+    const lowHint = effort === 'low' ? '' : '、--effort low を使うか';
+    throw new Error(
+      `推定プロンプト ${promptTokens} トークンが上限 ${config.budget.maxTotalTokensPerRun}（budget.maxTotalTokensPerRun）を超えます。` +
+      `effortPresets.${effort}.evidenceTokens を下げる${lowHint}、budget.maxTotalTokensPerRun を上げてください。`);
   }
 
   // --- 6. 推論 + 機械検証の修復ループ ---------------------------------

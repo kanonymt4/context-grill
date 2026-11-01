@@ -104,6 +104,8 @@ export async function hybridSearch(store, opts) {
   const perQuery = h.perQueryTop ?? 60;
   const allTerms = new Map();
   let embedWarned = false;
+  let consentWarned = false;
+  const embedDenied = config.security?.allowEmbeddingUpload !== true;
 
   for (const q of queries) {
     const terms = queryTerms(q);
@@ -113,7 +115,13 @@ export async function hybridSearch(store, opts) {
     }
     for (const [t, c] of terms) allTerms.set(t, (allTerms.get(t) || 0) + c);
     lists.push({ kind: 'bm25', items: store.bm25(terms, perQuery, filter) });
-    if (store.dims && embedCfg.provider !== 'none') {
+    if (store.dims && embedCfg.provider !== 'none' && embedDenied) {
+      // クエリ文は利用者の調査内容で、外部 API へ送るデータ。チャンク埋め込みと同じ同意（既定は禁止）に従う
+      if (!consentWarned) {
+        consentWarned = true;
+        log.warn('クエリ埋め込みは送りません（security.allowEmbeddingUpload が true ではないため）。BM25 のみで検索します');
+      }
+    } else if (store.dims && embedCfg.provider !== 'none') {
       try {
         const qv = await embedQuery(q, embedCfg);
         if (qv) lists.push({ kind: 'vector', items: store.vectorSearch(qv, perQuery, filter) });
