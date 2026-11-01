@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fsp from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import * as configMod from '../src/config.js';
 import { loadConfig, DEFAULTS } from '../src/config.js';
@@ -119,7 +119,7 @@ test('loadConfig: 未知のキーでは throw せず、stderr に警告する', 
   await withDir(async (dir) => {
     const file = await writeConfig(dir, { ...BASE, securty: { networkMode: 'offline' } });
     // 同じプロセスで警告を拾うため、子プロセスで loadConfig を呼ぶ
-    const code = `import { loadConfig } from ${JSON.stringify(path.join(ROOT, 'src', 'config.js'))};` +
+    const code = `import { loadConfig } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'src', 'config.js')).href)};` +
       `const c = await loadConfig(${JSON.stringify(file)}); console.log(c.security.networkMode);`;
     const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { cwd: dir, encoding: 'utf8', timeout: 60000 });
     assert.equal(r.status, 0, r.stderr);
@@ -131,7 +131,7 @@ test('loadConfig: 未知のキーでは throw せず、stderr に警告する', 
 test('loadConfig: 未知のキーが無ければ警告しない', async () => {
   await withDir(async (dir) => {
     const file = await writeConfig(dir, BASE);
-    const code = `import { loadConfig } from ${JSON.stringify(path.join(ROOT, 'src', 'config.js'))};` +
+    const code = `import { loadConfig } from ${JSON.stringify(pathToFileURL(path.join(ROOT, 'src', 'config.js')).href)};` +
       `await loadConfig(${JSON.stringify(file)});`;
     const r = spawnSync(process.execPath, ['--input-type=module', '-e', code], { cwd: dir, encoding: 'utf8', timeout: 60000 });
     assert.equal(r.status, 0, r.stderr);
