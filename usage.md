@@ -29,11 +29,11 @@ context-grill に「どのリポジトリ・どのページを読ませるか」
 **決め方**
 
 - 設定内で**重複しない**こと（重複すると同じキャッシュを取り合います）
-- **英数字・ハイフン・アンダースコア・ドット**にする（日本語や空白はフォルダ名で置換されます）
+- **英数字・ハイフン・アンダースコア・ドット**にする（`^[A-Za-z0-9._-]+$`。`.` と `..` 単体は不可。日本語や空白を含めると**設定エラー**になり、`sync` や `doctor` が進みません）
 - 検索結果に毎回出るので、**短く、何のソースか分かる**名前に
 
 良い例: `repo` / `wiki` / `api-docs` / `design-docs` / `payment-service`
-避けたい例: `1`（何か分からない） / `私の資料`（置換される） / `my project docs`（空白）
+避けたい例: `1`（何か分からない） / `私の資料`（日本語はエラー） / `my project docs`（空白はエラー）
 
 後から変更するとキャッシュのフォルダ名も変わるため、次回の `sync` で再取得が発生します。
 
@@ -97,7 +97,8 @@ context-grill resolve "https://github.com/acme/api-service" --json   # 機械可
 - **`ref`** はブランチ / タグ / コミット。省略時は既定ブランチ
 - **`mode`** は `clone`（既定・大量ファイル向け）か `api`（少数ファイルだけ取りたいとき）
 - 手元にクローン済みなら `"path": "/Users/me/work/api-service"`（**読み取り専用**、`repo` 不要）
-- **`issues` / `pulls`** を `enabled: true` にすると Issue・PR 本文も一次資料になります（バグ調査で効きます）
+- **`host`**（GitHub Enterprise Server 用）は `ホスト名` か `ホスト名:ポート`（`^[A-Za-z0-9.-]+(:\d+)?$`）だけ。スキーム・ユーザー情報・パスを書くと設定エラーです
+- **`issues` / `pulls`** を `enabled: true` にすると Issue・PR 本文も一次資料になります（バグ調査で効きます）。`limit`（省略時 100）は Issue と PR で別々に効きます
 - 複数リポジトリは `sources` に並べるだけ。`priority` で信頼度に差を付けられます
 
 ---
@@ -305,6 +306,21 @@ JSON としては通ってしまうものの、パス区切りとして機能し
 
 ---
 
+## 設定の検査（読み込み時にエラーになるもの）
+
+設定は読み込み時に検査され、誤りがあれば `doctor` / `sync` などが設定エラーで止まります。
+
+- `security.*` / `policy.*` の真偽値は `true` / `false` だけ。文字列 `"false"` は設定エラー（`"false"` が真として扱われ、送信の同意が開くのを防ぐため）
+- `sources[].id` は `^[A-Za-z0-9._-]+$`
+- `security.allowHosts` / `security.extraDenyPaths` は、文字列 1 つでも配列でも書けます
+- `effortPresets.<段階>.queries` / `.final` は正の整数（書くなら `evidenceTokens` も）
+- GitHub の `host` は `^[A-Za-z0-9.-]+(:\d+)?$`
+- 実装が読まない設定キー（`language`・`policy.language`・`retrieval.hybrid.bm25Top` / `vectorTop`・`retrieval.boosts.titleMatch`・`llm.plannerModel`、
+  使われない `retrieval.hybrid.rrfK`）は、古い設定に残っていても無視されます
+- `.env` の行末コメント: 引用符なしの値は、空白の直後の `#` 以降が値に入りません（`abc#def` は丸ごと値）
+
+---
+
 ## 設定後の流れ
 
 ```bash
@@ -342,15 +358,27 @@ context-grill ask "..." --dry-run               # 送信予定の証拠とプロ
 
 → `src/generated/api.ts` は**除外される**（`include` は評価されません）
 
-**2. `include` を省略すると全ファイルが対象になります**
+**2. `include` を省略すると全ファイルが候補になります**
 
 空配列や未指定は「すべて含む」と解釈されます。「特定のものだけ除きたい」場合は
 `include` を書かず `exclude` だけ指定するのが簡潔です。
 
+ただし `include` に合っても、次のファイルは取り込まれません（`github` / `local`）。`sync` の出力に理由別の件数が出ます
+（例: `種別不明で除外 1 件 / サイズ超過 1 件 / バイナリ 1 件`）。
+
+| 理由 | 条件 | 変えるには |
+| --- | --- | --- |
+| 種別不明 | 拡張子から `code` / `doc` / `config` に分類できない（`.xyz`、拡張子なしなど） | ソースに `"includeUnknownTypes": true` |
+| サイズ超過 | `maxFileBytes`（既定 400,000 バイト）を超える | ソースの `maxFileBytes` を大きくする |
+| バイナリ | 先頭 4KB に NUL バイトを含む | なし |
+
+GitHub の Issue / PR（`issues` / `pulls`）の `limit` は別々に効きます（省略時はそれぞれ 100 件）。
+
 **3. `.git` などの機密ディレクトリは設定と無関係に常に除外されます**
 
 `.git` / `.env` / `node_modules` / 鍵ファイルなどは自動的に弾かれるため、
-`exclude` に書く必要はありません。
+`exclude` に書く必要はありません。照合は大文字小文字を区別しません。
+`credentials.{yml,yaml,toml,ini}` や `private_key.*`・`*.privatekey` なども対象です（一覧は README §10.2）。
 
 ### 使える記法
 

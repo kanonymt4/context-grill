@@ -27,11 +27,11 @@ init / resolve  →  sync  →  search / scan / ask
 | コマンド | 何をするか | LLM | 外部通信 |
 | --- | --- | --- | --- |
 | `init` | 設定のひな形とドキュメントを作業ディレクトリに配置 | 不使用 | なし |
-| `resolve <URL...>` | ブラウザのURLから sources 定義を生成（`--add` で設定に追記） | 不使用 | あり |
+| `resolve <URL...>` | ブラウザのURLから sources 定義を生成（`--add` で設定に追記） | 不使用 | なし |
 | `sync` | ソースを取得して索引を再構築 | 不使用 | あり |
-| `build` | 取得済みキャッシュから索引だけ再構築 | 不使用 | なし |
+| `build` | 取得済みキャッシュから索引だけ再構築 | 不使用 | 埋め込みを有効にした場合のみ |
 | `status` | 索引とソースの状態を表示 | 不使用 | なし |
-| `search <クエリ>` | ハイブリッド検索 | 不使用 | なし |
+| `search <クエリ>` | ハイブリッド検索 | 不使用 | 埋め込みを有効にして `security.allowEmbeddingUpload=true` で同意したときだけ、クエリが埋め込み API へ送られる |
 | `scan` | 静的解析（毎回同じ結果） | 不使用 | なし |
 | `ask <指示>` | 証拠付きで調査・回答を生成 | **使用** | あり |
 | `run <名前> [引数名=値...]` | 設定の `presets` に登録した調査を実行 | **使用** | あり |
@@ -52,8 +52,9 @@ APIキーが要るのは `ask` と `run` だけです（どちらも `--dry-run`
 | `-c, --config <path>` | 設定ファイルのパス |
 | `--source <id>` | 対象ソースを限定（カンマ区切り） |
 | `--json` | JSON で出力 |
-| `--log <level>` | `silent` / `error` / `warn` / `info` / `debug` |
+| `--log <level>` | `silent` / `error` / `warn` / `info` / `debug` のいずれかだけ（他の値はエラー） |
 | `--offline` | 一切の外部通信を禁止（`search` / `scan` / `--dry-run` / `local` ソースの `sync` が動作） |
+| `-v, --version` | バージョンを表示（`version` というコマンド名でも同じ） |
 
 `--offline` は、閉じたネットワークで「本当に何も出ていかないこと」を強制したいときに使います。
 埋め込みを設定していると `sync` は終了コード 1 になります（BM25 の索引は公開されます。`--no-embed` で成功します）。
@@ -61,6 +62,20 @@ APIキーが要るのは `ask` と `run` だけです（どちらも `--dry-run`
 
 値を取るオプション（`--config` / `--source` / `--task` / `--effort` / `--model` / `--out` / `--top` / `--severity` / `--log` など）は値が必須です。値なし・空（`--out=`）・`--no-out` の形はエラーになります。
 `--source` の未知の id、`--severity` の不明な値、整数でない `-k` もエラーです（黙って 0 件や全件になることはありません）。
+
+**未知のオプションはエラー**です（コマンドごとに受け付けるオプションの許可リストがあり、無視されません）。
+`--dryrun` のような打ち間違いは `未知のオプション: --dryrun（--dry-run のことですか？）` と候補を示して終了コード 1 になります。
+そのコマンドで使えないオプション（たとえば `sync` に `--out`）も同じです。`ask` に空白だけの指示を渡すのもエラーです（`指示が空です`）。
+
+`--help` の一覧に載っていませんが、次のオプションも使えます。
+
+| オプション | コマンド | 説明 |
+| --- | --- | --- |
+| `--dir <path>` | `init` | 設定ファイルなどを配置するディレクトリ（既定はカレント） |
+| `--force` | `init` | 既存の `context-grill.config.json` をひな形で上書きする（付けなければ既存の設定は変更せず、ドキュメントなど足りないものだけ補充） |
+| `--id <id>` | `resolve` | 生成する source の `id`（URL が 1 つのときだけ有効） |
+| `--no-embed` | `sync` / `build` | 埋め込み生成をスキップ（`build` では `--help` に載っていません） |
+| `-o <file>` | `scan` / `ask` / `run` | `--out` の短縮形（`--help` に載っていません） |
 
 `run` では `--source` は使えません（対象ソースは preset が決めます）。
 
@@ -78,7 +93,7 @@ context-grill init
 | ファイル | 内容 |
 | --- | --- |
 | `context-grill.config.json` | 調査対象の設定。`sources` を書き換えて使う |
-| `.env.example` | 認証情報のテンプレート。使う場合は `.env` にコピーして編集 |
+| `.env.example` | 認証情報のテンプレート（`GITHUB_TOKEN` / `ATLASSIAN_*` / LLM・埋め込みの API キー。値は空）。使う場合は `.env` にコピーして編集 |
 | `commands.md` | このファイル |
 | `usage.md` | 調査対象（GitHub / Confluence / Jira / ローカル）の指定方法 |
 
@@ -128,7 +143,25 @@ context-grill sync --source repo   # 特定ソースだけ
 
 対象リポジトリやページが更新されたら再実行します。埋め込みは内容ハッシュ単位でキャッシュされるため、2回目以降は変更分しか課金されません。
 
-設定（`include` / `exclude` など）だけ変えた場合は、取得済みキャッシュから再構築する `build` で足ります（ネットワーク不要）。
+設定（`include` / `exclude` など）だけ変えた場合は、取得済みキャッシュから再構築する `build` で足ります（取得のためのネットワークは不要。
+埋め込みを有効にしていれば埋め込み API は使うので、使いたくなければ `build --no-embed`）。
+
+### 取り込まれないファイルと、sync の出力
+
+`github` / `local` ソースでは、次のファイルは取り込まれません。`sync` の出力に、理由別の件数が出ます。
+
+```
+proj: 2 ドキュメント（種別不明で除外 1 件 / サイズ超過 1 件 / バイナリ 1 件）
+```
+
+| 理由 | 条件 | 変えるには |
+| --- | --- | --- |
+| 種別不明 | 拡張子から `code` / `doc` / `config` のどれにも分類できない（`.xyz` など） | ソースに `"includeUnknownTypes": true` |
+| サイズ超過 | ファイルが `maxFileBytes`（既定 400,000 バイト）を超える | ソースの `maxFileBytes` を大きくする |
+| バイナリ | 先頭 4KB に NUL バイトを含む | なし |
+
+`include` / `exclude` で外したファイルはこの件数に入りません。機密パスで除外したものは、別に「機密扱いで除外 N 件」と出ます。
+GitHub の `issues.limit` と `pulls.limit` は別々に効き（省略時はそれぞれ 100 件）、Issue 側では PR を数えません。
 
 ---
 
@@ -144,6 +177,10 @@ context-grill search "pipeline.ts" -k 40
 | `-k, --top <n>` | 返す件数（既定 20） |
 | `--raw` | 墨消しを無効化して原文を表示（取り扱い注意） |
 
+検索はまず BM25 で行い、埋め込みを設定している場合に限りベクトル検索を加えて、正規化したスコアの平均で融合します。
+クエリの埋め込みは `security.allowEmbeddingUpload=true` のときだけ送られ、そうでなければ BM25 のみで検索して警告を出します。
+`score` の尺度は 0〜1.7 程度です（RRF ではありません）。
+
 **コツ**: 日本語の設計文書はキーワードが密なぶんスコアが高くなりやすく、実装コードが埋もれることがあります。コードを探すときは、ファイル名や識別子（`pipeline.ts`、`similarity_threshold` など）で引くと当たりやすくなります。
 
 ---
@@ -153,13 +190,14 @@ context-grill search "pipeline.ts" -k 40
 ```bash
 context-grill scan
 context-grill scan --severity high
-context-grill scan --severity medium --out scan.md
+context-grill scan --severity medium --out scan.json
 ```
 
 | オプション | 説明 |
 | --- | --- |
 | `--severity <lv>` | `critical` / `high` / `medium` / `low` / `info`（既定 low 以上） |
-| `--out <file>` | 結果を書き出す |
+| `--out <file>` | 結果を JSON で書き出す（拡張子によらず JSON） |
+| `--include-tests` | test / tests / spec / fixtures / mocks / examples / docs ディレクトリ配下のファイルも対象に含める（既定では除く） |
 
 ルールベースなので毎回同じ結果になります。CI に組み込むならこれが向いています。
 
@@ -248,11 +286,14 @@ context-grill ask "設計を見直したい" --effort deep
 
 ### 材料が足りないと感じたときの診断
 
-`bundle.md` の冒頭に内訳が出ます。
+本実行（`--dry-run` なし）では、`report.md` の「実行メタデータ」表に内訳が出ます。
 
 ```
 | 提示した証拠 | 19 件 / 52340 トークン (除外 37 件) |
 ```
+
+`--dry-run` の `bundle.md` には、この表は入りません（`bundle.md` は LLM に送る本文だけです）。同じ数字は、実行結果ディレクトリの
+`evidence.json` で確かめます（`items` の件数が「提示した証拠」、`tokens` がトークン数、`droppedCount` が「除外」）。
 
 **「除外」の数字で切り分けます。**
 
@@ -335,13 +376,13 @@ LLM を呼ばずに、送るはずだったプロンプト一式（契約・証�
 
 - **APIキーがなくても使える**。生成された `bundle.md` を任意の LLM に貼れば同じことができます
 - **外部送信ゼロ**。閉じたネットワークでも動きます
-- 送信前に「何が外に出るか」を目視確認できます
+- 送信前に「何が外に出るか」を目視確認できます。`bundle.md` の EVIDENCE（証拠 + 静的解析の節）と USER の本文は、実際に LLM へ送る本文と一致します（墨消し済み）
 
 ```bash
 context-grill ask '設計に穴がないか検証して。「状態遷移」「エラー処理」「排他制御」を確認' --task spec --effort deep --dry-run --out bundle.md
 ```
 
-`--out` を付けない場合は `.context-grill/runs/<日時>-<タスク>-<ハッシュ>/bundle.md` に出力され、実行後にパスが表示されます。
+`bundle.md` は常に `.context-grill/runs/<日時>-<タスク>-<ハッシュ>/` にも保存され（`--out` を付けると、同じ内容をそのファイルにも書きます）、実行後にそのディレクトリのパスが表示されます。
 
 ---
 
@@ -450,7 +491,7 @@ context-grill run bug-triage symptom=-1
 ```
 
 `--json` を付けると `ask` の出力に `preset`（`name` / `args` / `task` / `effort` / `sources` / `instruction`）が
-1 キー加わります。実行結果ディレクトリの `meta.json` には preset の名前は残りません。
+1 キー加わります。実行結果ディレクトリ（`result.json` の `meta`、dry-run では `meta.json`）には preset の名前は残りません。
 
 ### presets — 登録済みの preset を確認する
 
@@ -501,6 +542,23 @@ Claude Code では `/mcp__<サーバー名>__<preset 名> 値1 値2` の形で�
 `effortPresets` は `low` / `normal` / `deep` それぞれの**検索の深さの上限**（クエリ数・証拠数・トークン数）を
 決める設定で、`--effort` で選びます。`presets` は**調査の依頼そのもの**（task・対象ソース・指示文・引数）に
 名前を付ける設定で、`run` で呼び出します。preset の `effort` は、`effortPresets` のどれを使うかを選ぶだけです。
+
+---
+
+## mcp — ツールの入力と上限
+
+`context-grill mcp` のツール一覧と推奨フローは [README.md](./README.md) の §5 にあります。入力は `tools/list` が公開する
+`inputSchema` で検査され、次の挙動になります。
+
+- スキーマに合わない引数（未知のキー・型違い・必須項目の欠落・範囲外）は JSON-RPC の `-32602`。空文字と空白だけの `query` / `instruction` も同じです
+- 範囲: `k` は 1〜100、`static_scan` の `limit` は 1〜1000、`fetch` の `start` / `end` は 1 以上の整数。`end` は `start` 以上で、`start` から 201 行まで
+- `kinds` は `code` / `doc` / `config` / `other` / `issue` / `pr` / `ticket`
+- 「見つからない」（未知のソース・パス・`pack_id`、`pack` に無い証拠 ID）は `isError: true` のツール結果
+- `pack_id` は `pack-` + 16 進 10 桁。pack は最大 200 件で、超えると古いものから消える
+- `verify` の `result` は深さ 64・2MB まで
+- 入力 1 行は 16MB まで。超過や不正な JSON は `-32700`。`id` は文字列か整数のみ（それ以外は `-32600`）。`id` の無いメッセージ（通知）には応答しない
+- `resources/*` には対応せず `-32601`
+- `context_grill_sync` は直列化される。`--offline` で埋め込みが拒否されても同期結果を返し、`embedding: { ok: false, error }` で知らせる
 
 ---
 
@@ -579,15 +637,16 @@ context-grill ask "pipeline.ts の分岐と rag.ts の閾値判定に穴がな�
 
 ## 実行結果の中身
 
-`ask` / `run` を実行すると `.context-grill/runs/<日時>-<タスク>-<ハッシュ>/` に3つのファイルが残ります。
+`ask` / `run` を実行すると `.context-grill/runs/<日時>-<タスク>-<ハッシュ>/` に4つのファイルが残ります。
 
 | ファイル | 内容 |
 | --- | --- |
-| `report.md` | 最終レポート（全主張に一次資料リンク付き） |
+| `report.md` | 最終レポート（全主張に一次資料リンク付き）。検証が通らなかったときは冒頭に警告行が出る（終了コードは 0） |
+| `result.json` | 構造化結果 + 検証結果（違反コード・統計）+ 実行メタデータ（`meta`: 索引キー・モデル・タスク種別・クエリなど、再現性のための情報） |
 | `evidence.json` | 提示した証拠パック。なぜその結論になったかを監査できる |
-| `meta.json` | 索引キー・モデル・タスク種別など、再現性のための情報 |
+| `static.json` | 静的解析の生データ（サマリと検出） |
 
-`--dry-run` の場合は `report.md` の代わりに `bundle.md` が出ます。
+`--dry-run` の場合は、これらの代わりに `bundle.md` / `evidence.json` / `meta.json` の3つが出ます（`meta.json` ができるのは dry-run のときだけです）。
 
 ---
 
@@ -635,7 +694,7 @@ context-grill doctor --json    # 機械可読（終了コードは ✗ があれ
 
 | 検査 | 内容 |
 | --- | --- |
-| 実行環境 | Node.js 20+ / fetch / git CLI |
+| 実行環境 | Node.js 20 以上（`package.json` の要求は 20.10 以上）/ fetch / git CLI |
 | 設定ファイル | 発見できるか、JSON として妥当か |
 | 設定の妥当性 | 必須項目、`id` の重複、後述の形式チェック |
 | presets | 定義の形式（不正なら ✗、使える preset ごとに ✓） |
