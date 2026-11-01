@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, paths, ensureDirs, DEFAULTS, findConfigPath } from './config.js';
+import { loadConfig, paths, ensureDirs, DEFAULTS, findConfigPath, findUnknownKeys, describeUnknownKey } from './config.js';
 import { syncSources, buildIndex, allDocs, logEgressSummary } from './index/ingest.js';
 import { IndexStore } from './index/store.js';
 import { hybridSearch } from './index/search.js';
@@ -461,10 +461,15 @@ async function cmdTasks(flags) {
 }
 
 // -------------------------------------------------------------- doctor
+/** Node.js が package.json の engines（>=20.10）を満たすか。"v" 付きでも判定できる */
+export function nodeVersionOk(version) {
+  const [major, minor] = String(version).replace(/^v/, '').split('.').map(Number);
+  return major > 20 || (major === 20 && minor >= 10);
+}
+
 async function cmdDoctor(flags) {
   const checks = [];
-  const nodeOk = Number(process.versions.node.split('.')[0]) >= 20;
-  checks.push({ name: 'Node.js >= 20', ok: nodeOk, detail: process.version });
+  checks.push({ name: 'Node.js >= 20.10', ok: nodeVersionOk(process.versions.node), detail: process.version });
   checks.push({ name: 'fetch API', ok: typeof fetch === 'function', detail: typeof fetch });
   let gitOk = false, gitVer = '';
   try {
@@ -484,6 +489,11 @@ async function cmdDoctor(flags) {
     catch (e) { checks.push({ name: '設定の妥当性', ok: false, detail: e.message }); }
   }
   if (config) {
+    // 未知のキーは loadConfig では警告だけなので、ここで失敗として示す（打ち間違えた安全設定が黙って無視される）
+    try {
+      const unknown = findUnknownKeys(JSON.parse(fs.readFileSync(cfgPath, 'utf8')));
+      if (unknown.length) checks.push({ name: '設定のキー', ok: false, detail: unknown.map(describeUnknownKey).join(', ') });
+    } catch { /* 読み直せない場合は上の妥当性の検査が既に報告している */ }
     // loadConfig は preset の形では throw しないので、不正な定義はここで気づけるようにする
     const presetErrs = validatePresets(config);
     if (presetErrs.length) checks.push({ name: 'presets の定義', ok: false, detail: presetErrs.join('\n') });

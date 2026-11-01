@@ -3,6 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { deepMerge, sha256, stableStringify } from './util/misc.js';
 import { parseConfluenceUrl } from './util/urls.js';
+import { log } from './util/log.js';
 
 export const DEFAULTS = {
   project: 'untitled',
@@ -14,7 +15,7 @@ export const DEFAULTS = {
       doc: { maxChars: 2200, overlapChars: 220 },
     },
     glossaryBridge: true,
-    hybrid: { rrfK: 60, mmrLambda: 0.72, final: 28, perQueryTop: 60 },
+    hybrid: { mmrLambda: 0.72, final: 28, perQueryTop: 60 },
     boosts: { pathMatch: 0.35, sourcePriority: 0.15, kindPrior: 0.2 },
     embedding: {
       provider: 'none',          // none | openai | voyage | openai-compat
@@ -166,6 +167,111 @@ function findProtoKeys(node, at = '', found = []) {
   return found;
 }
 
+// ---- 未知のキーの検出 --------------------------------------------------
+// 削除済みの古いキー。古い設定を壊さないよう、既知として許容する（候補にも出さない）。
+// パスは配列の添字を [] にした形で書く。
+const LEGACY_KEYS = new Set([
+  'language', 'policy.language',
+  'retrieval.hybrid.bm25Top', 'retrieval.hybrid.vectorTop', 'retrieval.hybrid.rrfK',
+  'retrieval.boosts.titleMatch', 'llm.plannerModel',
+  'sources[].titleGlobs', 'sources[].spaceKeys',
+]);
+// sources[] の既知キー。コネクタ（src/connectors/*.js）が読むキーに合わせる。
+// auth の内側（tokenEnv など）は検査しない。
+const SOURCE_COMMON_KEYS = ['id', 'type', 'priority'];
+const SOURCE_KEYS = {
+  local: ['path', 'include', 'exclude', 'includeUnknownTypes', 'maxFileBytes'],
+  github: ['repo', 'ref', 'mode', 'host', 'apiBaseUrl', 'depth', 'path', 'include', 'exclude', 'includeUnknownTypes',
+    'maxFileBytes', 'maxFiles', 'auth', 'issues', 'pulls'],
+  confluence: ['baseUrl', 'spaceKey', 'spaceId', 'pageUrls', 'pageIds', 'includeDescendants', 'maxDepth', 'limit', 'pageSize',
+    'labels', 'titleContains', 'updatedWithinDays', 'status', 'cql', 'include', 'exclude', 'auth'],
+  jira: ['baseUrl', 'jql', 'projectKey', 'fields', 'limit', 'auth'],
+};
+const SOURCE_KIND_KEYS = ['enabled', 'state', 'limit']; // github の issues / pulls
+const EFFORT_KEYS = ['queries', 'final', 'evidenceTokens'];
+
+const normKey = (k) => k.toLowerCase().replace(/[-_]/g, '');
+
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/** 近い既知のキー: 大文字小文字・-/_ を無視した一致を優先し、なければ編集距離 2 以下で最小のもの */
+function nearestKey(key, candidates) {
+  const n = normKey(key);
+  let best = null;
+  let bestD = Infinity;
+  for (const c of candidates) {
+    const d = editDistance(n, normKey(c));
+    if (d < bestD) { best = c; bestD = d; }
+  }
+  return best !== null && bestD <= 2 && bestD < n.length ? best : null;
+}
+
+/**
+ * 設定の生の JSON（環境変数の展開前）から、どこにも定義されていないキーを探す。
+ * 打ち間違えた安全設定（"securty" など）が黙って無視されるのを防ぐための検査で、
+ * loadConfig はエラーにせず警告する。
+ * - `_` で始まるキー（説明用）、LEGACY_KEYS の古いキー、sources[].auth の内側は対象外。
+ * - effortPresets の直下の名前は任意。presets の中は src/presets.js の validatePresets が検査する。
+ * @returns {{path: string, key: string, suggestion: string|null}[]} suggestion は近い既知キーのパス
+ */
+export function findUnknownKeys(raw) {
+  const found = [];
+  if (!isObj(raw)) return found;
+  const generic = (p) => p.replace(/\[\d+\]/g, '[]');
+  const report = (parent, key, known) => {
+    const hit = nearestKey(key, known.filter((k) => !LEGACY_KEYS.has(generic(parent ? `${parent}.${k}` : k))));
+    found.push({ path: parent ? `${parent}.${key}` : key, key, suggestion: hit === null ? null : (parent ? `${parent}.${hit}` : hit) });
+  };
+  // 子のキーを調べる。known: 既知のキー名、next(key): 既知のキーの中身を調べる関数（なければ入らない）
+  const scan = (node, parent, known, next) => {
+    for (const key of Object.keys(node)) {
+      if (key.startsWith('_')) continue;
+      const here = parent ? `${parent}.${key}` : key;
+      if (known.includes(key)) { if (next && isObj(node[key])) next(key, node[key], here); continue; }
+      if (LEGACY_KEYS.has(generic(here))) continue;
+      report(parent, key, known);
+    }
+  };
+  const walkDefaults = (node, ref, parent) => {
+    scan(node, parent, Object.keys(ref), (key, child, here) => {
+      if (key === 'sources' || key === 'presets' || key === 'effortPresets') return;
+      if (isObj(ref[key])) walkDefaults(child, ref[key], here);
+    });
+  };
+  walkDefaults(raw, DEFAULTS, '');
+  if (isObj(raw.effortPresets)) {
+    for (const [name, p] of Object.entries(raw.effortPresets)) {
+      if (name.startsWith('_') || !isObj(p)) continue;
+      scan(p, `effortPresets.${name}`, EFFORT_KEYS);
+    }
+  }
+  if (Array.isArray(raw.sources)) {
+    raw.sources.forEach((s, i) => {
+      if (!isObj(s)) return;
+      const own = Object.hasOwn(SOURCE_KEYS, s.type) ? SOURCE_KEYS[s.type] : [...new Set(Object.values(SOURCE_KEYS).flat())];
+      scan(s, `sources[${i}]`, [...SOURCE_COMMON_KEYS, ...own], (key, child, here) => {
+        if (key === 'issues' || key === 'pulls') scan(child, here, SOURCE_KIND_KEYS);
+      });
+    });
+  }
+  return found;
+}
+
+/** 未知のキーの 1 件を「securty（security のことですか？）」の形にする */
+export function describeUnknownKey(h) {
+  return h.suggestion ? `${h.path}（${h.suggestion} のことですか？）` : h.path;
+}
+
 export async function loadConfig(explicitPath) {
   const configPath = explicitPath ? path.resolve(explicitPath) : findConfigPath();
   if (!configPath) {
@@ -185,6 +291,8 @@ export async function loadConfig(explicitPath) {
   if (protoKeys.length) {
     throw new Error('設定エラー:\n  - ' + protoKeys.map((p) => `${p} は使えません（"__proto__" キーは読み込み時に消えてしまうため）`).join('\n  - '));
   }
+  // 打ち間違えたキーは黙って無視される（安全設定を含む）ので警告する。互換性のため throw はしない
+  for (const h of findUnknownKeys(raw)) log.warn(`未知の設定キー: ${describeUnknownKey(h)}`);
   // presets は環境変数展開の対象から外す。instruction 内の ${...} は文字のまま通す
   // （展開すると未定義の変数が黙って '' になり、指示文が欠ける）。
   // 実際の秘密値が貼られた場合は validate() の秘密値スキャンで拒否する。
