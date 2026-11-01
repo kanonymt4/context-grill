@@ -118,7 +118,7 @@
       "code": { "maxLines": 110, "overlapLines": 12, "maxChars": 6000 },
       "doc": { "maxChars": 2200, "overlapChars": 220 }
     },
-    "hybrid": { "rrfK": 60, "mmrLambda": 0.72, "final": 28, "perQueryTop": 60 },
+    "hybrid": { "mmrLambda": 0.72, "final": 28, "perQueryTop": 60 },
     "embedding": {
       "provider": "none",
       "model": "text-embedding-3-small",
