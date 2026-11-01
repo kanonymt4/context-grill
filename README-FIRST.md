@@ -20,7 +20,7 @@ GitHub / Confluence / Jira / 手元のフォルダを一次資料として、根
 このフォルダで次を実行します。
 
 ```
-npm install -g ./context-grill-0.1.1.tgz
+npm install -g ./context-grill-<version>.tgz
 ```
 
 確認：
@@ -66,7 +66,7 @@ export PATH="$(npm config get prefix)/bin:$PATH"
 
 ```
 npm config set prefix ~/.npm-global
-npm install -g ./context-grill-0.1.1.tgz
+npm install -g ./context-grill-<version>.tgz
 ```
 
 そのうえで上記の PATH 設定を行ってください。
@@ -175,7 +175,7 @@ export ANTHROPIC_API_KEY="..."
 新しい `.tgz` を受け取ったら、インストールし直すだけです。
 
 ```
-npm install -g ./context-grill-0.1.1.tgz
+npm install -g ./context-grill-<version>.tgz
 ```
 
 **既存の作業フォルダはそのまま使えます。** `init` のやり直しも、新しいフォルダの作成も、
@@ -200,3 +200,50 @@ npm install -g ./context-grill-0.1.1.tgz
 rm commands.md usage.md
 context-grill init
 ```
+
+`context-grill.config.json` は `--force` を付けない限り上書きされないため、設定は保持されます。
+
+---
+
+## 認証情報が必要になったら
+
+`.env.example` を `.env` にコピーして編集します。作業フォルダの直下に置いてください。
+
+| 変数 | 必要な場面 |
+| --- | --- |
+| `GITHUB_TOKEN` | private リポジトリを取得する場合（git の資格情報が設定済みなら不要なことがあります） |
+| `ATLASSIAN_EMAIL` / `ATLASSIAN_API_TOKEN` | Confluence / Jira を対象にする場合 |
+| `ANTHROPIC_API_KEY` | `ask` で回答を生成する場合 |
+
+`search` / `scan` / `ask --dry-run` だけなら、いずれも不要です。
+
+---
+
+## 使いはじめの目安
+
+**検索する**（LLM 不使用・キー不要・無料）
+
+```
+context-grill search "リトライ 上限"
+```
+
+**機械的にチェックする**（LLM 不使用・毎回同じ結果）
+
+```
+context-grill scan --severity medium
+```
+
+**調査させる**
+
+```
+context-grill ask "認証まわりの仕様を整理して" --task spec
+```
+
+`--dry-run --out bundle.md` を付けると、**LLM を呼ばずに**プロンプトと証拠一式をファイルに出力します。
+API キーがなくても使え、生成された `bundle.md` を任意の LLM に読ませれば同じことができます。
+
+```
+context-grill ask "設計に穴がないか検証して" --task spec --effort deep --dry-run --out bundle.md
+```
+
+詳しい使い方は、作業フォルダにできる **`commands.md`**（コマンド一覧）と **`usage.md`**（対象の指定方法）を参照してください。
