@@ -10,7 +10,7 @@ GitHub リポジトリと Atlassian（Confluence / Jira）の資料を「一次�
 **仕様の整理・バグ調査・セキュリティリスク評価・静的解析・新機能設計** を
 **根拠（証拠 ID + 行番号 + パーマリンク）付き** で行う CLI / MCP サーバーです。
 
-- **依存パッケージゼロ**（Node.js 20+ と、任意で `git` だけ）。ディレクトリごとコピーすればどの PC・サーバー・CI でも動きます
+- **依存パッケージゼロ**（Node.js 20.10 以上と、任意で `git` だけ）。ディレクトリごとコピーすればどの PC・サーバー・CI でも動きます
 - **推測禁止**：モデルの出力は機械的に検証され、証拠のない主張・存在しない証拠 ID・捏造した引用は自動で除去されます
 - **モデル非依存の品質**：証拠の選定と検証は LLM を一切使わないため、モデル・実行回数が変わっても根拠と合否基準は同じ
 - **トークン効率**：ハイブリッド RAG（BM25 + ベクトル）＋ 予算パッキング ＋ プロンプトキャッシュ ＋ 埋め込みキャッシュ
@@ -26,20 +26,27 @@ GitHub リポジトリと Atlassian（Confluence / Jira）の資料を「一次�
 | 1 | 資料の取得（GitHub / Confluence / Jira） | 不使用 | ハッシュとバージョンで管理 |
 | 2 | チャンク分割（コードは行番号保持） | 不使用 | 完全に決定的 |
 | 3 | クエリ計画（タスク別テンプレート＋日英用語辞書） | **不使用** | 同じ指示 → 常に同じクエリ |
-| 4 | ハイブリッド検索 → RRF 融合 → MMR → 予算パッキング | 不使用 | 同じ索引 → 常に同じ証拠パック |
+| 4 | ハイブリッド検索 → スコア融合 → MMR → 予算パッキング | 不使用 | 同じ索引 → 常に同じ証拠パック |
 | 5 | 証拠の解釈（構造化 JSON を強制） | **使用** | ここだけモデル依存 |
 | 6 | 機械検証 → 修復ループ → 除去 | 不使用 | 合否基準は常に同じ |
 
 段階 6 の検証内容：
 
-- スキーマ違反
-- 存在しない証拠 ID の引用（`E99` など）
-- **逐語引用の実在照合**（`quotes[].text` が証拠本文に literal に含まれるか。ハルシネーション検出の要）
-- 証拠が付いていない主張
-- 「おそらく」「一般的には」等の推測表現 × 高確度の組み合わせ
+- スキーマ違反（全体に加えて、項目（item）ごとにも検査します。違反コード `E_SCHEMA`）
+- 存在しない証拠 ID の引用（`E99` など。`E_BAD_EVIDENCE`）。`contradictions` が存在しない ID を持てばその矛盾を除去し、
+  `next_actions` は不正な ID だけを落とします
+- **逐語引用の実在照合**（`quotes[].text` が証拠本文に literal に含まれるか。ハルシネーション検出の要。`E_QUOTE_MISMATCH`）。
+  空の引用（`E_QUOTE_EMPTY`）と、その項目の `evidence` に無い証拠からの引用（`E_QUOTE_NOT_CITED`）も棄却します
+- 証拠が付いていない主張（`E_NO_EVIDENCE`）
+- 「おそらく」「一般的には」等の推測表現 × 高確度（`confidence` の大文字小文字は区別しません）の組み合わせ（`E_SPECULATION`）。
+  確度が高くない項目や `summary` の推測表現は警告（`W_SPECULATION`）にとどまります
+
+`E_` で始まる違反は棄却の対象、`W_` は警告です。このほかの違反コードは `E_NO_JSON`（JSON を取得できない）、`E_ITEM`（item がオブジェクトでない）、
+`E_DUP_ID`（item の id の重複）、`E_QUOTE_SRC`（引用元の証拠 ID が存在しない）、`W_BAD_EVIDENCE`（`next_actions` の不正な証拠 ID）です。
 
 違反した項目はプロンプトに違反理由を添えて再生成（既定 2 回まで）し、
 それでも通らなければ本文から除去して「棄却された主張」欄に理由付きで記録します。
+検証が最後まで通らなかったときは、`report.md` の冒頭に警告行（「機械検証は通過していません」）が出ます（終了コードは 0 のままです）。
 つまり**弱いモデルを使っても、間違った断定がユーザーに届かない**設計です。
 
 さらに、秘密情報・インジェクション・TLS 無効化・脆弱な暗号などの検出は
@@ -100,7 +107,7 @@ LLM を使わない静的ルールで行うため、**どのモデルでも必�
 ## 3. セットアップ
 
 ```bash
-# Node.js 20 以上があれば OK（npm install は不要 — 依存パッケージがありません）
+# Node.js 20.10 以上があれば OK（npm install は不要 — 依存パッケージがありません）
 node --version
 
 # 任意の場所に配置してパスを通す（またはそのまま node bin/context-grill.js で実行）
@@ -129,11 +136,12 @@ context-grill status
 
 | 変数 | 用途 |
 | --- | --- |
-| `GITHUB_TOKEN` | private リポジトリの clone / API 取得 |
+| `GITHUB_TOKEN` | private リポジトリの取得（git / API） |
 | `ATLASSIAN_EMAIL` + `ATLASSIAN_API_TOKEN` | Confluence / Jira（[API トークン発行](https://id.atlassian.com/manage-profile/security/api-tokens)） |
 | `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `LLM_API_KEY` | 推論に使うプロバイダのもの 1 つ |
 
-`.env` は自動で読み込まれます（既存の環境変数は上書きしません）。
+`.env` は自動で読み込まれます（既存の環境変数は上書きしません）。引用符なしの値は、空白の直後の `#` 以降が行末コメントとして
+値に入りません（`abc#def` のように空白が無ければ `#` も値の一部）。引用符で囲んだ値は、閉じ引用符の後ろのコメントだけを捨てます。
 
 ---
 
@@ -197,7 +205,9 @@ context-grill presets                    # 登録済みの preset を表示
 ```
 
 `--dry-run` が出力する `bundle.md` は、そのまま任意のチャット（Claude / ChatGPT / ローカル LLM）に
-貼り付けられる形になっています。**API キーが無い環境でも、証拠収集だけをこのツールに任せられます。**
+貼り付けられる形になっています。中身は SYSTEM / EVIDENCE / USER / OUTPUT JSON SCHEMA で、
+EVIDENCE と USER の本文は、実際に LLM へ送る本文（証拠に加えて静的解析の節を含む。墨消し済み）と一致します。
+**API キーが無い環境でも、証拠収集だけをこのツールに任せられます。**
 
 ### 出力
 
@@ -205,10 +215,12 @@ context-grill presets                    # 登録済みの preset を表示
 
 ```
 report.md      最終レポート（Markdown・全主張に一次資料リンク付き）
-result.json    構造化結果 + 検証統計 + 実行メタデータ
+result.json    構造化結果 + 検証統計 + 実行メタデータ（meta はこの中）
 evidence.json  提示した証拠パック（再現・監査用）
 static.json    静的解析の生データ
 ```
+
+`--dry-run` のときは、代わりに `bundle.md` / `evidence.json` / `meta.json` が保存されます。
 
 ---
 
@@ -250,6 +262,19 @@ context-grill mcp     # stdio
 **推奨フロー**：`context_grill_evidence_pack` → ホストのモデルが JSON を生成 → `context_grill_verify` → 合格した結果だけを提示。
 これによりホストのモデルが何であっても、**証拠の選定と合否判定は同一**になります。
 
+**入力の検査と上限**（`tools/list` が公開する `inputSchema` で検査します。実装を読み、下記は 2026-11 時点の挙動です）：
+
+- 未知のキー・型違い・必須項目の欠落は JSON-RPC の `-32602` で返します。`query` / `instruction` は空文字と空白だけの値を拒否します
+- `k` は 1〜100、`static_scan` の `limit` は 1〜1000、`fetch` の `start` / `end` は 1 以上の整数です。`end` は `start` 以上で、
+  `start` から 201 行を超えません。`kinds` は `code` / `doc` / `config` / `other` / `issue` / `pr` / `ticket` のいずれかです
+- 「見つからない」（未知のソース・パス・`pack_id` など）や、値の意味の誤りは `isError: true` のツール結果で返します
+- `pack_id` は `pack-` + 16 進 10 桁の形式だけを受け付けます。pack は最大 200 件まで保存され、超えると古いものから消えます
+- `verify` の `result` は深さ 64・2MB までです
+- 標準入力の 1 行は 16MB までで、超えた行と JSON として不正な行は `-32700` を返します。`id` は文字列か整数のみで、
+  `id` の無いメッセージ（通知）には応答しません。`resources/*` には対応しておらず `-32601` を返します
+- `context_grill_sync` は同一プロセス内で直列化されます。`--offline` で埋め込みが拒否されても、同期結果を返し、
+  `embedding: { ok: false, error }` で知らせます
+
 **対応するプロトコルの版**（2026-10-11 時点）：`2025-11-25` / `2025-06-18` / `2025-03-26` / `2024-11-05`。
 
 - `initialize` でクライアントが求めた版がこの一覧にあればその版を、無い・省略・文字列でない場合は `2025-11-25` を返します（エラーにはしません）。
@@ -278,7 +303,7 @@ Claude Code では `/mcp__<サーバー名>__<preset 名> 値1 値2` の形で�
 | 仕組み | 効果 |
 | --- | --- |
 | チャンク単位の RAG | ファイル全体ではなく該当箇所（100 行前後）だけを送る |
-| RRF + MMR | 冗長な重複チャンクを落として情報密度を上げる |
+| スコア融合 + MMR | 冗長な重複チャンクを落として情報密度を上げる |
 | 予算パッキング | `effortPresets` のトークン上限で機械的に打ち切り |
 | プロンプトキャッシュ | 契約文と証拠ブロックに `cache_control` を付与（Anthropic） |
 | 埋め込みキャッシュ | 内容ハッシュ単位で永続化（provider / model / 次元数ごと）。再同期時の埋め込みコストはゼロ |
@@ -304,6 +329,12 @@ Claude Code では `/mcp__<サーバー名>__<preset 名> 値1 値2` の形で�
   `dimensions` はモデルの実際の次元数に合わせてください（`openai` / `voyage` は API 側に指定できますが、
   `openai-compat` はモデルの次元がそのまま返ります。例: `nomic-embed-text` は 768）。
   食い違っている場合は、壊れた索引を作らないよう `sync` 時にエラーで止まります
+- **スコア融合**：各リストのスコアを正規化して平均します（BM25 は最大値で割り、ベクトルは min-max）。
+  そのうえでパス一致・種別の事前確率・ソース優先度を**乗法**で補正し（`1 + Σ 係数 × 特徴` 倍）、MMR で重複を落とします
+  （ほぼ同一の本文は、別の本文の候補が残っている間は選びません）。スコアの尺度は、既定の係数で 0〜1.7 程度です
+  （`sources[].priority` を 1 より大きくすると、さらに上がり得ます）。`retrieval.hybrid.rrfK` はどこからも使われず、設定に書いても無視されます
+- **クエリ埋め込み**：`security.allowEmbeddingUpload=true` のときだけ、検索クエリが埋め込み API へ送られます。
+  そうでなければ BM25 のみで検索し、stderr に警告を出します（順位が変わることがあります）
 
 ---
 
@@ -352,7 +383,12 @@ context-grill resolve "https://github.com/acme/api-service/tree/develop/services
 - **`include` / `exclude`** がリポジトリ内の絞り込みです（glob）。モノレポなら `include: ["services/payment/**"]` のように一部だけ取り込めます
 - **`ref`** はブランチ / タグ / コミット。省略時は既定ブランチ
 - **`mode`** は `clone`（既定・大量ファイル向け）か `api`（少数ファイルだけ取りたいとき）
-- **`issues` / `pulls`** を有効にすると、Issue / PR 本文も一次資料になります（バグ調査で効きます）
+- **`issues` / `pulls`** を有効にすると、Issue / PR 本文も一次資料になります（バグ調査で効きます）。`limit`（省略時 100）は Issue と PR で
+  **別々に**効きます（`issues.limit` は Issue だけ、`pulls.limit` は PR だけを数えます）
+- **`host`**（GitHub Enterprise Server 用）は `ホスト名` または `ホスト名:ポート`（`^[A-Za-z0-9.-]+(:\d+)?$`）だけです。スキーム・ユーザー情報・パスを書くと設定エラーになります
+- **`includeUnknownTypes`** と **`maxFileBytes`**：拡張子で種別を判定できないファイル（`code` / `doc` / `config` のどれでもないもの）は、
+  `includeUnknownTypes: true` を書かない限り取り込みません。`maxFileBytes`（既定 400,000 バイト）を超えるファイルとバイナリ（先頭 4KB に NUL を含むもの）も取り込みません。
+  `sync` の出力に、「種別不明で除外 N 件 / サイズ超過 N 件 / バイナリ N 件」と理由別の件数が出ます（`local` ソースも同じ）
 - 既に手元にクローン済みなら `"path": "/Users/me/work/api-service"` を指定できます（**読み取り専用**。`repo` は不要）
 - 複数リポジトリは `sources` に並べるだけ。`priority` で信頼度に差を付けられます
 
@@ -452,12 +488,25 @@ N が想定より少ない場合はこの設定を確認してください。
 | --- | --- | --- |
 | `sources[].type` | — | `github` / `confluence` / `jira` / `local` |
 | `sources[].priority` | 定義順 | 検索時の加点。信頼できる資料を上げる |
-| `sources[].limit` | 500 | 取り込む最大件数 |
+| `sources[].limit` | Confluence 500 / Jira 200 | 取り込む最大件数（GitHub は `maxFiles`、Issue / PR は `issues.limit` / `pulls.limit`） |
+| `sources[].id` | — | `^[A-Za-z0-9._-]+$`（`.` と `..` 単体は不可）。日本語・空白はエラー |
 | `retrieval.embedding.provider` | `none` | `none` なら外部への本文送信ゼロ |
 | `llm.provider` | `anthropic` | `anthropic` / `openai` / `openai-compat` / `dry` |
 | `policy.requireVerbatimQuote` | `true` | 逐語引用の実在照合 |
 | `budget.maxRepairs` | `2` | 検証違反時の再生成回数 |
+| `effortPresets.<段階>.queries` / `.final` | 段階ごと | 正の整数（`evidenceTokens` は書くなら正の整数） |
 | `presets` | `[]` | 名前付きの調査テンプレート（`run` で呼び出す。`effortPresets` とは別） |
+
+設定は読み込み時に検査します。
+
+- `security.*`（`allowEmbeddingUpload` / `allowLlmUpload` / `redactSecrets` / `denySensitivePaths` / `auditLog`）と
+  `policy.*`（`requireCitations` / `requireVerbatimQuote` / `forbidSpeculativeLanguage` / `dropUnverifiedItems`）の真偽値は
+  `true` / `false` だけです。文字列 `"false"` は設定エラーになります
+- `security.allowHosts` / `security.extraDenyPaths` は、文字列 1 つでも書けます（配列として扱われます）
+- 実装が読まない設定キー（`language`・`policy.language`・`retrieval.hybrid.bm25Top` / `vectorTop`・`retrieval.boosts.titleMatch`・
+  `llm.plannerModel` など）は削除済みで、古い設定に残っていても無視されます。`retrieval.hybrid.rrfK` も使われず、書いても無視されます
+- 展開後の設定値に、名前に `TOKEN` / `KEY` / `SECRET` / `PASSWORD` / `PASSWD` / `CREDENTIAL` / `COOKIE` / `SESSION` / `BEARER` を含む環境変数の値（12 文字以上）が
+  入っていると、設定全体を走査して読み込み時に拒否します
 
 ローカル LLM の例:
 
@@ -560,10 +609,16 @@ zip -er context-grill-dist.zip context-grill-dist       # パスワードは別�
 
 すべての外部通信は単一のゲート（`src/util/egress.js`）を通ります。
 **設定から導出したホスト以外へは、送信そのものが例外になります。**
-ただし `git clone` / `fetch` は外部の `git` コマンドが通信します。ユーザーの gitconfig の `url.<base>.insteadOf` で
-接続先が書き換わる場合は、通信せずに展開後の URL を求め（`git ls-remote --get-url`）、そのホストも許可リストで検査します。
+ただし `git fetch` は外部の `git` コマンドが通信します（初回は `git init` → 検査 → `git fetch` → `git reset --hard`。`git clone` は使いません）。
+ユーザーの gitconfig の `url.<base>.insteadOf` で接続先が書き換わる場合は、通信せずに展開後の URL を求め（`git ls-remote --get-url`）、
+そのホストも許可リストで検査します。展開後が `https` 以外のスキームのときは、ホストが同じでも拒否します（トークンが平文で送られるため）。
+ホストを特定できない形（`file://` やローカルパスなど）は、展開後の文字列そのものを許可リストに照合するため、許可されず拒否されます。
 **`https_proxy` などの proxy 環境変数で変わる接続先は検査されません**（社内ネットワークで必要なため。実測、2026-10-11。
-`--offline` ではどちらも接続しません）。失敗した `git` も `egress.log` に残ります。
+`--offline` ではどちらも接続しません）。失敗した `git` も `egress.log` に残ります（認証情報は残しません）。
+`GIT_DIR` / `GIT_WORK_TREE` など、対象リポジトリの位置や設定を差し替えられる環境変数は `git` に渡しません。
+
+許可リストにあるホストでも、**別の origin（スキーム・ホスト・ポートのいずれかが違う宛先）へのリダイレクトは追従せず、拒否します**。
+追従するのは同じ origin への転送だけで、5 回までです（転送先も許可リストを通します）。API キーなどのヘッダが、転送先へそのまま送られるのを防ぐためです。
 
 | 通信 | 送るもの | 既定 |
 | --- | --- | --- |
@@ -586,9 +641,13 @@ zip -er context-grill-dist.zip context-grill-dist       # パスワードは別�
 ```
 .env / .envrc / *.pem / *.key / *.p12 / *.jks / id_rsa* / id_ed25519* / .ssh/**
 .netrc / .npmrc / .git-credentials / .aws/** / .kube/** / kubeconfig
-service-account*.json / secrets.* / *.tfstate* / .terraform/** / .htpasswd / *.gpg …（全 57 パターン）
+credentials / credentials.{json,yml,yaml,toml,ini} / service-account*.json / secrets.{yml,yaml,json} / *.secrets.*
+private_key / private-key / *.privatekey / private_key.{txt,pem,key,json,yml,yaml,toml,ini,properties,env}（private-key.* と *_private_key.* なども）
+*.tfstate* / .terraform/** / .htpasswd / *.gpg …（全件は `context-grill privacy --json` の `sensitiveDenyPatterns`）
 ```
 
+照合は**大文字小文字を区別しません**（`ID_RSA`・`Credentials.YML`・`.ENV` も除外されます）。名前に含むだけの `.md` / `.js` などの文書・コード
+（`credentials.md` など）は対象外です。`security.extraDenyPaths` で追加のパターンを足せます。
 `.env.example` などのサンプルは許可されます。シンボリックリンクはたどりません（リポジトリ外の読み出し防止）。
 
 ### 10.3 シークレット墨消し（多層防御）
@@ -597,6 +656,9 @@ service-account*.json / secrets.* / *.tfstate* / .terraform/** / .htpasswd / *.g
 
 - 対象: LLM へ送る証拠パック / 埋め込み API へ送る本文 / MCP がホストモデルに返す本文 / 静的解析の検出スニペット / `context-grill search` の出力
 - 検出: 秘密鍵ブロック、AWS / GitHub / Slack / Stripe / OpenAI / Anthropic / Google / JWT、URL 埋め込みパスワード、`key = "..."` 形式、`.env` 形式
+  （引用符なしの `PASSWORD=…` / YAML の `password: …` / `- DB_PASSWORD=…` / `X-Api-Key: …` も対象）
+- PEM 秘密鍵は**文書単位**で伏せます（チャンク境界をまたいでも、BEGIN〜END が 1 行に入った形式でも。索引に入る前に処理するため、`search --raw` でも本文は出ません）
+- `context_grill_static_scan`（MCP）と `scan` の endpoints（route / snippet）も墨消しされます
 - `process.env.API_KEY` のような環境変数参照は誤検知しません
 - **行数を変えない**実装なので、行番号・逐語引用の検証は壊れません
 
@@ -618,7 +680,7 @@ service-account*.json / secrets.* / *.tfstate* / .terraform/** / .htpasswd / *.g
 
 git については、実行しうるサブコマンドを許可リストで固定しています。
 
-| 実際に実行される | `clone` / `fetch` / `ls-remote --get-url`（通信しない読み取り専用） / `reset --hard` / `rev-parse` の 5 つのみ |
+| 実際に実行される | `init` / `fetch` / `ls-remote --get-url`（通信しない読み取り専用） / `reset --hard` / `rev-parse` の 5 つのみ |
 | --- | --- |
 | **到達不能** | `push` `commit` `add` `rm` `checkout` `switch` `clean` `merge` `rebase` `stash` `tag` `submodule` ほか |
 
@@ -631,8 +693,8 @@ git については、実行しうるサブコマンドを許可リストで固�
 git 認証は URL・コマンドライン引数・`.git/config` のいずれにも載せず、`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0` 環境変数（git 2.31+）経由で渡します。
 
 ```
-修正前: Command failed: git clone https://x-access-token:ghp_REAL_TOKEN@github.com/... ← ログに漏れる
-修正後: Command failed: git clone https://github.com/...                              ← 漏れない
+修正前: Command failed: git fetch https://x-access-token:ghp_REAL_TOKEN@github.com/... ← ログに漏れる
+修正後: Command failed: git fetch https://github.com/...                              ← 漏れない
 ```
 
 - 例外・ログ・監査ログはすべて墨消しを通します（環境変数の実値も落とします）
@@ -661,7 +723,7 @@ preset の prompts（§5）も依頼文を返すだけで、外部通信も書�
 - Confluence は Cloud（REST API v2）が対象。Server/Data Center は API が異なります
 - 大規模リポジトリでは `include` / `maxFiles` を絞ってください（索引構築時にメモリを使います）
 - 静的解析は正規表現ベースで、網羅的な SAST の代替ではありません
-- 墨消しは既知パターンに対する多層防御であり、独自形式の秘密を 100% 捕捉するものではありません。機密ファイルの除外（9.2）が第一防衛線です
+- 墨消しは既知パターンに対する多層防御であり、独自形式の秘密を 100% 捕捉するものではありません。機密ファイルの除外（10.2）が第一防衛線です
 
 ## 11. テスト
 
