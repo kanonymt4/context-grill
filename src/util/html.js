@@ -41,22 +41,128 @@ function replaceAcLinks(s) {
   return out + s.slice(pos);
 }
 
+/** re（g フラグ）を pos 以降で 1 回だけ実行する */
+function execFrom(re, s, pos) {
+  re.lastIndex = pos;
+  return re.exec(s);
+}
+
+/**
+ * <ac:plain-text-body><![CDATA[…]]></ac:plain-text-body> を fn(本文) の結果にする。
+ * 正規表現（[\s\S]*? を含む）だと、閉じない開きの繰り返しで開始位置ごとに末尾まで走査して二乗になる。
+ * 閉じが見つからなければ以降のどの開きにも閉じは無いので、そこで打ち切って線形にする。
+ */
+function replacePlainTextBodies(s, fn) {
+  const open = /<ac:plain-text-body>\s*<!\[CDATA\[/gi;
+  const close = /\]\]>\s*<\/ac:plain-text-body>/gi;
+  let out = '';
+  let pos = 0;
+  for (;;) {
+    const o = execFrom(open, s, pos);
+    if (!o) break;
+    const bodyStart = o.index + o[0].length;
+    const c = execFrom(close, s, bodyStart);
+    if (!c) break;
+    out += s.slice(pos, o.index) + fn(s.slice(bodyStart, c.index));
+    pos = c.index + c[0].length;
+  }
+  return out + s.slice(pos);
+}
+
+/**
+ * <ac:structured-macro … ac:name="code" …> … <ac:plain-text-body><![CDATA[コード]]></ac:plain-text-body> … </ac:structured-macro>
+ * を fn(コード) の結果にする。開き・name 属性・本文・閉じを位置の単調な走査で順に探し、全体を線形にする。
+ * 開きの属性部分は、元の正規表現（[^>]*）と同じく、次の > より前までに限る。
+ */
+function replaceCodeMacros(s, fn) {
+  const open = /<ac:structured-macro/gi;
+  const name = /ac:name="code"/gi;
+  const body = /<ac:plain-text-body>\s*<!\[CDATA\[/gi;
+  const bodyEnd = /\]\]>\s*<\/ac:plain-text-body>/gi;
+  const close = /<\/ac:structured-macro>/gi;
+  let out = '';
+  let pos = 0;
+  let scan = 0;
+  // 次の > と name 属性の位置は、開きが前へ進むだけなので、前回の結果が使えるうちは再探索しない
+  let gt = -2;
+  let nm;
+  for (;;) {
+    const o = execFrom(open, s, scan);
+    if (!o) break;
+    const attrStart = o.index + o[0].length;
+    scan = attrStart;
+    if (gt !== -1 && gt < attrStart) gt = s.indexOf('>', attrStart);
+    const attrEnd = gt === -1 ? s.length : gt;
+    if (nm === undefined || (nm && nm.index < attrStart)) nm = execFrom(name, s, attrStart);
+    if (!nm || nm.index + nm[0].length > attrEnd) continue;
+    const b = execFrom(body, s, nm.index + nm[0].length);
+    if (!b) break;
+    const codeStart = b.index + b[0].length;
+    const e = execFrom(bodyEnd, s, codeStart);
+    if (!e) break;
+    const c = execFrom(close, s, e.index + e[0].length);
+    if (!c) break;
+    out += s.slice(pos, o.index) + fn(s.slice(codeStart, e.index));
+    pos = scan = c.index + c[0].length;
+  }
+  return out + s.slice(pos);
+}
+
+/** <![CDATA[…]]> を中身だけにする（閉じが無ければ以降は何もしない） */
+function unwrapCdata(s) {
+  let out = '';
+  let pos = 0;
+  for (;;) {
+    const o = s.indexOf('<![CDATA[', pos);
+    if (o === -1) break;
+    const c = s.indexOf(']]>', o + 9);
+    if (c === -1) break;
+    out += s.slice(pos, o) + s.slice(o + 9, c);
+    pos = c + 3;
+  }
+  return out + s.slice(pos);
+}
+
+/**
+ * <script>…</script> と <style>…</style> を空白 1 つにする（大文字小文字は区別しない）。
+ * タグごとに、閉じが見つからなければ以降の同じタグの開きも打ち切る（もう一方のタグは続ける）。
+ */
+function removeScriptStyle(s) {
+  const open = /<(script|style)/gi;
+  const closes = { script: /<\/script>/gi, style: /<\/style>/gi };
+  const dead = { script: false, style: false };
+  let out = '';
+  let pos = 0;
+  let scan = 0;
+  for (;;) {
+    const o = execFrom(open, s, scan);
+    if (!o) break;
+    scan = o.index + o[0].length;
+    const tag = o[1].toLowerCase();
+    if (dead[tag]) continue;
+    const c = execFrom(closes[tag], s, scan);
+    if (!c) { dead[tag] = true; continue; }
+    out += s.slice(pos, o.index) + ' ';
+    pos = scan = c.index + c[0].length;
+  }
+  return out + s.slice(pos);
+}
+
 /** Confluence storage format / 一般的な HTML をプレーンテキスト化（依存ゼロ） */
 export function htmlToText(html) {
   if (!html) return '';
   let s = String(html);
   // コードマクロは fenced block として温存（仕様書内のコードは一次資料として重要）
-  s = s.replace(/<ac:structured-macro[^>]*ac:name="code"[\s\S]*?<ac:plain-text-body>\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*<\/ac:plain-text-body>[\s\S]*?<\/ac:structured-macro>/gi,
-    (_, code) => `\n\`\`\`\n${code}\n\`\`\`\n`);
-  s = s.replace(/<ac:plain-text-body>\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*<\/ac:plain-text-body>/gi, (_, t) => `\n${t}\n`);
+  s = replaceCodeMacros(s, (code) => `\n\`\`\`\n${code}\n\`\`\`\n`);
+  s = replacePlainTextBodies(s, (t) => `\n${t}\n`);
   // タグ単位で一致させてから属性を取り出す（[^<>]* で次の < か > で止め、閉じないタグの繰り返しで三乗にならないようにする）
   s = s.replace(/<ri:user[^<>]*\/>/gi, (m) => {
     const a = /ri:account-id="([^"]*)"/.exec(m);
     return a ? `@${a[1]}` : m;
   });
   s = replaceAcLinks(s);
-  s = s.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1');
-  s = s.replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ');
+  s = unwrapCdata(s);
+  s = removeScriptStyle(s);
   s = s.replace(/<h([1-6])[^<>]*>/gi, (_, n) => '\n' + '#'.repeat(Number(n)) + ' ');
   s = s.replace(/<li[^<>]*>/gi, '\n- ');
   s = s.replace(/<t[dh][^<>]*>/gi, ' | ');
