@@ -105,7 +105,8 @@ export function renderStaticFacts({ findings = [], facts = [], endpoints = [] },
   if (facts.length) {
     push('');
     push('## プロジェクト構成の観測値');
-    for (const f of facts) push(`- [${f.kind}] ${f.sourceId}/${f.path}: ${f.detail}`);
+    // detail には package.json の name・依存名など、資料の内容がそのまま入る。LLM に渡る文なので墨消しする
+    for (const f of facts) push(`- [${f.kind}] ${f.sourceId}/${f.path}: ${redactText(String(f.detail ?? '')).text}`);
   }
   if (endpoints.length) {
     push('');
