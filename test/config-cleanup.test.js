@@ -78,6 +78,50 @@ test('cleanup: 回帰ガード: 秘密でない名前の展開は通り、値が
   });
 });
 
+// 設定自身が tokenEnv / apiKeyEnv / bearerEnv で参照する環境変数は、名前の語によらず秘密として扱う
+test('cleanup: tokenEnv が指す環境変数（名前に秘密の語なし）の値の展開を拒否する', async () => {
+  await withEnv({ CG_T_PAT: SECRET }, async () => {
+    await rejectsSecret({
+      sources: [{ id: 'w', type: 'local', path: '.', auth: { tokenEnv: 'CG_T_PAT' } }],
+      project: 'p-${CG_T_PAT}',
+    }, 'CG_T_PAT', 'project');
+  });
+});
+
+test('cleanup: apiKeyEnv（llm / retrieval.embedding）が指す環境変数の値の展開を拒否する', async () => {
+  await withEnv({ CG_T_LLMV: SECRET, CG_T_EMBV: SECRET + 'e' }, async () => {
+    await rejectsSecret({
+      llm: { provider: 'dry', model: 'd', apiKeyEnv: 'CG_T_LLMV' },
+      project: 'p-${CG_T_LLMV}',
+    }, 'CG_T_LLMV', 'project');
+    await rejectsSecret({
+      retrieval: { embedding: { apiKeyEnv: 'CG_T_EMBV' } },
+      project: 'p-${CG_T_EMBV}',
+    }, 'CG_T_EMBV', 'project');
+  });
+});
+
+test('cleanup: bearerEnv が指す環境変数の値の展開を拒否する', async () => {
+  await withEnv({ CG_T_BV: SECRET }, async () => {
+    await rejectsSecret({
+      sources: [{ id: 'w', type: 'local', path: '.', auth: { bearerEnv: 'CG_T_BV' } }],
+      project: 'p-${CG_T_BV}',
+    }, 'CG_T_BV', 'project');
+  });
+});
+
+test('cleanup: 回帰ガード: tokenEnv が指さない名前や emailEnv が指す変数の展開は通る', async () => {
+  await withEnv({ CG_T_HOST: SECRET, CG_T_MAIL: SECRET + 'm', CG_T_PAT2: SECRET + 'p' }, async () => {
+    const c = await load({
+      sources: [{ id: 'w', type: 'local', path: '.', auth: { tokenEnv: 'CG_T_PAT2', emailEnv: 'CG_T_MAIL' } }],
+      project: 'p-${CG_T_HOST}',
+      budget: { note: '${CG_T_MAIL}' },
+    });
+    assert.equal(c.project, `p-${SECRET}`);
+    assert.equal(c.budget.note, SECRET + 'm');
+  });
+});
+
 test('cleanup: 回帰ガード: 12 文字未満の値や、秘密の値を含まない文字列は拒否しない', async () => {
   await withEnv({ CG_T_TOKEN_SHORT: 'short-val' }, async () => {
     const c = await load({ project: 'p-${CG_T_TOKEN_SHORT}' });
