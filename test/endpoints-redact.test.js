@@ -58,3 +58,16 @@ test('endpoints(回帰): snippet は従来どおり 200 字で切られる', () 
   assert.equal(eps.length, 1);
   assert.equal(eps[0].snippet.length, 200);
 });
+
+test('projectFacts / renderStaticFacts: package.json の name などに入ったトークンが墨消しされる', async () => {
+  const { projectFacts } = await import('../src/analysis/static.js');
+  const pkg = { name: `app-${TOKEN}`, dependencies: { loose: '*', other: '^1.0.0' }, scripts: { start: 'node .' } };
+  const docs = [{ kind: 'config', sourceId: 's', sourceType: 'local', path: 'package.json', url: null, text: JSON.stringify(pkg) }];
+  const facts = projectFacts(docs);
+  const out = renderStaticFacts({ findings: [], facts, endpoints: [] });
+  assert.ok(!out.includes(TOKEN_BODY), `観測値に生のトークンが残っている: ${out}`);
+  assert.ok(out.includes('«REDACTED:'), `観測値に墨消し印が無い: ${out}`);
+  // 通常の観測値は変わらない
+  assert.ok(out.includes('lockfile'), out);
+  assert.ok(out.includes('loose@*'), out);
+});
