@@ -84,3 +84,28 @@ test('回帰ガード: 公開鍵・証明書は伏せない', () => {
   const [f] = scanAll([doc(text)]);
   assert.ok(f.context.includes(`${MARK}PUBAAAA`));
 });
+
+// 秘密鍵と無関係な「-----END 」を含む行は、墨消しで壊さない（#87 の回帰。PEM を扱うコードや文書が証拠から消えていた）
+test('redactText: 秘密鍵ではない END を含む行（コード・説明文・公開鍵・PGP 署名）は変えない', () => {
+  const lines = [
+    "if (line.startsWith('-----END ')) { inBlock = false; }",
+    'const PEM_END = /-----END /;',
+    'PEM ファイルは `-----END ` で始まる行で終わる。',
+    'const pub = "-----BEGIN PUBLIC KEY-----\\nMFkw\\n-----END PUBLIC KEY-----\\n"; verify(pub);',
+    '-----END PUBLIC KEY-----',
+    '-----END PGP SIGNATURE-----',
+    'iQEzBAEBCAAdFiEE3l0=-----END PGP SIGNATURE-----',
+  ];
+  for (const line of lines) {
+    const r = redactText(line);
+    assert.equal(r.text, line, line);
+    assert.equal(r.count, 0, line);
+    assert.deepEqual(r.kinds, [], line);
+  }
+});
+
+test('redactText: BEGIN の無い秘密鍵の END 行（本文の続き + END）は、END より前を伏せる（従来どおり）', () => {
+  const r = redactText(`${MARK}AAAA/BBBB==-----END RSA PRIVATE KEY-----`);
+  assert.ok(!r.text.includes(MARK), r.text);
+  assert.ok(r.kinds.includes('PRIVATE_KEY'));
+});

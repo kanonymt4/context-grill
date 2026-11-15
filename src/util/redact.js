@@ -44,6 +44,9 @@ const RULES = [
 
 const PEM_BEGIN = /-----BEGIN (?:[A-Z ]*)?(?:PRIVATE KEY|RSA PRIVATE KEY|OPENSSH PRIVATE KEY|PGP PRIVATE KEY BLOCK|CERTIFICATE)-----/;
 const PEM_END = /-----END /;
+// BEGIN の無い END 行（鍵の本文の続き + END）。END より前が base64 の文字だけで、種別が PEM_BEGIN と同じものに限る。
+// 「-----END 」を含むだけの行（PEM を扱うコード・説明文・公開鍵・PGP 署名）を壊さない
+const PEM_TAIL = /^[A-Za-z0-9+/=\s]*-----END (?:[A-Z ]*)?(?:PRIVATE KEY|RSA PRIVATE KEY|OPENSSH PRIVATE KEY|PGP PRIVATE KEY BLOCK|CERTIFICATE)-----/;
 const PEM_BEGIN_G = new RegExp(PEM_BEGIN.source, 'g');
 const PEM_MARK = '«REDACTED:PRIVATE_KEY»';
 
@@ -95,7 +98,7 @@ export function redactText(input) {
     } else if (inPem) {
       if (PEM_END.test(line)) { inPem = false; return line; }
       return PEM_MARK;
-    } else if (PEM_END.test(line)) {
+    } else if (PEM_TAIL.test(line)) {
       // BEGIN の無い END 行（チャンク境界などで本文の続きだけが来た）。END より前は鍵の本文なので印にし、後ろだけ残す
       const endAt = line.indexOf('-----END ');
       const close = line.indexOf('-----', endAt + 9);
