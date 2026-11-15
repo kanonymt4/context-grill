@@ -314,7 +314,7 @@ async function cmdInit(flags) {
   if (!fs.existsSync(envPath)) {
     await fsp.writeFile(envPath, [
       '# 認証情報（.env は必ず .gitignore に入れてください）',
-      '# 値と同じ行にコメントを書かないでください（コメントが値に含まれることがあります）',
+      '# 値と同じ行にコメントを書かないでください（context-grill は空白の直後の # 以降を無視しますが、他のツールでは値に含まれることがあります）',
       '',
       '# GitHub（private リポジトリを読む場合）: fine-grained PAT（Contents: Read-only）を使う',
       'GITHUB_TOKEN=',
