@@ -7,6 +7,7 @@ const SHARDS = 32;
 const FORMAT_VERSION = 2;   // 2: ファイル名に世代番号を持たせた（1 とは互換性がない）
 
 const MAX_GEN_TRIES = 1000;   // 世代番号の確保を諦めるまでの試行回数
+const MAX_GEN = 9999;          // 世代番号はファイル名で 4 桁（pad / MANIFEST_RE）。これを超えない
 
 const pad = (g) => String(g).padStart(4, '0');
 
@@ -106,6 +107,10 @@ export class IndexBuilder {
     let gen = (latestGen(this.dir) ?? 0) + 1;
     for (let tries = 0; ; tries++, gen++) {
       if (tries >= MAX_GEN_TRIES) throw new Error(`索引の世代番号を確保できませんでした (${this.dir})`);
+      // ファイル名の世代は 4 桁固定（MANIFEST_RE など）。10000 以降は認識されず、公開すると索引が消えて見える
+      if (gen > MAX_GEN) {
+        throw new Error(`索引の世代番号が上限 (${MAX_GEN}) に達しました。索引ディレクトリ ${this.dir} を削除して sync し直してください`);
+      }
       const L = layout(this.dir, gen);
       try {
         this.fd = fs.openSync(L.docs, 'wx');
