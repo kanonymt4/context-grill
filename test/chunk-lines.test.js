@@ -128,3 +128,33 @@ test('pack: 行単位で正しく重なるチャンクは従来どおり 1 つ�
   assert.equal(items[0].text, lines.join('\n'));
   assert.deepEqual([items[0].start, items[0].end], [1, 10]);
 });
+
+// ---------------------------------------------------------------- 隙間のある結合
+test('pack: 行が抜ける隙間（1〜10 行と 12〜20 行）は結合せず、ラベルと本文が一致する別 item のままにする', async () => {
+  const { buildEvidencePack } = await import('../src/index/pack.js');
+  const mkc = (s, e, score) => ({
+    docId: 'd1', id: `d1#${s}`, sourceId: 's', path: 'a.txt', start: s, end: e, score, kind: 'doc', title: 'a',
+    text: Array.from({ length: e - s + 1 }, (_, i) => `line${s + i}`).join('\n'),
+  });
+  const p = buildEvidencePack([mkc(1, 10, 1), mkc(12, 20, 0.9)], { budgetTokens: 10000 });
+  assert.equal(p.items.length, 2, '隙間があるので別 item のはず');
+  for (const it of p.items) {
+    // 本文の行数がラベルの行数と一致する（欠けた行にラベルを付けない）
+    assert.equal(it.text.split('\n').length, it.end - it.start + 1, `${it.start}-${it.end} の本文の行数がずれている`);
+  }
+  assert.ok(!p.items.some((it) => it.start <= 11 && it.end >= 11), '11 行目はどの item にも含まれない');
+});
+
+test('pack: 隣接（10 行の次が 11 行）と重なりは、従来どおり 1 つの item に結合する（回帰ガード）', async () => {
+  const { buildEvidencePack } = await import('../src/index/pack.js');
+  const mkc = (s, e, score) => ({
+    docId: 'd1', id: `d1#${s}`, sourceId: 's', path: 'a.txt', start: s, end: e, score, kind: 'doc', title: 'a',
+    text: Array.from({ length: e - s + 1 }, (_, i) => `line${s + i}`).join('\n'),
+  });
+  const adj = buildEvidencePack([mkc(1, 10, 1), mkc(11, 20, 0.9)], { budgetTokens: 10000 });
+  assert.equal(adj.items.length, 1);
+  assert.equal(adj.items[0].text.split('\n').length, 20);
+  const ov = buildEvidencePack([mkc(1, 10, 1), mkc(8, 20, 0.9)], { budgetTokens: 10000 });
+  assert.equal(ov.items.length, 1);
+  assert.equal(ov.items[0].text.split('\n').length, 20);
+});

@@ -23,7 +23,10 @@ export function citationLabel(c) {
 function canJoin(last, r) {
   if (last.partial || r.partial) return false;
   const n = last.end - r.start + 1;
-  if (n <= 0) return true;
+  // 隙間（間に行が抜ける）は結合しない。結合すると、欠けた行を含まない本文に start〜end のラベルが付く。
+  // n === 0 は隣接（直後の行から始まる）で、そのまま連結してよい
+  if (n < 0) return false;
+  if (n === 0) return true;
   const lastLines = last.text.split('\n');
   const rLines = r.text.split('\n');
   if (lastLines.length < n) return false;
