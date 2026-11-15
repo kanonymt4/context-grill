@@ -58,13 +58,18 @@ export function gitEnv(src) {
     GIT_CONFIG_NOSYSTEM: '1',        // ホスト側の system 設定に影響されない
     GIT_LFS_SKIP_SMUDGE: '1',
   };
+  // git 2.31+ の GIT_CONFIG_* 経由。ps 出力・エラーメッセージ・.git/config のいずれにも残らない。
+  const entries = [];
   const tk = token(src);
-  if (tk) {
-    // git 2.31+ の GIT_CONFIG_* 経由。ps 出力・エラーメッセージ・.git/config のいずれにも残らない。
-    env.GIT_CONFIG_COUNT = '1';
-    env.GIT_CONFIG_KEY_0 = 'http.extraHeader';
-    env.GIT_CONFIG_VALUE_0 = 'Authorization: Basic ' + Buffer.from(`x-access-token:${tk}`).toString('base64');
-  }
+  if (tk) entries.push(['http.extraHeader', 'Authorization: Basic ' + Buffer.from(`x-access-token:${tk}`).toString('base64')]);
+  // 許可ホストが返したリダイレクトで、許可リスト外のホストへ（トークン付きで）接続しない。
+  // 代償: リネーム・移管されたリポジトリの clone は 301 で失敗する（repo / host を新しい値に直す）
+  entries.push(['http.followRedirects', 'false']);
+  env.GIT_CONFIG_COUNT = String(entries.length);
+  entries.forEach(([k, v], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = k;
+    env[`GIT_CONFIG_VALUE_${i}`] = v;
+  });
   return env;
 }
 

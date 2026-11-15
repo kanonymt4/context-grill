@@ -65,7 +65,8 @@ function redactInlinePem(line) {
     found = true;
     const afterBegin = m.index + m[0].length;
     const endAt = line.indexOf('-----END ', afterBegin);
-    if (endAt < 0) return { line: out + line.slice(pos), found, open: true };
+    // END が無い BEGIN は、BEGIN 以降（鍵の本文）を出さず、前の部分と印だけにする
+    if (endAt < 0) return { line: out + line.slice(pos, m.index) + PEM_MARK, found, open: true };
     const close = line.indexOf('-----', endAt + 9);
     const endTo = close < 0 ? line.length : close + 5;
     out += line.slice(pos, m.index) + PEM_MARK;
@@ -94,6 +95,12 @@ export function redactText(input) {
     } else if (inPem) {
       if (PEM_END.test(line)) { inPem = false; return line; }
       return PEM_MARK;
+    } else if (PEM_END.test(line)) {
+      // BEGIN の無い END 行（チャンク境界などで本文の続きだけが来た）。END より前は鍵の本文なので印にし、後ろだけ残す
+      const endAt = line.indexOf('-----END ');
+      const close = line.indexOf('-----', endAt + 9);
+      l = PEM_MARK + (close < 0 ? '' : line.slice(close + 5));
+      kinds.add('PRIVATE_KEY'); count++;
     }
     for (const rule of RULES) {
       rule.re.lastIndex = 0;
