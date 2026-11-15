@@ -101,3 +101,34 @@ test('索引(回帰): 単独の publish で旧世代のファイルが消える'
     for (const f of [g2.L.manifest, g2.L.meta, g2.L.docs]) assert.equal(fs.existsSync(f), true);
   } finally { await fsp.rm(dir, { recursive: true, force: true }); }
 });
+
+test('索引(上限): 世代 9999 が公開済みなら、start() は案内つきで失敗し、既存の索引は開けたままにする', async () => {
+  // 世代番号は 4 桁固定のファイル名（MANIFEST_RE など）。10000 以降は認識されず、公開すると索引が消える
+  const dir = await tmpDir();
+  try {
+    const first = new IndexBuilder(dir);
+    await first.start();
+    await fill(first, 'A');
+    await first.finish({ indexKey: 'a' });
+    // 公開済みの世代を 9999 に付け替える（ファイル名の世代だけを変える）
+    const g = first.L.gen;
+    for (const f of ['manifest', 'meta', 'df', 'lens', 'docs']) {
+      fs.renameSync(layout(dir, g)[f], layout(dir, 9999)[f]);
+    }
+    for (const n of fs.readdirSync(path.join(dir, 'postings'))) {
+      const m = /^(\d{4})\.(\d+)\.json$/.exec(n);
+      if (m) fs.renameSync(path.join(dir, 'postings', n), path.join(dir, 'postings', `9999.${m[2]}.json`));
+    }
+    assert.equal(latestGen(dir), 9999);
+
+    const next = new IndexBuilder(dir);
+    await assert.rejects(() => next.start(), /世代番号が上限/);
+    // 失敗しても、公開済みの索引は消えず開ける。5 桁のファイルも作られていない
+    assert.equal(latestGen(dir), 9999);
+    assert.equal(fs.readdirSync(dir).some((n) => /\.\d{5,}\./.test(n)), false);
+    const store = await IndexStore.open(dir);
+    await store.close();
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
