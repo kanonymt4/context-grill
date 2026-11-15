@@ -1,6 +1,8 @@
 // ログは必ず stderr へ。stdout は JSON / MCP 用に予約する。
 const LEVELS = { silent: 0, error: 1, warn: 2, info: 3, debug: 4 };
-let current = LEVELS[process.env.CONTEXT_GRILL_LOG_LEVEL] ?? LEVELS.info;
+// 環境変数の値は利用者が決める。constructor などの prototype のキーが関数を返さないよう、自分のキーだけを見る
+const envLevel = process.env.CONTEXT_GRILL_LOG_LEVEL;
+let current = (typeof envLevel === 'string' && Object.hasOwn(LEVELS, envLevel)) ? LEVELS[envLevel] : LEVELS.info;
 
 /** --log に指定できる水準名（CLI の検査が参照する） */
 export const LOG_LEVEL_NAMES = Object.keys(LEVELS);
