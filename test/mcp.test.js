@@ -1614,3 +1614,51 @@ test('MCP: sync を同時に複数本送っても全部成功し、その後の 
   assert.notEqual(s.result?.isError, true, textOf(s).slice(0, 300));
   assert.ok(JSON.parse(textOf(s)).length >= 1, 'search が結果を返さない');
 });
+
+// context_grill_fetch の path 経路: 行窓が PEM ブロックの内側から始まっても鍵本文を返さない
+const PEM_BODY = (i) => `PEMBODYMARKER${String(i).padStart(2, '0')}AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdefghijklmnop`;
+
+async function pemFetchFixture() {
+  const { dir, configPath } = await fixture({ build: false });
+  const body = Array.from({ length: 20 }, (_, i) => PEM_BODY(i));
+  const lines = ['const a = 1;', '-----BEGIN RSA PRIVATE KEY-----', ...body, '-----END RSA PRIVATE KEY-----', 'const b = 2;'];
+  await fsp.writeFile(path.join(dir, 'src', 'key.js'), lines.join('\n') + '\n');
+  const config = await loadConfig(configPath);
+  await syncSources(config, {});
+  await buildIndex(config, { embed: false });
+  return { dir, configPath, total: lines.length };
+}
+
+test('MCP: fetch の行窓が PEM の途中から始まっても鍵本文を返さない', async () => {
+  const { dir, configPath, total } = await pemFetchFixture();
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [
+    call(1, 'context_grill_fetch', { path: 'src/key.js', start: 4, end: 6 }),
+    call(2, 'context_grill_fetch', { path: 'src/key.js', start: 1, end: 6 }),
+    call(3, 'context_grill_fetch', { path: 'src/key.js', start: 20, end: total }),
+  ], 3);
+  const t1 = textOf(res.responses.find((x) => x.id === 1));
+  assert.doesNotMatch(t1, /PEMBODYMARKER/, `窓が PEM の途中から始まると鍵本文が返る: ${t1.slice(0, 400)}`);
+  const t2 = textOf(res.responses.find((x) => x.id === 2));
+  assert.doesNotMatch(t2, /PEMBODYMARKER/);
+  assert.match(t2, /REDACTED:PRIVATE_KEY/);
+  assert.match(t2, /const a = 1;/);
+  // END 後の行は窓に入れば返り、total_lines は変わらない
+  const o3 = JSON.parse(textOf(res.responses.find((x) => x.id === 3)));
+  assert.doesNotMatch(o3.text, /PEMBODYMARKER/);
+  assert.match(o3.text, /const b = 2;/);
+  assert.equal(o3.total_lines, total);
+  const o1 = JSON.parse(t1);
+  assert.equal(o1.total_lines, total);
+  assert.equal(o1.lines, '4-6');
+});
+
+test('MCP: fetch の行窓（鍵を含まない通常のファイル）は変わらない', async () => {
+  const { dir, configPath } = await fixture({ build: true });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [call(1, 'context_grill_fetch', { path: 'src/payment.js', start: 2, end: 3 })], 1);
+  const o = JSON.parse(textOf(res.responses[0]));
+  assert.equal(o.lines, '2-3');
+  assert.equal(o.total_lines, 3);
+  assert.equal(o.text, 'function refundPayment(id) { return id; }\nmodule.exports = { refundPayment, MAX_RETRY };');
+});
