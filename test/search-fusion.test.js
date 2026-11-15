@@ -9,6 +9,7 @@ import { syncSources, buildIndex } from '../src/index/ingest.js';
 import { IndexStore } from '../src/index/store.js';
 import { hybridSearch, fuseScores } from '../src/index/search.js';
 import { TASKS, planQueries } from '../src/tasks/index.js';
+import { buildEvidencePack } from '../src/index/pack.js';
 
 // 検索の融合と加点の受け入れテスト。
 // 加点（パス・タイトル一致 / 種別 / ソース優先度）は「僅差の順位付け」にだけ効き、
@@ -277,4 +278,61 @@ test('MMR: 重複の疑いが無い（語が一部重なるだけの）候補は
   const texts = ['alpha beta gamma delta epsilon zeta', 'alpha beta gamma xray yankee zulu', 'papa quebec romeo sierra tango uniform'];
   const res = await hybridSearch(dupStore([10, 9, 5], texts), { queries: ['q'], config: dupConfig(3) });
   assert.deepEqual(res.map((r) => r.idx), [0, 1, 2]);
+});
+
+// ソース優先度が負でも、そのソース内の順位は保たれる（倍率の正の下限）。
+// 倍率 1 + 0.15 × priority は priority < 約 -6.67 で負になり、関連度の高いチャンクほど下に来ていた。
+function priorityStore() {
+  // idx 0: ソース a、idx 1: ソース b の強い一致、idx 2: ソース b の弱い一致。本文は互いに別の語
+  const meta = [
+    { docId: 'da', path: 'a/mid.js', title: 'mid', kind: 'code', sourceId: 'a' },
+    { docId: 'db1', path: 'b/strong.js', title: 'strong', kind: 'code', sourceId: 'b' },
+    { docId: 'db2', path: 'b/weak.js', title: 'weak', kind: 'code', sourceId: 'b' },
+  ].map((m, i) => ({ ...m, sourceType: 'local', start: 1, end: 1, version: 'v', ord: i }));
+  return {
+    dims: 0, meta,
+    textOf: (i) => ['alpha', 'bravo', 'charlie'][i],
+    vecAt: () => null,
+    chunkAt: (i) => ({ ...meta[i], idx: i, text: ['alpha', 'bravo', 'charlie'][i] }),
+    bm25: () => [{ idx: 1, score: 10 }, { idx: 0, score: 6 }, { idx: 2, score: 3 }],
+    vectorSearch: () => [],
+  };
+}
+const priorityConfig = {
+  retrieval: {
+    embedding: { provider: 'none' }, glossaryBridge: false,
+    hybrid: { final: 3, mmrLambda: 0.72, perQueryTop: 10 },
+    boosts: { pathMatch: 0, kindPrior: 0, sourcePriority: 0.15 },
+  },
+};
+
+test('優先度: 優先度が極端に負のソースでも、そのソース内の順位は逆転せず、score はすべて正', async () => {
+  const res = await hybridSearch(priorityStore(), {
+    queries: ['q'], config: priorityConfig, sourcePriority: { a: 1, b: -10 },
+  });
+  const order = res.map((r) => r.idx);
+  assert.ok(order.indexOf(1) < order.indexOf(2), `b 内で強い一致が上: ${order.join(',')}`);
+  assert.ok(res.every((r) => r.score > 0), `score がすべて正: ${res.map((r) => r.score).join(',')}`);
+});
+
+test('優先度: 優先度が極端に負でも、証拠パックは予算が足りないときに強い一致を残す', async () => {
+  const res = await hybridSearch(priorityStore(), {
+    queries: ['q'], config: priorityConfig, sourcePriority: { b: -10 },
+  });
+  const pack = buildEvidencePack(res.filter((r) => r.sourceId === 'b'), { budgetTokens: 100 });
+  assert.equal(pack.items.length, 1, '前提: 予算で 1 件だけ入る');
+  assert.equal(pack.items[0].path, 'b/strong.js');
+});
+
+test('優先度: 0 / 1 / 小さい負（-1）では従来どおりの順位と score（倍率は 1 / 1.15 / 0.85）', async () => {
+  for (const [p, factor] of [[0, 1], [1, 1.15], [-1, 0.85]]) {
+    const res = await hybridSearch(priorityStore(), {
+      queries: ['q'], config: priorityConfig, sourcePriority: { b: p },
+    });
+    const byIdx = new Map(res.map((r) => [r.idx, r.score]));
+    // 正規化後の BM25 は 1.0 / 0.6 / 0.3（max で割る。リスト 1 本）。補正は b の 2 件にだけ掛かる
+    assert.ok(Math.abs(byIdx.get(1) - 1.0 * factor) < 1e-9, `priority ${p}: strong ${byIdx.get(1)}`);
+    assert.ok(Math.abs(byIdx.get(2) - 0.3 * factor) < 1e-9, `priority ${p}: weak ${byIdx.get(2)}`);
+    assert.ok(Math.abs(byIdx.get(0) - 0.6) < 1e-9, `priority ${p}: a は補正なし ${byIdx.get(0)}`);
+  }
 });
