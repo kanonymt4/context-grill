@@ -88,6 +88,9 @@ function mmrSelect(store, candidates, { lambda = 0.72, k = 24, useVectors = fals
   return selected;
 }
 
+/** 加点の倍率の下限（正の値。ソース内の順位が常に保たれる最小の変更） */
+const MIN_FACTOR = 0.01;
+
 /**
  * ハイブリッド検索。BM25（語彙一致・コード識別子に強い）とベクトル（言い換えに強い）を
  * 正規化スコアで融合（fuseScores）→ 決定的なフィーチャ補正（乗法）→ MMR で多様化。
@@ -142,10 +145,12 @@ export async function hybridSearch(store, opts) {
   const fused = fuseScores(lists).map((r) => {
     const m = store.meta[r.idx];
     const pathTokens = tokenize(`${m.path} ${m.title}`);
-    const factor = 1
+    // priority が極端に負だと倍率が 0 以下になり、関連度の高いチャンクほど下に来てしまう
+    // （MMR の rel = score / maxScore も符号が反転する）。倍率に正の下限を置いて、順位を保つ
+    const factor = Math.max(MIN_FACTOR, 1
       + boosts.pathMatch * overlapRatio(allTerms, pathTokens)
       + boosts.kindPrior * (kindPriors[m.kind] ?? 0)
-      + boosts.sourcePriority * (sourcePriority[m.sourceId] ?? 0);
+      + boosts.sourcePriority * (sourcePriority[m.sourceId] ?? 0));
     return { ...r, score: r.score * factor };
   }).sort((a, b) => b.score - a.score || a.idx - b.idx);
 
