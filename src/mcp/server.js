@@ -14,7 +14,7 @@ import { validate } from '../llm/jsonschema.js';
 import { runTaskWithStore, resolveTask, resolveEffort, resolveSourceIds } from '../llm/pipeline.js';
 import { listPresets, validatePresets, resolvePreset, getPreset, PresetError } from '../presets.js';
 import { initEgress, egressPlan, getPolicy } from '../util/egress.js';
-import { redactText } from '../util/redact.js';
+import { redactText, redactPemBlocks } from '../util/redact.js';
 
 // 新しい順。先頭が最新で、交渉に失敗したときの既定。
 // 対応表の根拠: Claude Code 2.1.231 と MCP SDK 1.29 が持つ版。
@@ -692,7 +692,9 @@ export async function startMcpServer({ configPath, offline } = {}) {
         const docs = await allDocs(config, onlySource);
         const doc = docs.find((d) => d.path === args.path && (!onlySource || onlySource.includes(d.sourceId)));
         if (!doc) throw new Error(`パスが見つかりません: ${args.path}`);
-        const lines = doc.text.split('\n');
+        // 窓の部分だけに safe() をかけると、BEGIN 行が窓の外にある PEM 本文が素通りする。
+        // 行に分ける前に文書単位で PEM を伏せる（行数は保たれるので窓の行番号は変わらない）。
+        const lines = redactPemBlocks(doc.text).split('\n');
         // 末尾が改行のファイルは split の最後が空要素になる。存在しない行として数えない（空ファイルは 0 行）
         if (lines[lines.length - 1] === '') lines.pop();
         const start = args.start ?? 1;
