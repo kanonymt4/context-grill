@@ -77,3 +77,42 @@ for (const [name, html] of Object.entries(WORST)) {
     assert.ok(ms < 500, `${ms.toFixed(0)}ms かかった(上限 500ms)`);
   });
 }
+
+// script / style / CDATA / structured-macro を含む入力。期待値は、修正前の実装の出力をそのまま固定したもの
+const FIXTURE_BLOCKS = [
+  '<p>前置き</p>',
+  '<SCRIPT type="text/javascript">if (a < b) { x(); }</SCRIPT>',
+  '<style>p > a { color: red; }</style>after style',
+  '<script>未閉じではない</script><script>二つ目</script>',
+  '<style <script>b</script> 壊れた開き',
+  '<ac:structured-macro ac:name="code"><ac:plain-text-body><![CDATA[let x = [1,2];\nfoo(x[0]);]]></ac:plain-text-body></ac:structured-macro>',
+  '<AC:STRUCTURED-MACRO AC:NAME="CODE" ac:schema-version="1"><ac:parameter ac:name="title">t</ac:parameter><ac:plain-text-body>\n <![CDATA[大文字 < 小文字]]>\n </ac:plain-text-body></AC:STRUCTURED-MACRO>',
+  '<ac:structured-macro ac:name="noformat"><ac:plain-text-body><![CDATA[noformat本文]]></ac:plain-text-body></ac:structured-macro>',
+  '<ac:structured-macro ac:name="code"><ac:rich-text-body><p>本文なし</p></ac:rich-text-body></ac:structured-macro>',
+  '<ac:plain-text-body><![CDATA[単独の本文]]></ac:plain-text-body>',
+  '<p>生のCDATA <![CDATA[a<b]]> と <![CDATA[二つ目]]> 終わり</p>',
+  '<p>閉じない <![CDATA[ 末尾まで</p>',
+].join('\n');
+
+const EXPECTED_BLOCKS = "前置き\n\n after style\n\n<style 壊れた開き\n\n```\nlet x = [1,2];\nfoo(x[0]);\n```\n\n```\n大文字 < 小文字\n```\n\nnoformat本文\n\n本文なし\n\n単独の本文\n\n生のCDATA a<b と 二つ目 終わり\n\n閉じない <![CDATA[ 末尾まで";
+
+test('htmlToText(回帰): script / style / CDATA / code マクロを含む HTML の変換結果は修正前と同じ', () => {
+  assert.equal(htmlToText(FIXTURE_BLOCKS), EXPECTED_BLOCKS);
+});
+
+// 閉じない開きの繰り返しで、script/style・CDATA・structured-macro の各置換が二乗にならないこと（各 400KB 以上）
+const WORST_BLOCKS = {
+  '<script の繰り返し': '<script'.repeat(60000),
+  '<style の繰り返し': '<style'.repeat(70000),
+  '<![CDATA[ の繰り返し': '<![CDATA['.repeat(50000),
+  '<ac:structured-macro ac:name="code"> の繰り返し': '<ac:structured-macro ac:name="code">'.repeat(24000),
+  '属性が閉じない <ac:structured-macro の繰り返し': '<ac:structured-macro '.repeat(20000),
+  '<ac:plain-text-body><![CDATA[ の繰り返し': '<ac:plain-text-body><![CDATA['.repeat(40000),
+};
+for (const [name, html] of Object.entries(WORST_BLOCKS)) {
+  test(`htmlToText: ${name}(400KB 以上)が 500ms 未満で終わる`, () => {
+    assert.ok(html.length >= 400000, `入力が短い: ${html.length}`);
+    const ms = timeMs(() => htmlToText(html));
+    assert.ok(ms < 500, `${ms.toFixed(0)}ms かかった(上限 500ms)`);
+  });
+}
