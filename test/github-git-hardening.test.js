@@ -250,13 +250,18 @@ test('gitEnv: GIT_DIR などの位置指定・設定注入の環境変数を継�
     for (const k of keys) process.env[k] = '/x';
     delete process.env.GITHUB_TOKEN;
     const env = gitEnv({});
-    for (const k of keys.slice(0, -3)) assert.ok(!(k in env), `${k} を継承している`);
+    // GIT_CONFIG_COUNT / KEY_0 / VALUE_0 は自前の設定（followRedirects）が常に入るので、存在ではなく値で見る
+    const own = new Set(['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0']);
+    for (const k of keys.slice(0, -3)) {
+      if (own.has(k)) assert.notEqual(env[k], '/x', `${k} を継承している`);
+      else assert.ok(!(k in env), `${k} を継承している`);
+    }
     assert.equal(env.GIT_CONFIG_GLOBAL, '/x');
     assert.equal(env.GIT_CONFIG_SYSTEM, '/x');
     // トークンがあるときの自前の GIT_CONFIG_* は従来どおり（利用者の値は混ざらない）
     process.env.GITHUB_TOKEN = 'dummy-token-value';
     const withTk = gitEnv({});
-    assert.equal(withTk.GIT_CONFIG_COUNT, '1');
+    assert.equal(withTk.GIT_CONFIG_COUNT, '2');   // extraHeader + followRedirects
     assert.equal(withTk.GIT_CONFIG_KEY_0, 'http.extraHeader');
     assert.match(withTk.GIT_CONFIG_VALUE_0, /^Authorization: Basic /);
     assert.ok(!('GIT_CONFIG_KEY_7' in withTk));
@@ -445,4 +450,96 @@ test('config: github の host が ホスト名 / ホスト名:ポート なら�
   await withConfigText(JSON.stringify({
     project: 'x', llm: { provider: 'dry', model: 'd' }, sources: [{ id: 'g', type: 'github', repo: 'acme/api' }],
   }), async (file) => { await loadConfig(file); });
+});
+
+// ------------------------------------------------------------ 6. リダイレクトへの追従（http.followRedirects）
+/** GIT_CONFIG_* の (key, value) の組を COUNT 個そろえて取り出す。個数が合わなければ失敗する */
+function configPairs(env) {
+  const n = Number(env.GIT_CONFIG_COUNT);
+  assert.ok(Number.isInteger(n) && n > 0, `GIT_CONFIG_COUNT が不正: ${env.GIT_CONFIG_COUNT}`);
+  const pairs = [];
+  for (let i = 0; i < n; i++) {
+    assert.ok(`GIT_CONFIG_KEY_${i}` in env && `GIT_CONFIG_VALUE_${i}` in env, `KEY_${i} / VALUE_${i} が欠けている`);
+    pairs.push([env[`GIT_CONFIG_KEY_${i}`], env[`GIT_CONFIG_VALUE_${i}`]]);
+  }
+  assert.ok(!(`GIT_CONFIG_KEY_${n}` in env), `COUNT より多い KEY がある`);
+  return pairs;
+}
+
+test('gitEnv: トークンの有無にかかわらず http.followRedirects=false を GIT_CONFIG_* で渡す', () => {
+  const saved = process.env.GITHUB_TOKEN;
+  try {
+    delete process.env.GITHUB_TOKEN;
+    const anon = configPairs(gitEnv({}));
+    assert.deepEqual(anon, [['http.followRedirects', 'false']]);
+
+    process.env.GITHUB_TOKEN = 'dummy-token-value';
+    const env = gitEnv({});
+    const withTk = configPairs(env);
+    assert.equal(env.GIT_CONFIG_COUNT, '2');
+    assert.equal(withTk[0][0], 'http.extraHeader');   // KEY_0 は従来どおり
+    assert.match(withTk[0][1], /^Authorization: Basic /);
+    assert.deepEqual(withTk[1], ['http.followRedirects', 'false']);
+  } finally {
+    if (saved === undefined) delete process.env.GITHUB_TOKEN; else process.env.GITHUB_TOKEN = saved;
+  }
+});
+
+/** 許可ホスト A。どの要求にも redirectTo の同じパスへ 302 を返し、受けた要求数を数える */
+function startRedirector(tls, redirectTo) {
+  const state = { requests: 0 };
+  const server = https.createServer(tls, (req, res) => {
+    state.requests++;
+    res.statusCode = 302;
+    res.setHeader('Location', `${redirectTo}${req.url}`);
+    res.end();
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      state.port = server.address().port;
+      state.close = () => new Promise((r) => { server.close(r); server.closeAllConnections?.(); });
+      resolve(state);
+    });
+  });
+}
+
+test('許可ホストが許可外ホストへ 302 を返しても、git は追従せず、許可外への接続は 0 件（トークンも送られない）', NEEDS_SERVER, async () => {
+  const saved = process.env.GITHUB_TOKEN;
+  try {
+    await withIsolatedGit(async ({ tmp, repos, workspaceDir }) => {
+      process.env.GITHUB_TOKEN = 'dummy-token-value';
+      makeUpstream(path.join(tmp, 'up'));
+      const b = await startGitHttps(path.join(tmp, 'up'), cert(tmp));   // 許可外ホスト B（本物の git サーバー）
+      const a = await startRedirector(cert(tmp), `https://127.0.0.1:${b.port}`);
+      try {
+        const hostA = `127.0.0.1:${a.port}`;
+        const { src, ctx } = makeCtx({ host: hostA, allowHosts: [hostA], workspaceDir, repos });
+        await assert.rejects(() => syncGithub(src, ctx));
+        assert.ok(a.requests > 0, 'A に要求が届いていない（テストが空振り）');
+        assert.equal(b.connections, 0, '許可外ホストへ接続した');
+        assert.equal(b.requests, 0, '許可外ホストへ要求を送った');
+      } finally {
+        await a.close();
+        await b.close();
+      }
+    });
+  } finally {
+    if (saved === undefined) delete process.env.GITHUB_TOKEN; else process.env.GITHUB_TOKEN = saved;
+  }
+});
+
+test('回帰: リダイレクトの無い通常の sync は、トークンありでも成功する', NEEDS_SERVER, async () => {
+  const saved = process.env.GITHUB_TOKEN;
+  try {
+    await withIsolatedGit(async ({ tmp, repos, workspaceDir }) => {
+      process.env.GITHUB_TOKEN = 'dummy-token-value';
+      await withServer(tmp, async ({ sha, host }) => {
+        const { src, ctx } = makeCtx({ host, allowHosts: [host], workspaceDir, repos });
+        const r = await syncGithub(src, ctx);
+        assert.equal(r.state.sha, sha);
+      });
+    });
+  } finally {
+    if (saved === undefined) delete process.env.GITHUB_TOKEN; else process.env.GITHUB_TOKEN = saved;
+  }
 });
