@@ -158,3 +158,15 @@ test('pack: 隣接（10 行の次が 11 行）と重なりは、従来どおり 
   assert.equal(ov.items.length, 1);
   assert.equal(ov.items[0].text.split('\n').length, 20);
 });
+
+test('pack の結合: 後ろのチャンクの新しい部分が空行 1 行だけでも、本文の行数が end - start + 1 と一致する', () => {
+  const base = { docId: 'd:x', sourceId: 's', sourceType: 'local', path: 'x.md', title: 'x', kind: 'code', url: '', version: 'v', score: 1 };
+  const items = buildEvidencePack([
+    { ...base, start: 1, end: 3, text: 'a\nb\nc' },
+    { ...base, start: 3, end: 4, text: 'c\n', score: 0.9 },   // 3 行目は重なり、4 行目は空行
+  ], { budgetTokens: 10_000_000, maxItems: 10 }).items;
+  assert.equal(items.length, 1);
+  assert.equal(items[0].end, 4);
+  assert.equal(items[0].text.split('\n').length, items[0].end - items[0].start + 1);
+  assert.equal(items[0].text, 'a\nb\nc\n');
+});

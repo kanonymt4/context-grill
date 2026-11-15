@@ -7,8 +7,8 @@ const SHARDS = 32;
 const FORMAT_VERSION = 2;   // 2: ファイル名に世代番号を持たせた（1 とは互換性がない）
 
 const MAX_GEN_TRIES = 1000;   // 世代番号の確保を諦めるまでの試行回数
-const MAX_GEN = 9999;          // 世代番号はファイル名で 4 桁（pad / MANIFEST_RE）。これを超えない
 
+// 4 桁に満たなければ 0 埋め、超えればそのまま出る（ファイル名の世代は 4 桁以上。比較は常に数値）
 const pad = (g) => String(g).padStart(4, '0');
 
 /**
@@ -35,7 +35,7 @@ export function layout(dir, gen) {
   };
 }
 
-const MANIFEST_RE = /^manifest\.(\d{4})\.json$/;
+const MANIFEST_RE = /^manifest\.(\d{4,})\.json$/;
 
 /**
  * 公開済みの最大世代を返す。無ければ null。
@@ -62,7 +62,7 @@ export function latestGen(dir) {
  */
 async function pruneGenerations(dir, keep) {
   const kill = async (base, name) => {
-    const m = /^(?:manifest|docs\.meta|df|lens)\.(\d{4})\.json(?:\.tmp)?$|^docs\.(\d{4})\.txt$|^vectors\.(\d{4})\.bin$/.exec(name);
+    const m = /^(?:manifest|docs\.meta|df|lens)\.(\d{4,})\.json(?:\.tmp)?$|^docs\.(\d{4,})\.txt$|^vectors\.(\d{4,})\.bin$/.exec(name);
     const g = m && (m[1] ?? m[2] ?? m[3]);
     if (g === undefined || g === null || Number(g) >= keep) return;
     try { await fsp.unlink(path.join(base, name)); } catch (e) { /* 使用中なら次回に回す */ }
@@ -73,11 +73,39 @@ async function pruneGenerations(dir, keep) {
   const pd = path.join(dir, 'postings');
   try {
     await Promise.all((await fsp.readdir(pd)).map(async (n) => {
-      const m = /^(\d{4})\.\d{1,2}\.json$/.exec(n);
+      const m = /^(\d{4,})\.\d{1,2}\.json$/.exec(n);
       if (!m || Number(m[1]) >= keep) return;
       try { await fsp.unlink(path.join(pd, n)); } catch (e) { /* 同上 */ }
     }));
   } catch (e) { /* postings が無い */ }
+}
+
+/** 指定した世代のファイルを全部消す（未公開の自分の残骸の片付け用。消せなくても握り潰す）。 */
+async function discardGeneration(dir, gen) {
+  const L = layout(dir, gen);
+  const files = [L.manifestTmp, L.manifest, L.meta, L.df, L.lens, L.docs, L.vectors];
+  await Promise.all(files.map(async (f) => { try { await fsp.unlink(f); } catch (e) { /* 無ければよい */ } }));
+  try {
+    await Promise.all((await fsp.readdir(L.postingsDir)).map(async (n) => {
+      const m = /^(\d{4,})\.\d{1,2}\.json$/.exec(n);
+      if (!m || Number(m[1]) !== gen) return;
+      try { await fsp.unlink(path.join(L.postingsDir, n)); } catch (e) { /* 同上 */ }
+    }));
+  } catch (e) { /* postings が無い */ }
+}
+
+/**
+ * 自分より新しい世代が公開済みなら、自分の残骸を片付けて明示的に失敗する。
+ *
+ * 公開の順序が入れ替わると（並行する builder が別々の世代を取った場合）、新しい世代の prune が
+ * 古い世代の作業中のファイルを消す。そのまま続けると、原因の分からない ENOENT で落ちるか、
+ * docs の無い manifest だけが残る。古い世代を後から公開して新しい世代を上書きすることもしない。
+ */
+async function assertNotSuperseded(dir, gen) {
+  const latest = latestGen(dir);
+  if (latest === null || latest <= gen) return;
+  await discardGeneration(dir, gen);
+  throw new Error(`索引の世代 ${gen} は、より新しい世代 ${latest} に置き換えられたため破棄しました（並行する sync があった可能性があります）。もう一度 sync してください。`);
 }
 
 function shardOf(term) {
@@ -107,10 +135,6 @@ export class IndexBuilder {
     let gen = (latestGen(this.dir) ?? 0) + 1;
     for (let tries = 0; ; tries++, gen++) {
       if (tries >= MAX_GEN_TRIES) throw new Error(`索引の世代番号を確保できませんでした (${this.dir})`);
-      // ファイル名の世代は 4 桁固定（MANIFEST_RE など）。10000 以降は認識されず、公開すると索引が消えて見える
-      if (gen > MAX_GEN) {
-        throw new Error(`索引の世代番号が上限 (${MAX_GEN}) に達しました。索引ディレクトリ ${this.dir} を削除して sync し直してください`);
-      }
       const L = layout(this.dir, gen);
       try {
         this.fd = fs.openSync(L.docs, 'wx');
@@ -150,6 +174,7 @@ export class IndexBuilder {
    */
   async finish(extra = {}, { publish = true } = {}) {
     fs.closeSync(this.fd);
+    await assertNotSuperseded(this.dir, this.L.gen);
     const shards = Array.from({ length: SHARDS }, () => ({}));
     const df = {};
     for (const [term, arr] of this.postings) {
@@ -178,6 +203,7 @@ export class IndexBuilder {
 
   /** manifest を未使用の名前へ rename して公開する。rename は原子的なので途中が見えない。 */
   async publish() {
+    await assertNotSuperseded(this.dir, this.L.gen);
     await fsp.rename(this.L.manifestTmp, this.L.manifest);
     await pruneGenerations(this.dir, this.L.gen);
   }
@@ -391,6 +417,7 @@ function topN(scores, k) {
  * 中途半端な内容を掴む余地ができるうえ、Windows では開かれていると書けなくなる。
  */
 export async function writeVectors(dir, gen, vectors, dims) {
+  await assertNotSuperseded(dir, gen);
   const L = layout(dir, gen);
   if (!fs.existsSync(L.manifestTmp)) {
     throw new Error(`公開済みの世代にはベクトルを書けません (${L.manifest})。finish(extra, { publish: false }) で公開を遅らせてください。`);

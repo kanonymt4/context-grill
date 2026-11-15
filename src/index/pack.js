@@ -51,8 +51,9 @@ export function buildEvidencePack(results, { budgetTokens, maxItems = 200, heade
     if (last && last.docId === r.docId && r.start <= last.end + 3 && canJoin(last, r)) {
       if (r.end > last.end) {
         const overlapLines = Math.max(0, last.end - r.start + 1);
-        const extra = r.text.split('\n').slice(overlapLines).join('\n');
-        last.text += (extra ? '\n' + extra : '');
+        // 追加分が空行 1 行だけでも「行として存在する」ので足す（文字列の真偽で判定しない）
+        const extraLines = r.text.split('\n').slice(overlapLines);
+        if (extraLines.length) last.text += '\n' + extraLines.join('\n');
         last.end = r.end;
         last.score = Math.max(last.score, r.score);
       }
