@@ -63,8 +63,10 @@ test('createProvider: apiKeyEnv が prototype のキー名なら HTTP の前に�
 test('gitEnv: tokenEnv が prototype のキー名なら匿名扱い（認証ヘッダを載せない）', () => {
   for (const n of PROTO_NAMES) {
     const env = gitEnv({ auth: { tokenEnv: n } });
-    assert.equal(env.GIT_CONFIG_VALUE_0, undefined, n);
-    assert.equal(env.GIT_CONFIG_COUNT, undefined, n);
+    // 認証ヘッダは載らず、followRedirects だけが KEY_0 に入る
+    assert.equal(env.GIT_CONFIG_KEY_0, 'http.followRedirects', n);
+    assert.equal(env.GIT_CONFIG_VALUE_0, 'false', n);
+    assert.equal(env.GIT_CONFIG_COUNT, '1', n);
   }
 });
 

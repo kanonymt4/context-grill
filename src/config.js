@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { deepMerge, sha256, stableStringify } from './util/misc.js';
+import { deepMerge, readEnv, sha256, stableStringify } from './util/misc.js';
 import { parseConfluenceUrl } from './util/urls.js';
 import { log } from './util/log.js';
 
@@ -472,6 +472,22 @@ function validate(c) {
   const secretValues = Object.entries(process.env)
     .filter(([k, v]) => v && v.length >= 12 && /TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|SESSION|BEARER/i.test(k))
     .map(([k, v]) => [k, v]);
+  // 設定自身が tokenEnv / apiKeyEnv / bearerEnv で参照する環境変数は、名前の語によらず秘密として扱う（emailEnv は対象外）
+  const referenced = new Set();
+  const collectRefs = (node) => {
+    if (Array.isArray(node)) node.forEach(collectRefs);
+    else if (node && typeof node === 'object') {
+      for (const [k, v] of Object.entries(node)) {
+        if ((k === 'tokenEnv' || k === 'apiKeyEnv' || k === 'bearerEnv') && typeof v === 'string') referenced.add(v);
+        else collectRefs(v);
+      }
+    }
+  };
+  collectRefs(c);
+  for (const name of referenced) {
+    const v = readEnv(name);
+    if (v && v.length >= 12 && !secretValues.some(([k]) => k === name)) secretValues.push([name, v]);
+  }
   const scan = (node, at) => {
     if (typeof node === 'string') {
       for (const [k, v] of secretValues) {
