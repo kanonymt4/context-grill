@@ -117,9 +117,11 @@ export function scanDocument(doc, { includeTestPaths = false, minSeverity = 'inf
         ruleId: rule.id, severity: rule.severity, category: rule.category, cwe: rule.cwe || null,
         title: rule.title, sourceId: doc.sourceId, path: doc.path, line: i + 1,
         // 検出行そのものに秘密が載るため、外に出す表現は必ず墨消しする
-        snippet: redactText(safeLines[i].trim().slice(0, 300)).text,
-        // snippet と同じく 1 行 300 字で切る（長い 1 行での墨消しの所要時間を抑える）
-        context: redactText(safeLines.slice(Math.max(0, i - 2), Math.min(safeLines.length, i + 3)).map((l) => l.slice(0, 300)).join('\n')).text,
+        // 墨消ししてから 300 字で切る（先に切ると、境界で切れた秘密値が規則に一致せず断片が残る）。
+        // 墨消し前の 4000 字は、ミニファイ済みの巨大な 1 行での所要時間を抑える上限だけ
+        snippet: redactText(safeLines[i].trim().slice(0, 4000)).text.slice(0, 300),
+        context: safeLines.slice(Math.max(0, i - 2), Math.min(safeLines.length, i + 3))
+          .map((l) => redactText(l.slice(0, 4000)).text.slice(0, 300)).join('\n'),
         url: doc.url && doc.sourceType === 'github' ? `${doc.url}#L${i + 1}` : doc.url,
       });
       if (out.filter((o) => o.ruleId === rule.id && o.path === doc.path).length >= 20) break;
