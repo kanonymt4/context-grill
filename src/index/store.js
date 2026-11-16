@@ -105,7 +105,9 @@ async function assertNotSuperseded(dir, gen) {
   const latest = latestGen(dir);
   if (latest === null || latest <= gen) return;
   await discardGeneration(dir, gen);
-  throw new Error(`索引の世代 ${gen} は、より新しい世代 ${latest} に置き換えられたため破棄しました（並行する sync があった可能性があります）。もう一度 sync してください。`);
+  const err = new Error(`索引の世代 ${gen} は、より新しい世代 ${latest} に置き換えられたため破棄しました（並行する sync があった可能性があります）。もう一度 sync してください。`);
+  err.superseded = true;   // 呼び出し側が「別の原因」と取り違えて握り潰さないための印
+  throw err;
 }
 
 function shardOf(term) {
