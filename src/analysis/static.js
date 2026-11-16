@@ -46,7 +46,8 @@ export function projectFacts(docs) {
         detail: '.env が索引対象に含まれている（コミットされている可能性）' });
     }
     if (/(^|\/)(Dockerfile|docker-compose\.ya?ml)$/i.test(d.path)) {
-      const runsAsRoot = !/^\s*USER\s+(?!root)/mi.test(d.text);
+      // 行頭の空白は同じ行の中だけ（\s* は改行をまたぎ、改行だけの入力で二乗時間になる）
+      const runsAsRoot = !/^[^\S\r\n]*USER\s+(?!root)/mi.test(d.text);
       facts.push({ kind: 'container', sourceId: d.sourceId, path: d.path, url: d.url,
         detail: `コンテナ定義。USER 指定${runsAsRoot ? 'なし（root 実行の可能性）' : 'あり'}` });
     }
@@ -62,10 +63,12 @@ export function extractEndpoints(docs, limit = 300) {
   const out = [];
   const patterns = [
     { re: /\b(?:app|router|api)\.(get|post|put|patch|delete|all)\s*\(\s*['"`]([^'"`]+)['"`]/g, fw: 'express' },
-    { re: /@(Get|Post|Put|Patch|Delete)\s*\(\s*['"`]?([^'"`)]*)['"`]?\s*\)/g, fw: 'nest/spring' },
+    // route は 200 字まで（`@Get(` の繰り返しで、閉じ括弧を探して末尾まで走査するのを防ぐ）
+    { re: /@(Get|Post|Put|Patch|Delete)\s*\(\s*['"`]?([^'"`)]{0,200})['"`]?\s*\)/g, fw: 'nest/spring' },
     { re: /@(?:app|router)\.(get|post|put|patch|delete)\s*\(\s*["']([^"']+)["']/g, fw: 'fastapi/flask' },
     { re: /\b(?:r|router|mux)\.(?:HandleFunc|Handle)\s*\(\s*"([^"]+)"/g, fw: 'go' },
-    { re: /^\s*(get|post|put|patch|delete)\s+['"]([^'"]+)['"]/gm, fw: 'rails' },
+    // 行頭の空白は同じ行の中だけ。\s* だと先行する空行まで取り込み、line が空行を指し、改行だけの入力で二乗時間になる
+    { re: /^[^\S\r\n]*(get|post|put|patch|delete)\s+['"]([^'"]+)['"]/gm, fw: 'rails' },
   ];
   for (const d of docs) {
     if (d.kind !== 'code') continue;
