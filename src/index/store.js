@@ -328,7 +328,14 @@ export class IndexStore {
     // 保証されるか」が読み手に分からなくなるため、fd 2 本のコストを取る。
     try {
       s._fd = IndexStore._openFd(s.L.docs);
-      if (s.dims && fs.existsSync(s.L.vectors)) s._vfd = IndexStore._openFd(s.L.vectors);
+      if (s.dims) {
+        // dims>0 なのにベクトルが無いのを黙って許すと、検索が静かに BM25 のみになる。
+        // 例外にすれば、世代が進んでいる場合は open() の再試行が新しい世代で開き直す。
+        if (!fs.existsSync(s.L.vectors)) {
+          throw new Error(`ベクトル索引が見つかりません (${dir})。${path.basename(s.L.vectors)} がありません。\n\`context-grill sync\` で作り直してください。`);
+        }
+        s._vfd = IndexStore._openFd(s.L.vectors);
+      }
     } catch (e) {
       await s.close();
       throw e;
