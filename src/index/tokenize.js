@@ -42,7 +42,9 @@ export function splitIdentifier(t) {
   return t
     .replace(/[_$]+/g, ' ')
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    // 大文字の連続の末尾の 1 文字が小文字に続くとき、その直前で分ける（HTTPServer → HTTP Server）。
+    // `([A-Z]+)([A-Z][a-z])` は大文字だけの長い連続で二乗時間になるため、先読み・後読みで書く
+    .replace(/(?<=[A-Z])(?=[A-Z][a-z])/g, ' ')
     .split(/\s+/)
     .filter(Boolean)
     .map((s) => s.toLowerCase());
