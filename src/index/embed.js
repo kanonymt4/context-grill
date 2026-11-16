@@ -118,7 +118,9 @@ async function callEmbeddingApi(cfg, inputs, { inputType = 'document' } = {}) {
     body: JSON.stringify(body),
   }, { purpose: 'embedding' });
   if (!res.ok) {
-    const err = new Error(redactMessage(`${cfg.provider} embeddings HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`));
+    // 本文は墨消ししてから切る（切り口にまたがった秘密値の断片を残さない）。巨大な本文に備え、先に 20000 字で打ち切る
+    const errBody = (await res.text()).slice(0, 20000);
+    const err = new Error(`${redactMessage(`${cfg.provider} embeddings HTTP ${res.status}: `)}${redactMessage(errBody).slice(0, 400)}`);
     // 認証・認可エラーは再試行しても直らない
     if (res.status === 401 || res.status === 403) err.noRetry = true;
     throw err;
