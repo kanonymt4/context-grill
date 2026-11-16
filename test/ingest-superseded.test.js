@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 
 import { loadConfig, paths } from '../src/config.js';
@@ -99,6 +100,74 @@ test('埋め込み API が 500 を返すときは、警告して BM25 のみで�
     assert.match(stderr, CONTINUE_RE);
     assert.equal(result.dims, 0);
     assert.equal(latestGen(paths(fx.config).index), 1);
+    await fsp.rm(fx.dir, { recursive: true, force: true });
+  } finally { await srv.close(); delete process.env[KEY_ENV]; }
+});
+
+test('writeVectors の入口チェックを通った後に置き換えられても、BM25 継続とは言わず置き換えで失敗する', async () => {
+  process.env[KEY_ENV] = 'dummy';
+  const srv = await startServer();
+  const origOpen = fs.openSync;
+  try {
+    const fx = await fixture(srv.baseUrl);
+    await syncSources(fx.config, {});
+    const indexDir = paths(fx.config).index;
+    let fired = false;
+    // vectors を開く瞬間（入口の確認の後）に、別の builder が新しい世代を公開して旧世代を prune した状況を再現する
+    fs.openSync = (p, ...rest) => {
+      if (!fired && /vectors\.0001\.bin$/.test(String(p))) {
+        fired = true;
+        fs.writeFileSync(path.join(indexDir, 'manifest.0002.json'), '{}');
+        fs.rmSync(path.join(indexDir, 'manifest.0001.json.tmp'), { force: true });
+      }
+      return origOpen.call(fs, p, ...rest);
+    };
+    const { error, stderr } = await captureStderr(() => buildIndex(fx.config, { embed: true }));
+    fs.openSync = origOpen;
+    assert.ok(fired, '窓を再現できている');
+    assert.ok(error, 'buildIndex は失敗する');
+    assert.match(error.message, /置き換え/);
+    assert.doesNotMatch(stderr, CONTINUE_RE, '「継続します」と言ってはいけない');
+    assert.equal(latestGen(indexDir), 2);
+    assert.ok(!fs.existsSync(path.join(indexDir, 'vectors.0001.bin')), '旧世代の残骸が残らない');
+    await fsp.rm(fx.dir, { recursive: true, force: true });
+  } finally { fs.openSync = origOpen; await srv.close(); delete process.env[KEY_ENV]; }
+});
+
+test('noRetry の失敗では、publish が置き換えで失敗しても元の例外を投げる', async () => {
+  process.env[KEY_ENV] = 'dummy';
+  let config;
+  const srv = await startServer({
+    status: 401,
+    onRequest: async () => {
+      const b = new IndexBuilder(paths(config).index);
+      await b.start();
+      b.add({ text: 'other builder', title: 't', path: 'p.md', docId: 'x', sourceId: 's', kind: 'doc' });
+      await b.finish();
+    },
+  });
+  try {
+    const fx = await fixture(srv.baseUrl);
+    config = fx.config;
+    await syncSources(config, {});
+    const { error } = await captureStderr(() => buildIndex(config, { embed: true }));
+    assert.ok(error, 'buildIndex は失敗する');
+    assert.equal(error.noRetry, true, '元の noRetry の例外');
+    assert.doesNotMatch(error.message, /置き換え/);
+    assert.equal(latestGen(paths(config).index), 2);
+    await fsp.rm(fx.dir, { recursive: true, force: true });
+  } finally { await srv.close(); delete process.env[KEY_ENV]; }
+});
+
+test('noRetry の失敗で置き換えが無いときは、従来どおり publish してから元の例外を投げる', async () => {
+  process.env[KEY_ENV] = 'dummy';
+  const srv = await startServer({ status: 401 });
+  try {
+    const fx = await fixture(srv.baseUrl);
+    await syncSources(fx.config, {});
+    const { error } = await captureStderr(() => buildIndex(fx.config, { embed: true }));
+    assert.equal(error?.noRetry, true);
+    assert.equal(latestGen(paths(fx.config).index), 1, 'BM25 の索引は公開される');
     await fsp.rm(fx.dir, { recursive: true, force: true });
   } finally { await srv.close(); delete process.env[KEY_ENV]; }
 });
