@@ -93,7 +93,7 @@ const BOOL_FLAGS = new Set([
 ]);
 
 function parseArgs(argv) {
-  const out = { _: [], flags: {} };
+  const out = { _: [], flags: {}, badBool: [] };
   const alias = { c: 'config', k: 'top', t: 'task', e: 'effort', m: 'model', h: 'help', o: 'out' };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -102,6 +102,14 @@ function parseArgs(argv) {
       let [k, v] = a.slice(2).split('=');
       let neg = false;
       if (k.startsWith('no-')) { neg = true; k = k.slice(3); }
+      if (BOOL_FLAGS.has(k) && a.includes('=')) {
+        // 真偽フラグの `=値`。文字列 "false" のまま持つと真として働くので、true / false だけを真偽値にする。
+        // それ以外（空・後ろに = が続く値・否定形への値を含む）は値を取らないフラグへの誤用としてエラーにする。
+        const raw = a.slice(a.indexOf('=') + 1);
+        if (!neg && (raw === 'true' || raw === 'false')) out.flags[k] = raw === 'true';
+        else { out.badBool.push(k); out.flags[k] = true; }
+        continue;
+      }
       if (v === undefined) {
         if (neg) v = false;
         else if (BOOL_FLAGS.has(k)) v = true;   // 次の語を消費しない
@@ -213,7 +221,7 @@ function checkLogLevel(flags) {
 }
 
 export async function main(argv) {
-  const { _: pos, flags } = parseArgs(argv);
+  const { _: pos, flags, badBool } = parseArgs(argv);
   const cmd = pos[0];
   if (flags.version === true || flags.v === true || cmd === 'version') {
     const pkgPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
@@ -221,6 +229,10 @@ export async function main(argv) {
     return 0;
   }
   if (!cmd || flags.help || cmd === 'help') { process.stdout.write(HELP); return 0; }
+  if (badBool.length) {
+    process.stderr.write(badBool.map((k) => `--${k} は値を取りません（--${k} か --no-${k}、または --${k}=true / --${k}=false のみ指定できます）`).join('\n') + '\n');
+    return 1;
+  }
   // run は cmdRun に専用の検査とメッセージがあるため、共通検査を通さない
   if (cmd !== 'run') {
     const err = checkUnknownFlags(cmd, flags) || checkValueFlags(flags);
