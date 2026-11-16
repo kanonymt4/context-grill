@@ -223,6 +223,13 @@ function checkLogLevel(flags) {
 export async function main(argv) {
   const { _: pos, flags, badBool } = parseArgs(argv);
   const cmd = pos[0];
+  // --help / --version 自身に付いた不正な =値 は、早期 return より前にエラーにする
+  // （他のフラグの不正値は、--help を併記すればヘルプが優先される）
+  const badSelf = badBool.filter((k) => k === 'help' || k === 'version' || k === 'v');
+  if (badSelf.length) {
+    process.stderr.write(badSelf.map((k) => `--${k} は値を取りません（--${k} か --no-${k}、または --${k}=true / --${k}=false のみ指定できます）`).join('\n') + '\n');
+    return 1;
+  }
   if (flags.version === true || flags.v === true || cmd === 'version') {
     const pkgPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
     process.stdout.write(`${JSON.parse(fs.readFileSync(pkgPath, 'utf8')).version}\n`);
