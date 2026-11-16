@@ -6,7 +6,8 @@ import { tokenize } from './tokenize.js';
 const SHARDS = 32;
 const FORMAT_VERSION = 2;   // 2: ファイル名に世代番号を持たせた（1 とは互換性がない）
 
-const MAX_GEN_TRIES = 1000;   // 世代番号の確保を諦めるまでの試行回数
+const OPEN_TRIES = 3;   // open が世代の入れ替わりに遭ったときの開き直しを含む試行回数の上限
+const MAX_GEN_TRIES = 1000;  // 世代番号の確保を諦めるまでの試行回数
 
 // 4 桁に満たなければ 0 埋め、超えればそのまま出る（ファイル名の世代は 4 桁以上。比較は常に数値）
 const pad = (g) => String(g).padStart(4, '0');
@@ -259,10 +260,28 @@ export class IndexStore {
 
   static exists(dir) { return latestGen(dir) !== null; }
 
+  /**
+   * 索引を開く。読み込みは複数回に分かれるので、その間に別プロセスの sync が新しい世代を公開して
+   * 開き始めた世代を prune すると、ENOENT などで失敗する。失敗したとき、世代が開き始めたときから
+   * 進んでいれば開き直す（最大 OPEN_TRIES 回）。世代が進んでいなければ本物の欠損・破損なので、
+   * 元の例外をそのまま投げる。
+   */
   static async open(dir, opts = {}) {
+    for (let attempt = 1; ; attempt++) {
+      const gen = latestGen(dir);
+      try {
+        return await IndexStore._openGen(dir, opts, gen);
+      } catch (e) {
+        if (attempt >= OPEN_TRIES || gen === null) throw e;
+        const now = latestGen(dir);
+        if (now === null || now <= gen) throw e;
+      }
+    }
+  }
+
+  static async _openGen(dir, opts, gen) {
     const { postings: loadPostings = true } = opts;
     const s = new IndexStore(dir);
-    const gen = latestGen(dir);
     if (gen === null) {
       // 世代番号を持たない古い索引（formatVersion 1）はここに来る。読まずに作り直させる。
       const old = fs.existsSync(path.join(dir, 'manifest.json'));
