@@ -150,7 +150,9 @@ export async function hybridSearch(store, opts) {
     const factor = Math.max(MIN_FACTOR, 1
       + boosts.pathMatch * overlapRatio(allTerms, pathTokens)
       + boosts.kindPrior * (kindPriors[m.kind] ?? 0)
-      + boosts.sourcePriority * (sourcePriority[m.sourceId] ?? 0));
+      + boosts.sourcePriority * (Object.hasOwn(sourcePriority, m.sourceId) ? (sourcePriority[m.sourceId] ?? 0) : 0));
+    // 補正値が NaN などだと、スコアが黙って壊れて順位が変わる（fuseScores の検査は補正より前にしかない）
+    if (!Number.isFinite(factor)) throw new Error(`検索スコアの補正値が数値ではありません (idx=${r.idx})。sources[].priority と retrieval.boosts.* を確認してください`);
     return { ...r, score: r.score * factor };
   }).sort((a, b) => b.score - a.score || a.idx - b.idx);
 
