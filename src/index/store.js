@@ -351,7 +351,9 @@ export class IndexStore {
   _shard(i) { return this._shards.get(i); }
   postings(term) {
     if (this._shards === null) throw new Error('postings が未ロードです（IndexStore.open(dir, { postings: false }) で開いたストアは検索できません。IndexStore.open(dir) で開き直してください）。');
-    return this._shard(shardOf(term))[term] || null;
+    // 自分のキーだけを引く（constructor 等の prototype のキーが関数として返らないように）
+    const shard = this._shard(shardOf(term));
+    return Object.hasOwn(shard, term) ? (shard[term] || null) : null;
   }
 
   textOf(i) {
@@ -369,7 +371,8 @@ export class IndexStore {
     const k1 = 1.2, b = 0.75;
     const scores = new Map();
     for (const [term, qtf] of termMap) {
-      const df = this.df[term];
+      // 自分のキーだけを引く（索引に無い constructor 等が関数として返ると、スコアが NaN になる）
+      const df = Object.hasOwn(this.df, term) ? this.df[term] : 0;
       if (!df) continue;
       if (df / this.N > 0.6 && term.length <= 2) continue; // 高頻度な CJK 1-gram はノイズ
       const idf = Math.log(1 + (this.N - df + 0.5) / (df + 0.5));
