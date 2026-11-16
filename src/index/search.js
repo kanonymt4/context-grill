@@ -116,7 +116,8 @@ function warnIfIndexStale(store, config) {
   warnedStale.add(pair);
   log.warn('設定が索引の作成後に変わっています（sources の priority・include/exclude・埋め込み設定などの変更でも出ます）。'
     + '`context-grill sync` で索引を作り直してください。それまでは、設定から外したソースは検索から除きますが、'
-    + 'exclude / extraDenyPaths で除外したファイルなど、索引に残った資料は検索結果に出ることがあります');
+    + 'exclude / extraDenyPaths で除外したファイルなど、索引に残った資料は検索結果に出ることがあります。'
+    + 'MCP サーバーが常駐している場合は、sync のあと MCP サーバーを再起動してください');
 }
 
 /** 加点の倍率の下限（正の値。ソース内の順位が常に保たれる最小の変更） */
