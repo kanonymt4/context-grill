@@ -4,7 +4,7 @@ import { paths, ensureDirs } from '../config.js';
 import { syncSource } from '../connectors/index.js';
 import { readDocsCache, writeDocsCache, readState, formatSkipped } from '../connectors/base.js';
 import { chunkDocument } from './chunk.js';
-import { IndexBuilder, writeVectors } from './store.js';
+import { IndexBuilder, writeVectors, latestGen } from './store.js';
 import { embedChunks } from './embed.js';
 import { log } from '../util/log.js';
 import { initEgress, egressSummary } from '../util/egress.js';
@@ -83,7 +83,14 @@ export async function buildIndex(config, { embed = true } = {}) {
       }
     } catch (e) {
       if (e.superseded) throw e;   // 置き換えられた世代は BM25 だけでも公開できない。継続すると言わずにそのまま失敗する
-      if (e.noRetry) { await builder.publish(); throw e; }   // 同意不足・宛先ブロックは黙って握り潰さない
+      if (e.noRetry) {
+        // 同意不足・宛先ブロックは黙って握り潰さない。publish が置き換えで失敗しても、利用者が対処すべき元の例外を優先する
+        try { await builder.publish(); } catch (pe) { if (!pe.superseded) throw pe; }
+        throw e;
+      }
+      // 入口の確認の後で置き換えられると、印の無い ENOENT になる。原因を取り違えないよう、publish で置き換えとして失敗させる（残骸も破棄される）
+      const latest = latestGen(indexDir);
+      if (latest !== null && latest > builder.L.gen) await builder.publish();
       log.warn(`埋め込みに失敗したため BM25 のみで継続します: ${e.message}`);
     }
   }
