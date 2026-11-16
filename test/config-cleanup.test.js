@@ -220,6 +220,17 @@ test('cleanup: SESSION だけの名前でも、${NAME} で展開した値は拒�
   });
 });
 
+// Windows は環境変数名の大文字小文字を区別するので、設定の綴りと process.env の綴りが食い違いうる。
+// この環境（POSIX）ではその食い違いを作れないので、小文字名の変数を同じ綴りで展開して、
+// 集合への追加と照会の両方が同じ正規化（大文字）を通っていることだけを固定する。
+test('cleanup: 小文字名の SESSION だけの変数も、${name} で展開した値は拒否する', async () => {
+  await withEnv({ cg_t_session_x: SECRET }, async () => {
+    await assert.rejects(() => load({
+      sources: [{ id: 'w', type: 'confluence', baseUrl: 'https://x.example.com/${cg_t_session_x}' }],
+    }), /環境変数 cg_t_session_x の値が展開/);
+  });
+});
+
 test('cleanup: 強い語を含む名前（SESSION_TOKEN / COOKIE）の値は、文字で直接書かれても拒否する', async () => {
   await withEnv({ CG_T_SESSION_TOKEN: SECRET, CG_T_COOKIE: SECRET + 'y' }, async () => {
     await assert.rejects(() => load({ project: 'p-' + SECRET }), /環境変数 CG_T_SESSION_TOKEN の値が展開/);

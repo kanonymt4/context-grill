@@ -130,7 +130,7 @@ export function loadDotEnv(dir) {
 function expandEnv(value, at = '', errs = [], names = null) {
   if (typeof value === 'string') {
     return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, n) => {
-      if (Object.hasOwn(process.env, n)) { names?.add(n); return process.env[n]; }
+      if (Object.hasOwn(process.env, n)) { names?.add(n.toUpperCase()); return process.env[n]; }
       errs.push(`${at} の \${${n}} は環境変数が未定義です`);
       return m;
     });
@@ -473,9 +473,12 @@ function validate(c, { expandedNames = new Set() } = {}) {
   // （CLAUDE_CODE_SESSION_ID の UUID など）の値は、スクラッチ領域などの絶対パスに偶然含まれて
   // 誤検知になるため、設定が ${NAME} で実際に展開したときだけ対象にする。強い語に一致する名前は
   // 従来どおり、値が文字で含まれていれば拒否する。
+  // expandedNames は大文字に寄せて持つ。Windows は環境変数名の大文字小文字を区別せず、設定の綴りと
+  // process.env の綴りが食い違いうるため。POSIX で `${a}` を展開して別の変数 `A` が SESSION だけの名前のとき
+  // 余分に拒否する側へ倒れるが、見逃すよりは安全。
   const STRONG = /TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|BEARER/i;
   const secretValues = Object.entries(process.env)
-    .filter(([k, v]) => v && v.length >= 12 && (STRONG.test(k) || (/SESSION/i.test(k) && expandedNames.has(k))))
+    .filter(([k, v]) => v && v.length >= 12 && (STRONG.test(k) || (/SESSION/i.test(k) && expandedNames.has(k.toUpperCase()))))
     .map(([k, v]) => [k, v]);
   // 設定自身が tokenEnv / apiKeyEnv / bearerEnv で参照する環境変数は、名前の語によらず秘密として扱う（emailEnv は対象外）
   const referenced = new Set();
