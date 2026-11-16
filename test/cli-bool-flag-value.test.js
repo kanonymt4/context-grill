@@ -206,3 +206,29 @@ test('--help は値付きの真偽フラグより先に処理される', async (
   assert.equal(r.status, 0);
   assert.ok(r.stdout.includes('使い方:'), r.stdout);
 });
+
+test('--help / --version 自身に付いた不正な =値 はエラーになる', async () => {
+  for (const args of [['--help=foo'], ['--version=x'], ['status', '--help=foo'], ['--help=']]) {
+    const r = await run(args);
+    assert.equal(r.status, 1, `${args.join(' ')}: ${r.stdout}`);
+    assert.ok(!r.stdout.includes('使い方:'), r.stdout);
+    assert.match(r.stderr, /値を取りません/, r.stderr);
+  }
+});
+
+test('--help=true はヘルプ、--help=false はヘルプを出さない', async () => {
+  const t = await run(['status', '--help=true']);
+  assert.equal(t.status, 0, t.stderr);
+  assert.ok(t.stdout.includes('使い方:'), t.stdout);
+  const f = await run(['status', '--help=false', '-c', cfg]);
+  assert.ok(!f.stdout.includes('使い方:'), f.stdout);
+});
+
+test('--help / --version 値なしは従来どおり', async () => {
+  const h = await run(['--help']);
+  assert.equal(h.status, 0);
+  assert.ok(h.stdout.includes('使い方:'), h.stdout);
+  const v = await run(['--version']);
+  assert.equal(v.status, 0);
+  assert.match(v.stdout, /^\d+\.\d+\.\d+/);
+});
