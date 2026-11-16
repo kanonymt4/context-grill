@@ -151,7 +151,8 @@ async function request(url, init, timeoutMs = 180000) {
     const res = await guardedFetch(url, init, { purpose: 'llm', timeoutMs });
     const body = await res.text();
     if (!res.ok) {
-      const err = new Error(redactMessage(`LLM API HTTP ${res.status}: ${body.slice(0, 800)}`));
+      // 本文は墨消ししてから切る（切り口にまたがった秘密値の断片を残さない）。巨大な本文に備え、先に 20000 字で打ち切る
+      const err = new Error(`${redactMessage(`LLM API HTTP ${res.status}: `)}${redactMessage(body.slice(0, 20000)).slice(0, 800)}`);
       if ([400, 401, 403, 404, 422].includes(res.status)) err.noRetry = true;
       throw err;
     }

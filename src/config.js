@@ -84,8 +84,12 @@ const NUMERIC_FIELDS = [
   ['retrieval.hybrid', 'mmrLambda', null], ['retrieval.hybrid', 'final', 1], ['retrieval.hybrid', 'perQueryTop', 1],
   ['retrieval.embedding', 'dimensions', null], ['retrieval.embedding', 'batch', 1],
   ['budget', 'evidenceTokens', null], ['budget', 'staticFactsTokens', null],
-  ['budget', 'maxTotalTokensPerRun', null], ['budget', 'maxRepairs', null],
+  ['budget', 'maxTotalTokensPerRun', null], ['budget', 'maxRepairs', 0],
   ['llm', 'maxOutputTokens', null],
+  ['policy', 'minEvidencePerItem', 0],
+  // チャンク分割の設定。maxLines / maxChars が 0 以下だとチャンクが 0 件になるか進まなくなる
+  ['retrieval.chunk.code', 'maxLines', 1], ['retrieval.chunk.code', 'overlapLines', 0], ['retrieval.chunk.code', 'maxChars', 1],
+  ['retrieval.chunk.doc', 'maxChars', 1], ['retrieval.chunk.doc', 'overlapChars', 0],
 ];
 // ソース id に使えない名前。id はオブジェクトのキーとして引かれるため、prototype にある名前は
 // 自分のキーでなくても引けてしまう（status が落ち、検索のスコアが NaN になる）
@@ -347,11 +351,16 @@ export async function loadConfig(explicitPath) {
 
   validate(merged, { expandedNames });
   // 索引の再現性キー: ソース定義とチャンク設定のみが影響する
-  merged.indexKey = sha256(stableStringify({
-    sources: merged.sources,
+  // sources[] 直下の _ で始まるキー（_comment など）はコメントなので含めない。除外判定に使う security の設定
+  // （extraDenyPaths / denySensitivePaths:false）は、既定のとき従来の値と変わらないよう、設定されたときだけ加える
+  const keyInput = {
+    sources: merged.sources.map((s) => (isObj(s) ? Object.fromEntries(Object.entries(s).filter(([k]) => !k.startsWith('_'))) : s)),
     chunk: merged.retrieval.chunk,
     embedding: { p: merged.retrieval.embedding.provider, m: merged.retrieval.embedding.model, d: merged.retrieval.embedding.dimensions },
-  }));
+  };
+  if (Array.isArray(merged.security.extraDenyPaths) && merged.security.extraDenyPaths.length) keyInput.deny = merged.security.extraDenyPaths;
+  if (merged.security.denySensitivePaths === false) keyInput.denySensitive = false;
+  merged.indexKey = sha256(stableStringify(keyInput));
   // presets は調査の入口を名前で束ねただけで、索引にも設定の同一性にも影響させない
   merged.configHash = sha256(stableStringify({ ...merged, rootDir: undefined, configPath: undefined, workspaceDir: undefined, presets: undefined }));
   return merged;
@@ -362,7 +371,7 @@ function validate(c, { expandedNames = new Set() } = {}) {
   // 形の検査。object でない節を読むと後続の検査が生の TypeError で落ちるので、ここで止める
   const shape = [];
   const sectionAt = (p) => p.split('.').reduce((n, k) => (isObj(n) ? n[k] : undefined), c);
-  for (const p of ['retrieval', 'retrieval.hybrid', 'retrieval.boosts', 'retrieval.embedding', 'llm', 'budget', 'security', 'policy']) {
+  for (const p of ['retrieval', 'retrieval.chunk', 'retrieval.chunk.code', 'retrieval.chunk.doc', 'retrieval.hybrid', 'retrieval.boosts', 'retrieval.embedding', 'llm', 'budget', 'security', 'policy']) {
     if (!isObj(sectionAt(p))) shape.push(`${p} はオブジェクトで指定してください`);
   }
   if (Array.isArray(c.sources)) {
