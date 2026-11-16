@@ -55,7 +55,10 @@ export function projectFacts(docs) {
       facts.push({ kind: 'ci', sourceId: d.sourceId, path: d.path, url: d.url, detail: 'CI 定義ファイル' });
     }
   }
-  return facts;
+  // detail には package.json の name・依存のバージョンなど、資料の内容がそのまま入る。
+  // CLI の scan / MCP の static_scan がこの戻り値をそのまま出力するので、ここで墨消しする
+  // （findings・endpoints と同じく常に墨消し。二重に墨消ししても結果は変わらない）
+  return facts.map((f) => ({ ...f, detail: redactText(String(f.detail ?? '')).text }));
 }
 
 /** ルーティング / 公開エンドポイントの機械的抽出（仕様整理・攻撃面把握に使う） */
