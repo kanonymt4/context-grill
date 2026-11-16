@@ -88,6 +88,37 @@ function mmrSelect(store, candidates, { lambda = 0.72, k = 24, useVectors = fals
   return selected;
 }
 
+/**
+ * 設定の sources に無いソースのチャンクを常に除く（呼び出し元の filter と AND）。
+ * 索引は作成時の設定のまま残るので、sync せずに設定からソースを外すと、外した資料が
+ * 警告なしで証拠（LLM への送信対象）に出てしまう。sources を持たない手組みの config では何もしない。
+ */
+function restrictToConfiguredSources(filter, config) {
+  if (!Array.isArray(config?.sources)) return filter;
+  const allowed = new Set(config.sources.map((s) => s?.id));
+  return (m) => allowed.has(m.sourceId) && (!filter || filter(m));
+}
+
+/** 警告済みの (索引の indexKey, 設定の indexKey) の組。プロセスにつき同じ組では 1 回だけ警告する */
+const warnedStale = new Set();
+
+/**
+ * 索引の作成時と今の設定で indexKey が違えば警告する。indexKey は sources[] 全体・チャンク設定・
+ * 埋め込み設定のハッシュなので、priority・include/exclude の変更でも違いが出る（警告は出すぎてよい側に倒す）。
+ * 設定側に indexKey が無い手組みの config、manifest の無いストアでは比較しない。
+ */
+function warnIfIndexStale(store, config) {
+  const cfgKey = config?.indexKey;
+  const idxKey = store?.manifest?.indexKey;
+  if (!cfgKey || !idxKey || cfgKey === idxKey) return;
+  const pair = `${idxKey}|${cfgKey}`;
+  if (warnedStale.has(pair)) return;
+  warnedStale.add(pair);
+  log.warn('設定が索引の作成後に変わっています（sources の priority・include/exclude・埋め込み設定などの変更でも出ます）。'
+    + '`context-grill sync` で索引を作り直してください。それまでは、設定から外したソースは検索から除きますが、'
+    + 'exclude / extraDenyPaths で除外したファイルなど、索引に残った資料は検索結果に出ることがあります');
+}
+
 /** 加点の倍率の下限（正の値。ソース内の順位が常に保たれる最小の変更） */
 const MIN_FACTOR = 0.01;
 
@@ -98,8 +129,10 @@ const MIN_FACTOR = 0.01;
  */
 export async function hybridSearch(store, opts) {
   const {
-    queries, config, filter = null, k, kindPriors = {}, sourcePriority = {},
+    queries, config, k, kindPriors = {}, sourcePriority = {},
   } = opts;
+  warnIfIndexStale(store, config);
+  const filter = restrictToConfiguredSources(opts.filter ?? null, config);
   const h = config.retrieval.hybrid;
   const finalK = k ?? h.final;
   const embedCfg = config.retrieval.embedding;
