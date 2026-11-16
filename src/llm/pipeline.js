@@ -248,6 +248,15 @@ export async function runTaskWithStore(store, config, opts) {
     lastVerification = v;
     result = v.cleaned;
     log.step(`検証 (試行 ${attempt + 1}): 採用 ${v.stats.itemsAccepted} / 棄却 ${v.stats.itemsRejected} / 違反 ${v.stats.hardViolations}`);
+    // 出力上限で打ち切られた応答（anthropic=max_tokens / openai 系=length）は、同じ上限で再送しても直らず、
+    // 課金が試行回数ぶん増えるだけなので、修復ループを打ち切る。検証を通ったものだけを採用する挙動は変えない
+    if (res.stopReason === 'max_tokens' || res.stopReason === 'length') {
+      meta.truncated = true;
+      meta.maxOutputTokens = config.llm.maxOutputTokens;
+      log.warn(`LLM の出力が上限（llm.maxOutputTokens=${config.llm.maxOutputTokens}）で打ち切られました。` +
+        '同じ上限での再送は直らないため、修復を中止します。llm.maxOutputTokens を上げるか、--effort を下げてください');
+      break;
+    }
     if (v.ok || attempt === maxRepairs) break;
     repairNote = renderViolations(v.violations);
     meta.repairs = ++attempt;

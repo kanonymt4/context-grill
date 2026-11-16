@@ -25,6 +25,10 @@ export function renderMarkdown(run) {
     L.push('');
     L.push(`> ⚠ 機械検証は通過していません（違反 ${verification.stats?.hardViolations} 件）。以下の主張は一部が除去されている可能性があります。`);
   }
+  if (meta.truncated) {
+    L.push('');
+    L.push(`> ⚠ LLM の出力が出力上限（llm.maxOutputTokens=${meta.maxOutputTokens}）で打ち切られ、修復を中止しました。llm.maxOutputTokens を上げるか、--effort を下げてください。`);
+  }
   L.push('');
   L.push('## 実行メタデータ');
   L.push('');
