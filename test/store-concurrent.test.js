@@ -195,3 +195,79 @@ test('索引(置き換え): 世代 2 が add 中に世代 3 が公開された�
     try { assert.equal(store.textOf(0).includes('alphaB'), true); } finally { await store.close(); }
   } finally { await fsp.rm(dir, { recursive: true, force: true }); }
 });
+
+// publish() の確認から rename までの隙間で別の builder が公開した場合の再確認。
+// fsp.rename を 1 回だけ差し替える（store.js と同じ default export の fsp オブジェクト）。
+async function withRenameHook(target, { before, after, fail }, fn) {
+  const real = fsp.rename;
+  let armed = true;
+  fsp.rename = async (src, dst) => {
+    if (armed && src === target) {
+      armed = false;                       // B 自身の rename で再帰しない
+      try {
+        if (before) await before();
+        if (fail) throw fail;
+        const r = await real.call(fsp, src, dst);
+        if (after) await after();
+        return r;
+      } finally { fsp.rename = real; }
+    }
+    return real.call(fsp, src, dst);
+  };
+  try { await fn(); } finally { fsp.rename = real; }
+}
+
+async function prepare() {
+  const dir = await tmpDir();
+  const base = new IndexBuilder(dir);
+  await base.start(); await fill(base, 'base'); await base.finish({ indexKey: 'base' });
+  const a = new IndexBuilder(dir); await a.start();   // gen 2
+  const b = new IndexBuilder(dir); await b.start();   // gen 3
+  await fill(a, 'A'); await fill(b, 'B');
+  return { dir, a, b };
+}
+
+test('索引(置き換え): rename の直前に新しい世代が公開・prune されて ENOENT になっても、置き換えとして失敗する', async () => {
+  const { dir, a, b } = await prepare();
+  try {
+    await a.finish({ indexKey: 'a' }, { publish: false });
+    await withRenameHook(a.L.manifestTmp, { before: () => b.finish({ indexKey: 'b' }) }, async () => {
+      await assert.rejects(() => a.publish(), /置き換え/);
+    });
+    assert.equal(latestGen(dir), 3);
+    assert.deepEqual(gen2Leftovers(dir), []);
+    const store = await IndexStore.open(dir);
+    try { assert.equal(store.textOf(0).includes('alphaB'), true); } finally { await store.close(); }
+  } finally { await fsp.rm(dir, { recursive: true, force: true }); }
+});
+
+test('索引(置き換え): rename の直後に新しい世代が公開されたら、成功を返さず自世代を破棄する', async () => {
+  const { dir, a, b } = await prepare();
+  try {
+    await a.finish({ indexKey: 'a' }, { publish: false });
+    await b.finish({ indexKey: 'b' }, { publish: false });
+    await withRenameHook(a.L.manifestTmp, { after: () => fsp.rename(b.L.manifestTmp, b.L.manifest) }, async () => {
+      await assert.rejects(() => a.publish(), /置き換え/);
+    });
+    assert.equal(latestGen(dir), 3);
+    assert.equal(fs.existsSync(layout(dir, 2).manifest), false);
+    assert.deepEqual(gen2Leftovers(dir), []);
+    const store = await IndexStore.open(dir);
+    try { assert.equal(store.textOf(0).includes('alphaB'), true); } finally { await store.close(); }
+  } finally { await fsp.rm(dir, { recursive: true, force: true }); }
+});
+
+test('索引(置き換え): 新しい世代が無いときの rename 失敗は元の例外のまま投げ、自世代のファイルを消さない', async () => {
+  const dir = await tmpDir();
+  try {
+    const a = new IndexBuilder(dir); await a.start();
+    await fill(a, 'A');
+    await a.finish({ indexKey: 'a' }, { publish: false });
+    const eacces = Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    await withRenameHook(a.L.manifestTmp, { fail: eacces }, async () => {
+      await assert.rejects(() => a.publish(), (e) => e === eacces && !e.superseded);
+    });
+    assert.equal(fs.existsSync(a.L.docs), true);
+    assert.equal(fs.existsSync(a.L.manifestTmp), true);
+  } finally { await fsp.rm(dir, { recursive: true, force: true }); }
+});

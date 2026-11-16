@@ -206,7 +206,16 @@ export class IndexBuilder {
   /** manifest を未使用の名前へ rename して公開する。rename は原子的なので途中が見えない。 */
   async publish() {
     await assertNotSuperseded(this.dir, this.L.gen);
-    await fsp.rename(this.L.manifestTmp, this.L.manifest);
+    try {
+      await fsp.rename(this.L.manifestTmp, this.L.manifest);
+    } catch (e) {
+      // 確認から rename までの隙間に新しい世代が公開・prune された場合は、ENOENT ではなく置き換えとして失敗する。
+      // そうでなければ元の例外をそのまま投げる（自世代のファイルは消さない）。
+      await assertNotSuperseded(this.dir, this.L.gen);
+      throw e;
+    }
+    // rename の直後に新しい世代が公開されていたら、自世代を破棄して失敗する（配信は新しい世代のまま）。
+    await assertNotSuperseded(this.dir, this.L.gen);
     await pruneGenerations(this.dir, this.L.gen);
   }
 }
