@@ -596,11 +596,15 @@ export async function startMcpServer({ configPath, offline } = {}) {
           filter: (m) => (!only || only.includes(m.sourceId)) && (!kinds || kinds.includes(m.kind)),
           kindPriors: {}, sourcePriority: {},
         });
-        return textResult(results.map((r) => ({
-          rank: r.rank, score: Number(r.score.toFixed(5)), source: r.sourceId, path: r.path,
-          lines: `${r.start}-${r.end}`, kind: r.kind, title: r.title, url: r.url,
-          text: safe(r.text.length > 4000 ? r.text.slice(0, 4000) + '\n…(truncated)' : r.text),
-        })));
+        return textResult(results.map((r) => {
+          // 墨消ししてから切る。先に切ると、切り口をまたぐ秘密値が規則に一致せず先頭が出る。
+          const text = safe(r.text);
+          return {
+            rank: r.rank, score: Number(r.score.toFixed(5)), source: r.sourceId, path: r.path,
+            lines: `${r.start}-${r.end}`, kind: r.kind, title: r.title, url: r.url,
+            text: text.length > 4000 ? text.slice(0, 4000) + '\n…(truncated)' : text,
+          };
+        }));
       }
       case 'context_grill_evidence_pack': {
         const s = await getStore();
