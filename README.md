@@ -503,6 +503,11 @@ N が想定より少ない場合はこの設定を確認してください。
   `policy.*`（`requireCitations` / `requireVerbatimQuote` / `forbidSpeculativeLanguage` / `dropUnverifiedItems`）の真偽値は
   `true` / `false` だけです。文字列 `"false"` は設定エラーになります
 - `security.allowHosts` / `security.extraDenyPaths` は、文字列 1 つでも書けます（配列として扱われます）
+- 数値の設定（`budget.*` / `llm.maxOutputTokens` / `retrieval.*` の数値 / `policy.minEvidencePerItem` / `sources[].priority`）は、
+  JSON の数値だけです。`${VAR}` の展開結果は常に文字列なので、`"${VAR}"` を書くと「有限の数値で指定してください」の設定エラーになります
+  （真偽値の `"false"` を拒否するのと同じ方針で、数値への自動変換はしません）。`retrieval.chunk.code.maxLines` /
+  `maxChars` と `retrieval.chunk.doc.maxChars` は 1 以上、`overlapLines` / `overlapChars` / `budget.maxRepairs` /
+  `policy.minEvidencePerItem` は 0 以上です
 - 実装が読まない設定キー（`language`・`policy.language`・`retrieval.hybrid.bm25Top` / `vectorTop`・`retrieval.boosts.titleMatch`・
   `llm.plannerModel` など）は削除済みで、古い設定に残っていても無視されます。`retrieval.hybrid.rrfK` も使われず、書いても無視されます
 - 展開後の設定値に、名前に `TOKEN` / `KEY` / `SECRET` / `PASSWORD` / `PASSWD` / `CREDENTIAL` / `COOKIE` / `BEARER` を含む環境変数の値（12 文字以上）が
