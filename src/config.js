@@ -76,6 +76,20 @@ const SECURITY_BOOL_FIELDS = ['allowEmbeddingUpload', 'allowLlmUpload', 'redactS
 const POLICY_BOOL_FIELDS = ['requireCitations', 'requireVerbatimQuote', 'forbidSpeculativeLanguage', 'dropUnverifiedItems'];
 // 文字列の配列として使われる security のキー
 const SECURITY_ARRAY_FIELDS = ['allowHosts', 'extraDenyPaths'];
+// 数値として使われるキー [節, キー, 最小値]。文字列 "high" や "abc" を通すと、スコアが NaN になって順位が壊れたり、
+// 上限の比較が常に false になって上限が効かなくなる。型が number で有限であることを要求する
+// （"5" のような数値に変換できる文字列も拒否する）。最小値が null のものは範囲を検査しない（負の priority は許容）
+const NUMERIC_FIELDS = [
+  ['retrieval.boosts', 'pathMatch', null], ['retrieval.boosts', 'sourcePriority', null], ['retrieval.boosts', 'kindPrior', null],
+  ['retrieval.hybrid', 'mmrLambda', null], ['retrieval.hybrid', 'final', 1], ['retrieval.hybrid', 'perQueryTop', 1],
+  ['retrieval.embedding', 'dimensions', null], ['retrieval.embedding', 'batch', 1],
+  ['budget', 'evidenceTokens', null], ['budget', 'staticFactsTokens', null],
+  ['budget', 'maxTotalTokensPerRun', null], ['budget', 'maxRepairs', null],
+  ['llm', 'maxOutputTokens', null],
+];
+// ソース id に使えない名前。id はオブジェクトのキーとして引かれるため、prototype にある名前は
+// 自分のキーでなくても引けてしまう（status が落ち、検索のスコアが NaN になる）
+const RESERVED_IDS = new Set(['__proto__', 'constructor', 'prototype']);
 
 const CONFIG_NAMES = ['context-grill.config.json', '.context-grill.config.json', 'context-grill.json'];
 
@@ -317,7 +331,8 @@ export async function loadConfig(explicitPath) {
   // 配列を期待するフィールドに文字列が1つだけ書かれても動くようにする。
   // （文字列のまま for...of すると1文字ずつ反復してしまうため、ここで吸収する）
   const ARRAY_FIELDS = ['pageUrls', 'pageIds', 'labels', 'include', 'exclude'];
-  for (const s of merged.sources || []) {
+  for (const s of Array.isArray(merged.sources) ? merged.sources : []) {
+    if (!isObj(s)) continue; // 形の検査は validate() が行う
     for (const f of ARRAY_FIELDS) {
       if (typeof s[f] === 'string') s[f] = [s[f]];
     }
@@ -344,6 +359,16 @@ export async function loadConfig(explicitPath) {
 
 function validate(c, { expandedNames = new Set() } = {}) {
   const errs = [];
+  // 形の検査。object でない節を読むと後続の検査が生の TypeError で落ちるので、ここで止める
+  const shape = [];
+  const sectionAt = (p) => p.split('.').reduce((n, k) => (isObj(n) ? n[k] : undefined), c);
+  for (const p of ['retrieval', 'retrieval.hybrid', 'retrieval.boosts', 'retrieval.embedding', 'llm', 'budget', 'security', 'policy']) {
+    if (!isObj(sectionAt(p))) shape.push(`${p} はオブジェクトで指定してください`);
+  }
+  if (Array.isArray(c.sources)) {
+    c.sources.forEach((s, i) => { if (!isObj(s)) shape.push(`sources[${i}] はオブジェクトで指定してください`); });
+  }
+  if (shape.length) throw new Error('設定エラー:\n  - ' + shape.join('\n  - '));
   if (!Array.isArray(c.sources)) errs.push('sources は配列である必要があります');
   const ids = new Set();
   for (const [i, s] of (c.sources || []).entries()) {
@@ -352,6 +377,11 @@ function validate(c, { expandedNames = new Set() } = {}) {
     else if (typeof s.id !== 'string' || !/^[A-Za-z0-9._-]+$/.test(s.id) || s.id === '.' || s.id === '..') {
       // id はキャッシュのディレクトリ名に使われる。../ を含むとワークスペースの外に書かれる
       errs.push(`${where}.id は英数字と . _ - だけで指定してください（. と .. 単体は不可）`);
+    } else if (RESERVED_IDS.has(s.id) || s.id in Object.prototype) {
+      errs.push(`${where}.id "${s.id}" は予約された名前のため使えません（別の id にしてください）`);
+    }
+    if (s.priority !== undefined && s.priority !== null && !(typeof s.priority === 'number' && Number.isFinite(s.priority))) {
+      errs.push(`${where}.priority は有限の数値で指定してください（現在: ${typeof s.priority}）`);
     }
     if (ids.has(s.id)) errs.push(`${where}.id "${s.id}" が重複しています`);
     ids.add(s.id);
@@ -451,6 +481,15 @@ function validate(c, { expandedNames = new Set() } = {}) {
       if (!Array.isArray(v) || v.some((x) => typeof x !== 'string')) {
         errs.push(`security.${f} は文字列、または文字列の配列で指定してください`);
       }
+    }
+  }
+  for (const [sec, key, min] of NUMERIC_FIELDS) {
+    const v = sectionAt(sec)[key];
+    if (v === undefined) continue;
+    if (typeof v !== 'number' || !Number.isFinite(v)) {
+      errs.push(`${sec}.${key} は有限の数値で指定してください（現在: ${typeof v}。文字列は "5" のような数字でも使えません）`);
+    } else if (min !== null && v < min) {
+      errs.push(`${sec}.${key} は ${min} 以上の数値で指定してください`);
     }
   }
   // effortPresets: マージ後の値で検査する（既定の段階の部分指定は既定の値が残る）
