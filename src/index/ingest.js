@@ -82,6 +82,7 @@ export async function buildIndex(config, { embed = true } = {}) {
         log.info(`ベクトル索引: ${vectors.length} × ${embCfg.dimensions} 次元`);
       }
     } catch (e) {
+      if (e.superseded) throw e;   // 置き換えられた世代は BM25 だけでも公開できない。継続すると言わずにそのまま失敗する
       if (e.noRetry) { await builder.publish(); throw e; }   // 同意不足・宛先ブロックは黙って握り潰さない
       log.warn(`埋め込みに失敗したため BM25 のみで継続します: ${e.message}`);
     }
