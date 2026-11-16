@@ -1662,3 +1662,45 @@ test('MCP: fetch の行窓（鍵を含まない通常のファイル）は変わ
   assert.equal(o.total_lines, 3);
   assert.equal(o.text, 'function refundPayment(id) { return id; }\nmodule.exports = { refundPayment, MAX_RETRY };');
 });
+
+// context_grill_search は「墨消ししてから 4000 字で切る」。切ってから墨消しすると、切り口にまたがった
+// トークンは規則に一致せず、先頭の断片が応答に出る。
+test('MCP: search は 4000 字の切り口をまたぐトークンも墨消しする（先に墨消し、後で切る）', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'context-grill-mcp-cut-'));
+  await fsp.mkdir(path.join(dir, 'repo'), { recursive: true });
+  const token = 'ghp' + '_' + 'Q7wErTyUiOpAsDfGhJkLzXcVbNm1234567890'.slice(0, 36);
+  assert.equal(token.length, 40);
+  // 1 行 40 字 + 改行。トークンが 3980 文字目から始まるように 1 行内に置く。
+  const filler = (n) => Array.from({ length: n }, (_, i) => `// filler line ${String(i).padStart(4, '0')} padding padding padding padding padding padding xx`).join('\n');
+  const head = 'const refundPayment = 1;\n' + filler(45) + '\n';
+  const prefix = head.padEnd(3980 - 'const t = "'.length, ' ');
+  const body = prefix + 'const t = "' + token + '";\n' + filler(15) + '\n';
+  const at = body.indexOf(token);
+  assert.ok(at < 4000 && at + token.length > 4000, `トークンが 4000 字の境界をまたいでいない: ${at}`);
+  assert.ok(body.length < 6000, '1 チャンクに収まる長さであること');
+  await fsp.writeFile(path.join(dir, 'repo', 'cut.js'), body);
+  // 対照: 4000 字未満のチャンク
+  const small = 'const refundPayment = 2; // small-marker\n';
+  await fsp.writeFile(path.join(dir, 'repo', 'small.js'), small);
+  const configPath = path.join(dir, 'context-grill.config.json');
+  await fsp.writeFile(configPath, JSON.stringify({
+    project: 'mcp-cut',
+    sources: [{ id: 'repo', type: 'local', path: path.join(dir, 'repo'), include: ['**/*'], includeUnknownTypes: true }],
+    llm: { provider: 'dry', model: 'dry' },
+  }));
+  const config = await loadConfig(configPath);
+  await syncSources(config, {});
+  await buildIndex(config, { embed: false });
+  const probe = await writeProbe(dir, configPath);
+  const res = await rpc(probe, [call(1, 'context_grill_search', { query: 'refundPayment', k: 10 })], 1);
+  const items = JSON.parse(textOf(byId(res, 1)));
+  const cut = items.find((x) => x.path === 'cut.js');
+  assert.ok(cut, '切り口のチャンクが検索結果に無い');
+  assert.ok(!/ghp_/.test(cut.text), `トークンの断片が応答に出た: ${cut.text.slice(-60)}`);
+  assert.ok(!JSON.stringify(items).includes(token.slice(0, 12)), '断片が出た');
+  assert.ok(cut.text.includes('«REDACTED') && cut.text.includes('(truncated)'), '墨消し印か切り詰め印が無い');
+  const sm = items.find((x) => x.path === 'small.js');
+  assert.ok(sm, '対照のチャンクが無い');
+  assert.equal(sm.text.trimEnd(), small.trimEnd(), '短いチャンクの本文が変わった');
+  assert.ok(sm.text.includes('small-marker') && !sm.text.includes('truncated'));
+});
