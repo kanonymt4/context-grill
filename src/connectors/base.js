@@ -115,7 +115,8 @@ export async function httpJson(url, opts = {}) {
     if (!res.ok) {
       // 応答本文・URL にトークンが混ざる可能性があるため必ず墨消しする
       const safeUrl = url.split('?')[0];
-      const err = new Error(redactMessage(`HTTP ${res.status} ${res.statusText} for ${safeUrl}\n${body.slice(0, 600)}`));
+      // 本文は「墨消ししてから」切る（切り口にまたがった秘密値は規則に一致せず断片が残る）。巨大な本文で墨消しが重くならないよう、先に 20000 字で打ち切る
+      const err = new Error(`${redactMessage(`HTTP ${res.status} ${res.statusText} for ${safeUrl}\n`)}${redactMessage(body.slice(0, 20000)).slice(0, 600)}`);
       if (res.status === 401 || res.status === 403 || res.status === 404) err.noRetry = res.status !== 403;
       err.status = res.status;
       throw err;
