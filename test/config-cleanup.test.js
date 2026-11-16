@@ -192,3 +192,55 @@ test('cleanup: 回帰ガード: 設定ファイルに古いキーが残ってい
   assert.equal(c.language, 'ja');
   assert.equal(c.retrieval.hybrid.bm25Top, 1);
 });
+
+// ---------------------------------------------------------------- SESSION だけで一致する名前の扱い
+// 開発環境の CLAUDE_CODE_SESSION_ID のような値が、スクラッチ領域のパスに偶然含まれても誤検知にしない。
+// 強い語（TOKEN など）に一致する名前は従来どおり、値が文字で含まれていれば拒否する。
+const SESSION_UUID = '3f2b8c1e-9a4d-4e6f-8b7a-1c2d3e4f5a6b';
+
+test('cleanup: SESSION だけの名前の値が、パスの一部として文字で含まれても読める', async () => {
+  await withEnv({ CG_T_SESSION_ID: SESSION_UUID }, async () => {
+    const base = path.join(os.tmpdir(), SESSION_UUID, 'scratch');
+    const c = await load({
+      workspace: path.join(base, 'ws'),
+      sources: [{ id: 'w', type: 'local', path: path.join(base, 'src') }],
+    });
+    assert.ok(c.workspace.includes(SESSION_UUID));
+  });
+});
+
+test('cleanup: SESSION だけの名前でも、${NAME} で展開した値は拒否する', async () => {
+  await withEnv({ CG_T_SESSION_ID: SECRET, CG_T_JSESSIONID: SECRET + 'x' }, async () => {
+    await assert.rejects(() => load({
+      sources: [{ id: 'w', type: 'confluence', baseUrl: 'https://x.example.com/${CG_T_SESSION_ID}' }],
+    }), /環境変数 CG_T_SESSION_ID の値が展開/);
+    await assert.rejects(() => load({
+      sources: [{ id: 'w', type: 'confluence', baseUrl: 'https://x.example.com/${CG_T_JSESSIONID}' }],
+    }), /環境変数 CG_T_JSESSIONID の値が展開/);
+  });
+});
+
+test('cleanup: 強い語を含む名前（SESSION_TOKEN / COOKIE）の値は、文字で直接書かれても拒否する', async () => {
+  await withEnv({ CG_T_SESSION_TOKEN: SECRET, CG_T_COOKIE: SECRET + 'y' }, async () => {
+    await assert.rejects(() => load({ project: 'p-' + SECRET }), /環境変数 CG_T_SESSION_TOKEN の値が展開/);
+    await assert.rejects(() => load({ project: 'p-' + SECRET + 'y' }), /環境変数 CG_T_COOKIE の値が展開/);
+  });
+});
+
+test('cleanup: tokenEnv で参照した SESSION だけの名前の値は、文字で直接書かれても拒否する', async () => {
+  await withEnv({ CG_T_MY_SESSION: SECRET }, async () => {
+    await assert.rejects(() => load({
+      sources: [{ id: 'w', type: 'confluence', baseUrl: 'https://x.example.com/' + SECRET,
+        auth: { tokenEnv: 'CG_T_MY_SESSION' } }],
+    }), /環境変数 CG_T_MY_SESSION の値が展開/);
+  });
+});
+
+test('cleanup: redactMessage は SESSION 名の環境変数の値を引き続き伏せる', async () => {
+  const { redactMessage } = await import('../src/util/redact.js');
+  await withEnv({ CG_T_SESSION_ID: SESSION_UUID }, async () => {
+    const out = redactMessage(`path /x/${SESSION_UUID}/y`);
+    assert.ok(!out.includes(SESSION_UUID));
+    assert.ok(out.includes('CG_T_SESSION_ID'));
+  });
+});

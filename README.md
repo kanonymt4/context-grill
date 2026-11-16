@@ -505,8 +505,9 @@ N が想定より少ない場合はこの設定を確認してください。
 - `security.allowHosts` / `security.extraDenyPaths` は、文字列 1 つでも書けます（配列として扱われます）
 - 実装が読まない設定キー（`language`・`policy.language`・`retrieval.hybrid.bm25Top` / `vectorTop`・`retrieval.boosts.titleMatch`・
   `llm.plannerModel` など）は削除済みで、古い設定に残っていても無視されます。`retrieval.hybrid.rrfK` も使われず、書いても無視されます
-- 展開後の設定値に、名前に `TOKEN` / `KEY` / `SECRET` / `PASSWORD` / `PASSWD` / `CREDENTIAL` / `COOKIE` / `SESSION` / `BEARER` を含む環境変数の値（12 文字以上）が
-  入っていると、設定全体を走査して読み込み時に拒否します
+- 展開後の設定値に、名前に `TOKEN` / `KEY` / `SECRET` / `PASSWORD` / `PASSWD` / `CREDENTIAL` / `COOKIE` / `BEARER` を含む環境変数の値（12 文字以上）が
+  入っていると、設定全体を走査して読み込み時に拒否します。`SESSION` だけで一致する名前
+  （`CLAUDE_CODE_SESSION_ID` など）は、設定が `${NAME}` で実際に展開したときだけ対象です（絶対パスへの偶然の一致を誤検知しないため）
 
 ローカル LLM の例:
 

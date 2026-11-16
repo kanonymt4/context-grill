@@ -127,19 +127,19 @@ export function loadDotEnv(dir) {
  * - 定義の有無は Object.hasOwn で判定する（process.env[n] だと constructor などの prototype のキーを引く）。
  * - `_` で始まるキー（_comment / _README など）の配下は展開せず、文字のまま通す。
  */
-function expandEnv(value, at = '', errs = []) {
+function expandEnv(value, at = '', errs = [], names = null) {
   if (typeof value === 'string') {
     return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (m, n) => {
-      if (Object.hasOwn(process.env, n)) return process.env[n];
+      if (Object.hasOwn(process.env, n)) { names?.add(n); return process.env[n]; }
       errs.push(`${at} の \${${n}} は環境変数が未定義です`);
       return m;
     });
   }
-  if (Array.isArray(value)) return value.map((v, i) => expandEnv(v, `${at}[${i}]`, errs));
+  if (Array.isArray(value)) return value.map((v, i) => expandEnv(v, `${at}[${i}]`, errs, names));
   if (value && typeof value === 'object') {
     const out = {};
     for (const [k, v] of Object.entries(value)) {
-      out[k] = k.startsWith('_') ? v : expandEnv(v, at ? `${at}.${k}` : k, errs);
+      out[k] = k.startsWith('_') ? v : expandEnv(v, at ? `${at}.${k}` : k, errs, names);
     }
     return out;
   }
@@ -304,7 +304,8 @@ export async function loadConfig(explicitPath) {
     rest = others;
   }
   const envErrs = [];
-  const expanded = expandEnv(rest, '', envErrs);
+  const expandedNames = new Set();
+  const expanded = expandEnv(rest, '', envErrs, expandedNames);
   if (envErrs.length) throw new Error('設定エラー:\n  - ' + envErrs.join('\n  - '));
   const merged = deepMerge(DEFAULTS, expanded);
   // DEFAULTS の配列を共有しない。形の検証は presets.js の validatePresets が行い、
@@ -329,7 +330,7 @@ export async function loadConfig(explicitPath) {
     }
   }
 
-  validate(merged);
+  validate(merged, { expandedNames });
   // 索引の再現性キー: ソース定義とチャンク設定のみが影響する
   merged.indexKey = sha256(stableStringify({
     sources: merged.sources,
@@ -341,7 +342,7 @@ export async function loadConfig(explicitPath) {
   return merged;
 }
 
-function validate(c) {
+function validate(c, { expandedNames = new Set() } = {}) {
   const errs = [];
   if (!Array.isArray(c.sources)) errs.push('sources は配列である必要があります');
   const ids = new Set();
@@ -468,9 +469,13 @@ function validate(c) {
     }
   }
   // 展開後の設定値に秘密の実値が紛れ込んでいないか（URL 等への混入で外部に漏れるのを防ぐ）
-  // 名前の集合は util/redact.js の redactMessage と同じにそろえる
+  // 名前の集合は util/redact.js の redactMessage と意図的に違える。SESSION だけで一致する名前
+  // （CLAUDE_CODE_SESSION_ID の UUID など）の値は、スクラッチ領域などの絶対パスに偶然含まれて
+  // 誤検知になるため、設定が ${NAME} で実際に展開したときだけ対象にする。強い語に一致する名前は
+  // 従来どおり、値が文字で含まれていれば拒否する。
+  const STRONG = /TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|BEARER/i;
   const secretValues = Object.entries(process.env)
-    .filter(([k, v]) => v && v.length >= 12 && /TOKEN|KEY|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|SESSION|BEARER/i.test(k))
+    .filter(([k, v]) => v && v.length >= 12 && (STRONG.test(k) || (/SESSION/i.test(k) && expandedNames.has(k))))
     .map(([k, v]) => [k, v]);
   // 設定自身が tokenEnv / apiKeyEnv / bearerEnv で参照する環境変数は、名前の語によらず秘密として扱う（emailEnv は対象外）
   const referenced = new Set();
