@@ -54,7 +54,6 @@ const RULES = [
   { kind: 'JWT', re: /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g },
   { kind: 'SENDGRID_KEY', re: /\bSG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\b/g },
   { kind: 'NPM_TOKEN', re: /\bnpm_[A-Za-z0-9]{30,}\b/g },
-  // URL に埋め込まれたパスワード（DB 接続文字列など）。スキーム名に上限（32 字）を付けるのは、区切りのない長い 1 行での二乗バックトラックを防ぐため
   // 接頭辞で確定できる現行トークン形式。下限は実際のトークンより短めにし、接頭辞だけの語や説明文は拾わない
   { kind: 'GITLAB_TOKEN', re: /\bglpat-[A-Za-z0-9_-]{20,}/g },
   // Atlassian API トークン（このツール自身が使う形式）。末尾の `=` を含む
@@ -66,6 +65,7 @@ const RULES = [
   { kind: 'SLACK_WEBHOOK', re: /\bhttps:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]{6,}\/B[A-Z0-9]{6,}\/[A-Za-z0-9]{20,}/g },
   // Azure ストレージの接続文字列。キー名は残して値（base64）だけ伏せる
   { kind: 'AZURE_ACCOUNT_KEY', re: /(\bAccountKey=)[A-Za-z0-9+/]{40,}={0,2}/g, replace: (m, a) => `${a}«REDACTED:AZURE_ACCOUNT_KEY»` },
+  // URL に埋め込まれたパスワード（DB 接続文字列など）。スキーム名に上限（32 字）を付けるのは、区切りのない長い 1 行での二乗バックトラックを防ぐため
   { kind: 'URL_PASSWORD', re: /([a-z][a-z0-9+.-]{0,31}:\/\/[^\s/:@]+):([^\s/:@]{3,})@/gi, replace: (m, a) => `${a}:«REDACTED:URL_PASSWORD»@` },
   // Authorization ヘッダ。空白の繰り返しは {0,8} に抑える（重なる \s* は長い空白の行で二乗時間になる）
   { kind: 'AUTH_HEADER', re: /((?:authorization|proxy-authorization)["']?\s{0,8}[:=]\s{0,8}["']?\s{0,8}(?:Bearer|Basic|Token)\s+)([A-Za-z0-9._~+/=-]{8,})/gi, replace: (m, a) => `${a}«REDACTED:AUTH_HEADER»` },
