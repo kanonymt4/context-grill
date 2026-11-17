@@ -200,7 +200,7 @@ export function planQueriesDetailed(taskId, instruction, { max = 6 } = {}) {
     if (q.length === 1 && !/[\u3040-\u30ff\u3400-\u9fff]/.test(q)) continue;
     push(q, true);
   }
-  const idents = [...instruction.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*(?:[./][A-Za-z0-9_.-]+)+|[A-Z][a-z]+[A-Z][A-Za-z0-9]+|[a-z]+(?:[A-Z][a-z0-9]*)+|[a-z]+_[a-z_]+)\b/g)].map((m) => m[1]);
+  const idents = [...instruction.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*[./][A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*|[A-Z][a-z]+[A-Z][A-Za-z0-9]+|[a-z]+(?:[A-Z][a-z0-9]*)+|[a-z]+_[a-z_]+)\b/g)].map((m) => m[1]);
   for (const q of [...new Set(idents)].slice(0, 4)) push(q, true);
 
   const kw = JA_EN[taskId] || [];
