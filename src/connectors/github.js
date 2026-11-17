@@ -8,7 +8,7 @@ import { log } from '../util/log.js';
 import { redactMessage } from '../util/redact.js';
 import { isSensitiveDir, isInside } from '../util/sensitive.js';
 import { assertAllowed, auditExternal, EgressBlocked } from '../util/egress.js';
-import { classify, isProbablyBinary, makeDoc, httpJson, isIndexable, emptySkipped } from './base.js';
+import { classify, isProbablyBinary, makeDoc, httpJson, isIndexable, emptySkipped, decodeText } from './base.js';
 
 const exec = promisify(execFile);
 
@@ -249,9 +249,11 @@ export async function syncGithub(src, ctx) {
       if (isProbablyBinary(buf)) { skipped.binary++; continue; }
       const { kind, lang } = classify(rel);
       if (kind === 'other' && !src.includeUnknownTypes) { skipped.unknownType++; continue; }
+      const text = decodeText(buf);
+      if (text === null) { skipped.badEncoding++; continue; }
       docs.push(makeDoc({
         sourceId: src.id, sourceType: 'github', docPath: rel, title: rel,
-        kind, lang, text: buf.toString('utf8'),
+        kind, lang, text,
         url: permalink(src, sha, rel), version: sha,
         meta: { repo: src.repo || path.basename(dir), sha, bytes: st.size },
       }));
@@ -281,9 +283,11 @@ export async function syncGithub(src, ctx) {
       const blob = await httpJson(`${api}/repos/${src.repo}/git/blobs/${f.sha}`, { headers, purpose: `github:${src.id}` });
       const buf = Buffer.from(blob.content || '', blob.encoding === 'base64' ? 'base64' : 'utf8');
       if (isProbablyBinary(buf)) { skipped.binary++; continue; }
+      const text = decodeText(buf);
+      if (text === null) { skipped.badEncoding++; continue; }
       docs.push(makeDoc({
         sourceId: src.id, sourceType: 'github', docPath: f.path, title: f.path,
-        kind, lang, text: buf.toString('utf8'),
+        kind, lang, text,
         url: permalink(src, sha, f.path), version: sha,
         meta: { repo: src.repo, sha, bytes: f.size },
       }));

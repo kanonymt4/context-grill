@@ -48,7 +48,7 @@ function writeSkipFixture(dir) {
   fs.writeFileSync(path.join(dir, 'blob.dat'), Buffer.from([0x00, 0x01, 0x02]));
 }
 
-const EXPECTED = { unknownType: 4, tooLarge: 1, binary: 2 };
+const EXPECTED = { unknownType: 4, tooLarge: 1, binary: 2, badEncoding: 0 };
 const LINE = '種別不明で除外 4 件 / サイズ超過 1 件 / バイナリ 2 件';
 
 test('local: 取り込まなかったファイルの理由別の件数を state.skipped に残し、sync の出力に出す', async () => {
@@ -76,7 +76,7 @@ test('local: 全部取り込まれるなら除外の内訳は出さない', asyn
     const config = baseConfig(root, [{ id: 'docs', type: 'local', path: 'docs' }]);
     let report;
     const err = await captureStderr(async () => { report = await syncSources(config, {}); });
-    assert.deepEqual(report[0].state.skipped, { unknownType: 0, tooLarge: 0, binary: 0 });
+    assert.deepEqual(report[0].state.skipped, { unknownType: 0, tooLarge: 0, binary: 0, badEncoding: 0 });
     assert.ok(err.includes('  docs: 1 ドキュメント'), `出力: ${err}`);
     assert.ok(!err.includes('除外'), `出力: ${err}`);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
@@ -177,4 +177,46 @@ test('github: state は issues / pulls それぞれの値を使う', async () =>
   const { calls } = await runApi({ issues: { enabled: true, limit: 2, state: 'open' }, pulls: { enabled: true, limit: 2, state: 'closed' } });
   assert.equal(calls.find((c) => c.path === '/repos/o/r/issues').state, 'open');
   assert.equal(calls.find((c) => c.path === '/repos/o/r/pulls').state, 'closed');
+});
+
+// 文字コード（UTF-8 以外は取り込まず、件数を出す）
+import { decodeText } from '../src/connectors/base.js';
+
+// 「仕様書」を Shift_JIS で書いたバイト列（有効な UTF-8 ではない）
+const SJIS = Buffer.from([0x83, 0x86, 0x81, 0x5b, 0x83, 0x55, 0x81, 0x5b, 0x91, 0x66, 0x8e, 0x6c]);
+
+test('decodeText: UTF-8 は復号し、先頭の BOM は外す。不正な UTF-8 は null', () => {
+  assert.equal(decodeText(Buffer.from('abc')), 'abc');
+  assert.equal(decodeText(Buffer.from('日本語の仕様')), '日本語の仕様');
+  const BOM = String.fromCharCode(0xFEFF);
+  assert.equal(decodeText(Buffer.from(BOM + '# 見出し\n')), '# 見出し\n');
+  assert.equal(decodeText(Buffer.from('a' + BOM + 'b')), 'a' + BOM + 'b');   // 途中の U+FEFF は触らない
+  assert.equal(decodeText(SJIS), null);
+  assert.equal(decodeText(Buffer.from([0x63, 0x61, 0x66, 0xe9])), null);   // Latin-1 の "café"
+});
+
+test('local: UTF-8 ではない文書は取り込まず skipped.badEncoding に数え、sync の出力に出す', async () => {
+  const root = tmpDir('cg-skip-enc-');
+  try {
+    const dir = path.join(root, 'docs');
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'sjis.md'), SJIS);
+    fs.writeFileSync(path.join(dir, 'ascii.md'), '# ok\n');
+    fs.writeFileSync(path.join(dir, 'ja.md'), '# 仕様\n日本語です\n');
+    fs.writeFileSync(path.join(dir, 'bom.md'), Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('# BOM付き\n')]));
+    const config = baseConfig(root, [{ id: 'docs', type: 'local', path: 'docs' }]);
+    let report;
+    const err = await captureStderr(async () => { report = await syncSources(config, {}); });
+    assert.equal(report[0].documents, 3);
+    assert.equal(report[0].state.skipped.badEncoding, 1);
+    assert.ok(err.includes('文字コード不明（UTF-8 ではない）1 件'), `出力: ${err}`);
+    const cache = fs.readFileSync(path.join(root, 'ws', 'cache', 'sources', 'docs', 'docs.jsonl'), 'utf8')
+      .split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    const byPath = Object.fromEntries(cache.map((d) => [d.path, d.text]));
+    assert.deepEqual(Object.keys(byPath).sort(), ['ascii.md', 'bom.md', 'ja.md']);
+    assert.equal(byPath['ascii.md'], '# ok\n');
+    assert.equal(byPath['ja.md'], '# 仕様\n日本語です\n');
+    assert.equal(byPath['bom.md'], '# BOM付き\n');   // BOM が本文に残らない
+    assert.ok(!cache.some((d) => d.text.includes('�')));
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
