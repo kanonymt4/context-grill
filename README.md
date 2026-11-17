@@ -667,7 +667,7 @@ private_key / private-key / *.privatekey / private_key.{txt,pem,key,json,yml,yam
 通常のコードや設定に埋め込まれた認証情報は、**外部に出る境界で必ず墨消し**されます。
 
 - 対象: LLM へ送る証拠パック / 埋め込み API へ送る本文 / MCP がホストモデルに返す本文 / 静的解析の検出スニペット / `context-grill search` の出力
-- 検出: 秘密鍵ブロック、AWS / GitHub / Slack / Stripe / OpenAI / Anthropic / Google / JWT、URL 埋め込みパスワード、`key = "..."` 形式、`.env` 形式
+- 検出: 秘密鍵ブロック、AWS / GitHub / GitLab / Atlassian / Slack（トークン・アプリトークン・Webhook URL）/ Stripe（API キー・webhook シークレット）/ Hugging Face / Docker / Azure ストレージの `AccountKey=` / OpenAI / Anthropic / Google / JWT、URL 埋め込みパスワード、`key = "..."` 形式、`.env` 形式
   （引用符なしの `PASSWORD=…` / YAML の `password: …` / `- DB_PASSWORD=…` / `X-Api-Key: …` も対象）
 - PEM 秘密鍵は**文書単位**で伏せます（チャンク境界をまたいでも、BEGIN〜END が 1 行に入った形式でも。索引に入る前に処理するため、`search --raw` でも本文は出ません）
 - `context_grill_static_scan`（MCP）と `scan` の endpoints（route / snippet）も墨消しされます

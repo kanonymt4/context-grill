@@ -72,3 +72,23 @@ test('static: 検出行の隣に長い行があっても context の作成が 20
   assert.equal(ctxLines[0].length, 300);
   assert.ok(ctxLines.every((l) => l.length <= 300));
 });
+
+test('redact: 新しいトークン形式の規則の最悪入力（接頭辞の繰り返し・長い英数字）が 1000ms 未満', () => {
+  const inputs = [
+    'glpat-'.repeat(LONG / 6),
+    'hf_'.repeat(LONG / 3),
+    'hf_' + 'a'.repeat(LONG),
+    'ATATT3'.repeat(LONG / 6),
+    'xapp-1-'.repeat(LONG / 7),
+    'dckr_pat_'.repeat(LONG / 9),
+    'whsec_'.repeat(LONG / 6),
+    'https://hooks.slack.com/services/'.repeat(Math.floor(LONG / 33)),
+    'https://hooks.slack.com/services/T0000000/B0000000/'.repeat(Math.floor(LONG / 51)),
+    'AccountKey='.repeat(LONG / 11),
+    'AccountKey=' + 'a'.repeat(LONG),
+  ];
+  for (const input of inputs) {
+    const ms = elapsedMs(() => redactText(input));
+    assert.ok(ms < 1000, `${input.slice(0, 20)}… に ${Math.round(ms)}ms かかった`);
+  }
+});

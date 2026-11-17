@@ -230,3 +230,62 @@ test('redact: 最悪入力（password の繰り返し）が 1000ms 未満', () =
   const ms = timeMs('password abcd '.repeat(LONG / 14));
   assert.ok(ms < 1000, `${Math.round(ms)}ms`);
 });
+
+// 接頭辞で確定できる現行トークン形式（GitLab / Atlassian / Slack / Hugging Face / Docker / Stripe webhook / Azure）。
+// ダミー値は分割連結で書く（push 保護に当たらないように）
+const A20 = 'AbCd1234EfGh5678IjKl';
+const A40 = 'AbCd1234EfGh5678IjKl' + '9876MnOpQrSt5432UvWx';
+const TOKEN_FORMS = [
+  { kind: 'GITLAB_TOKEN', value: 'glpat' + '-' + A20 },
+  { kind: 'ATLASSIAN_API_TOKEN', value: 'ATATT' + '3xFfGF0' + A40 + '=1A2B3C4D' },
+  { kind: 'SLACK_APP_TOKEN', value: 'xapp' + '-1-A0123ABCDEF-1234567890123-' + A40 },
+  { kind: 'HUGGINGFACE_TOKEN', value: 'hf' + '_' + A20 + 'AbCd1234EfGh56' },
+  { kind: 'DOCKER_PAT', value: 'dckr' + '_pat_' + A20 + '_-ab' },
+  { kind: 'STRIPE_WEBHOOK_SECRET', value: 'whsec' + '_' + A20 + 'AbCd1234' },
+  { kind: 'SLACK_WEBHOOK', value: 'https://hooks.slack' + '.com/services/' + 'T01ABCDEF' + '/B02GHIJKL/' + A20 + 'abcd' },
+];
+
+test('redact: 接頭辞で確定できるトークン形式は、裸でも、代入・JSON の文脈でも伏せられる', () => {
+  for (const { kind, value } of TOKEN_FORMS) {
+    const bare = redactText(value);
+    assert.equal(bare.text, `«REDACTED:${kind}»`, kind);
+    assert.deepEqual(bare.kinds, [kind], kind);
+    const exp = redactText(`export SOME_VAR=${value}`);
+    assert.ok(!exp.text.includes(value.slice(6)) && exp.text.includes('«REDACTED:'), `${kind}: ${exp.text}`);
+    const json = redactText(`{"note": "${value}", "n": 1}`);
+    assert.ok(!json.text.includes(value.slice(6)) && json.text.includes(`«REDACTED:${kind}»`), `${kind}: ${json.text}`);
+  }
+});
+
+test('redact: Azure ストレージの AccountKey=… は値だけ伏せ、接続文字列の他の部分は残す', () => {
+  const key = A40 + A40 + 'AbCdEfGh' + '==';
+  const line = `DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=${key};EndpointSuffix=core.windows.net`;
+  const r = redactText(line);
+  assert.ok(!r.text.includes(A20), r.text);
+  assert.equal(r.text, 'DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=«REDACTED:AZURE_ACCOUNT_KEY»;EndpointSuffix=core.windows.net');
+  assert.deepEqual(r.kinds, ['AZURE_ACCOUNT_KEY']);
+});
+
+test('redact: 接頭辞だけ・短い語・説明文のトークン形式風の文字列は変わらない', () => {
+  const benign = [
+    'glpat-',
+    'GitLab の glpat- で始まるトークン',
+    'hf_ の後に短い語: hf_hub と hf_token',
+    'ATATT3x',
+    'xapp-',
+    'xapp- は Slack アプリトークンの接頭辞',
+    'xapp-level-tokens-are-used-here',
+    'dckr_pat_',
+    'whsec_ はwebhook の署名シークレット',
+    'https://hooks.slack.com/services/',
+    'https://hooks.slack.com/services/T/B/x',
+    'AccountKey=',
+    'AccountKey=abc;',
+    'AccountKey=<your key>',
+  ];
+  for (const line of benign) {
+    const r = redactText(line);
+    assert.equal(r.text, line, line);
+    assert.equal(r.count, 0, line);
+  }
+});
