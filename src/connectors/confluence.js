@@ -1,4 +1,4 @@
-import { htmlToText } from '../util/html.js';
+import { htmlToText, HTML_TEXT_VERSION } from '../util/html.js';
 import { isIncluded, readEnv } from '../util/misc.js';
 import { parseConfluenceUrl } from '../util/urls.js';
 import { log } from '../util/log.js';
@@ -18,14 +18,14 @@ function authHeader(src) {
 const chunk = (arr, n) => Array.from({ length: Math.ceil(arr.length / n) }, (_, i) => arr.slice(i * n, i * n + n));
 
 /** v1 / v2 どちらの応答形でもドキュメントに正規化する */
-function toDoc(src, base, p, cache) {
+export function toDoc(src, base, p, cache) {
   const title = p.title || `(untitled ${p.id})`;
   const docPath = `pages/${p.id}`;
   const version = String(p.version?.number ?? p.version?.createdAt ?? p.version?.when ?? '');
   const cached = cache.get(`${src.id}:${docPath}`);
   let text;
-  if (cached && cached.version === version && cached.text) {
-    text = cached.text;                       // 版が同じなら再解析しない（差分同期）
+  if (cached && cached.version === version && cached.text && cached.meta?.textVersion === HTML_TEXT_VERSION) {
+    text = cached.text;                       // 版が同じなら再解析しない（差分同期）。変換規則の版が違えば作り直す
   } else {
     const storage = p.body?.storage?.value || p.body?.view?.value || p.body?.atlas_doc_format?.value || '';
     text = `# ${title}\n\n` + htmlToText(storage);
@@ -37,6 +37,7 @@ function toDoc(src, base, p, cache) {
     url: base + (webui.startsWith('/') ? webui : `/${webui}`),
     version,
     meta: {
+      textVersion: HTML_TEXT_VERSION,
       pageId: String(p.id), spaceKey: p.space?.key || src.spaceKey || null,
       status: p.status, contentType: 'pages',
       updatedAt: p.version?.createdAt || p.version?.when || null,

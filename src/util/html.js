@@ -148,13 +148,71 @@ function removeScriptStyle(s) {
   return out + s.slice(pos);
 }
 
+const NAMED_ENTITIES = {
+  nbsp: ' ', amp: '&', lt: '<', gt: '>', quot: '"', apos: "'",
+  ndash: '–', mdash: '—', hellip: '…',
+  lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”',
+  larr: '←', rarr: '→', times: '×', le: '≤', ge: '≥', ne: '≠',
+  yen: '¥', copy: '©', reg: '®', trade: '™', middot: '·',
+  laquo: '«', raquo: '»',
+};
+
+/**
+ * 実体参照を 1 回の走査で復号する（復号結果は再走査しないので、&amp;lt; は &lt; になる）。
+ * 表に無い名前・範囲外の数値・退避用の番兵に使う U+E000 / U+E001 は、そのまま残す。
+ */
+function decodeEntities(s) {
+  return s.replace(/&(?:#([xX][0-9a-fA-F]+|[0-9]+)|([a-zA-Z][a-zA-Z0-9]*));/g, (m, num, name) => {
+    if (name !== undefined) return Object.hasOwn(NAMED_ENTITIES, name) ? NAMED_ENTITIES[name] : m;
+    const cp = num[0] === 'x' || num[0] === 'X' ? parseInt(num.slice(1), 16) : parseInt(num, 10);
+    if (cp === 0xE000 || cp === 0xE001 || !(cp > 0 && cp <= 0x10FFFF)) return m;
+    return String.fromCodePoint(cp);
+  });
+}
+
+/**
+ * <pre>…</pre> を fn(中身) の結果にする。閉じが見つからなければ以降の開きにも閉じは無いので打ち切って線形にする。
+ */
+function replacePre(s, fn) {
+  const open = /<pre(?=[\s>/])[^<>]*>/gi;
+  const close = /<\/pre\s*>/gi;
+  let out = '';
+  let pos = 0;
+  for (;;) {
+    const o = execFrom(open, s, pos);
+    if (!o) break;
+    const bodyStart = o.index + o[0].length;
+    const c = execFrom(close, s, bodyStart);
+    if (!c) break;
+    out += s.slice(pos, o.index) + fn(s.slice(bodyStart, c.index));
+    pos = c.index + c[0].length;
+  }
+  return out + s.slice(pos);
+}
+
+/**
+ * htmlToText の変換規則の版。変換結果が変わる修正のたびに上げる
+ * （Confluence の差分同期は、ページの版が同じならキャッシュ本文を使うので、この版も条件に含める）。
+ */
+export const HTML_TEXT_VERSION = 2;
+
 /** Confluence storage format / 一般的な HTML をプレーンテキスト化（依存ゼロ） */
 export function htmlToText(html) {
   if (!html) return '';
   let s = String(html);
+  // コード（コードマクロ・plain-text-body・<pre>）は、タグ除去・復号・空白の圧縮の対象から外すため番兵へ退避し、最後に戻す。
+  // 番兵の接頭辞は、入力に現れない文字列を選ぶ（本文に似た文字列があっても壊れない）
+  let prefix;
+  for (let k = 0; ; k++) {
+    prefix = `cg${k}_`;
+    if (!s.includes(prefix)) break;
+  }
+  const stash = [];
+  const keep = (text) => `${prefix}${stash.push(text) - 1}`;
   // コードマクロは fenced block として温存（仕様書内のコードは一次資料として重要）
-  s = replaceCodeMacros(s, (code) => `\n\`\`\`\n${code}\n\`\`\`\n`);
-  s = replacePlainTextBodies(s, (t) => `\n${t}\n`);
+  s = replaceCodeMacros(s, (code) => `\n\`\`\`\n${keep(decodeEntities(code))}\n\`\`\`\n`);
+  s = replacePlainTextBodies(s, (t) => `\n${keep(decodeEntities(t))}\n`);
+  s = replacePre(s, (inner) => `\n${keep(decodeEntities(inner.replace(/<br\s*\/?>/gi, '\n').replace(/<\/?[a-z0-9:-]+[^<>]*>/gi, '')))}\n`);
   // タグ単位で一致させてから属性を取り出す（[^<>]* で次の < か > で止め、閉じないタグの繰り返しで三乗にならないようにする）
   s = s.replace(/<ri:user[^<>]*\/>/gi, (m) => {
     const a = /ri:account-id="([^"]*)"/.exec(m);
@@ -168,10 +226,10 @@ export function htmlToText(html) {
   s = s.replace(/<t[dh][^<>]*>/gi, ' | ');
   s = s.replace(/<\/tr>/gi, '\n');
   s = s.replace(/<\/?([a-z0-9:-]+)[^<>]*>/gi, (m, tag) => (BLOCK.test(tag) ? '\n' : ' '));
-  s = s.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<')
-       .replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-       .replace(/&#x?([0-9a-f]+);/gi, (m, c) => { try { return String.fromCodePoint(parseInt(c, m[2] === 'x' ? 16 : 10)); } catch { return m; } });
+  s = decodeEntities(s);
   s = trimLineEnds(s).replace(/\n{3,}/g, '\n\n').replace(/[ \t]{2,}/g, ' ');
+  // 退避したコードを戻す（1 回の置換で、戻した本文は再走査しない）
+  if (stash.length) s = s.replace(new RegExp(`${prefix}(\\d+)`, 'g'), (m, i) => stash[Number(i)] ?? m);
   return s.trim();
 }
 

@@ -170,3 +170,48 @@ test('pack の結合: 後ろのチャンクの新しい部分が空行 1 行だ�
   assert.equal(items[0].text.split('\n').length, items[0].end - items[0].start + 1);
   assert.equal(items[0].text, 'a\nb\nc\n');
 });
+
+// --- CRLF / BOM の見出し認識 ---
+
+const SPEC_LINES = [
+  '# 決済仕様',
+  '概要です。',
+  '',
+  '## リトライ',
+  ...longSectionLines(6, 2),
+  '',
+  '## 返金',
+  '返金の説明。',
+  '### 部分返金',
+  '部分返金の説明。',
+];
+
+test('CRLF の文書でも見出しで節に分かれ、LF 版と [title, start, end] が一致する', () => {
+  const cfg = cfgOf(600, 60);
+  const lf = chunkDocument(docOf('doc', 'docs/spec.md', SPEC_LINES.join('\n') + '\n'), cfg);
+  const crlf = chunkDocument(docOf('doc', 'docs/spec.md', SPEC_LINES.join('\r\n') + '\r\n'), cfg);
+  const key = (cs) => cs.map((c) => [c.title.replace(/\r/g, ''), c.start, c.end]);
+  assert.ok(lf.some((c) => c.title === 'docs/spec.md › 決済仕様 › リトライ'), 'LF 版で節に分かれている前提');
+  assert.deepEqual(key(crlf), key(lf));
+  assert.ok(crlf.every((c) => !c.title.includes('\r')), 'title に \\r が残らない');
+});
+
+test('CRLF のチャンク本文は逐語のまま（\\r を残す）', () => {
+  const text = SPEC_LINES.join('\r\n') + '\r\n';
+  const chunks = chunkDocument(docOf('doc', 'docs/spec.md', text), cfgOf(100000, 60));
+  assert.ok(chunks.length > 1);
+  assert.ok(chunks.every((c) => text.includes(c.text)), '本文は原文の部分文字列');
+  assert.ok(chunks[0].text.startsWith('# 決済仕様\r\n'));
+});
+
+test('BOM 付きの先頭見出しが title に入る', () => {
+  const text = '\u{FEFF}# ガイド\nはじめに。\n## 導入\n手順。\n';
+  const chunks = chunkDocument(docOf('doc', 'docs/guide.md', text), cfgOf(100000, 60));
+  assert.deepEqual(chunks.map((c) => c.title), ['docs/guide.md › ガイド', 'docs/guide.md › ガイド › 導入']);
+});
+
+test('対照: 見出しでない行（# の後に空白が無い、行中の #）は見出しにならない', () => {
+  const text = '#tag だけ\r\n本文 # 中\r\n';
+  const chunks = chunkDocument(docOf('doc', 'docs/a.md', text), cfgOf(100000, 60));
+  assert.deepEqual(chunks.map((c) => c.title), ['docs/a.md']);
+});

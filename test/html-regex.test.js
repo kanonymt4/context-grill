@@ -4,7 +4,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { htmlToText } from '../src/util/html.js';
 
-// Confluence ストレージ形式に近い入力。期待値は、修正前の実装の出力をそのまま固定したもの
+// Confluence ストレージ形式に近い入力。期待値は、修正前の実装の出力をそのまま固定したもの。
+// ただし <pre> 内の字下げだけは意図した差分（修正前は 2 空白が 1 空白に潰れていた。コードの字下げを保つよう直した）
 const FIXTURE = [
   '<h1 id="t">仕様書</h1>',
   '<p>担当: <ri:user ri:account-id="abc123"/> と <ri:user ri:userkey="k" ri:account-id="def456" /> が確認。</p>',
@@ -28,7 +29,7 @@ const FIXTURE = [
   '<p>最後の段落&amp;完了</p>',
 ].join('\n');
 
-const EXPECTED = '# 仕様書\n\n担当: @abc123 と @def456 が確認。\n\n属性なし: は account-id なし。\n\n参照 リンク 文字 と\n 改行 <tag> A B\n\n[[設計メモ]]\n\n```\nconst a = 1 < 2;\nif (a) { run(); }\n```\n\n注意書き\n\n- 項目1\n\n- 項目2\n\n- 入れ子\n\n- 手順A\n\n- 手順B\n\n |\n | 列1 | 列2\n\n | a | b 太字\n\n | c\n\n## 見出し2\n\n### 見出し3\n\n整形済み\n テキスト\n\n引用\n\n末尾 空白 多い\n\n段落\n\n<!-- comment --> inline 強調\n\nネスト @q"r 終わり\n\n やること\n\n最後の段落&完了';
+const EXPECTED = '# 仕様書\n\n担当: @abc123 と @def456 が確認。\n\n属性なし: は account-id なし。\n\n参照 リンク 文字 と\n 改行 <tag> A B\n\n[[設計メモ]]\n\n```\nconst a = 1 < 2;\nif (a) { run(); }\n```\n\n注意書き\n\n- 項目1\n\n- 項目2\n\n- 入れ子\n\n- 手順A\n\n- 手順B\n\n |\n | 列1 | 列2\n\n | a | b 太字\n\n | c\n\n## 見出し2\n\n### 見出し3\n\n整形済み\n  テキスト\n\n引用\n\n末尾 空白 多い\n\n段落\n\n<!-- comment --> inline 強調\n\nネスト @q"r 終わり\n\n やること\n\n最後の段落&完了';
 
 function timeMs(fn) {
   const t = performance.now();

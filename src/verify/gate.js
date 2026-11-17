@@ -5,7 +5,13 @@ const SPECULATIVE = [
   'probably', 'likely', 'presumably', 'typically', 'usually', 'i think', 'it seems', 'appears to be', 'might be',
 ];
 
-const norm = (s) => String(s).replace(/\r\n/g, '\n').replace(/[ \t　]+/g, ' ').replace(/\n[ \t]*/g, '\n').trim();
+// 逐語照合用の正規化。証拠側・引用側の両方に同じ関数をかける。
+// 畳むのは Unicode の正規化形（NFC）と空白の種類（NBSP・各種幅の空白・全角空白・BOM）だけで、
+// 文字そのものの同一視（波ダッシュなど）はしない（照合を弱めないため）。
+const WS = '[ \\t\\u00a0\\u2000-\\u200a\\u202f\\u205f\\u3000\\ufeff]';
+const WS_RUN = new RegExp(`${WS}+`, 'g');
+const LINE_LEAD = new RegExp(`\\n${WS}*`, 'g');
+const norm = (s) => String(s).normalize('NFC').replace(/\r\n/g, '\n').replace(WS_RUN, ' ').replace(LINE_LEAD, '\n').trim();
 
 /**
  * 検証ゲート。ここを通らない主張は最終レポートに載らない。
