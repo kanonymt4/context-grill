@@ -5,6 +5,42 @@
 
 const PLACEHOLDER = /^(?:\$\{|<|%|process\.env|os\.environ|ENV\[|System\.getenv|getenv|null|undefined|true|false|xxx+|your[_-]?|change[_-]?me|example|sample|dummy|placeholder|redacted|\*+)$/i;
 
+// ENV_ASSIGNMENT / NETRC / x-api-key 用。上の PLACEHOLDER は「全体一致」なので、`process.env.X` のような
+// 接頭辞の形の参照には効かない（CREDENTIAL 規則は別の正規表現で補っている）。ここでは語と接頭辞を分ける。
+const PLACEHOLDER_WORD = /^(?:null|undefined|true|false|xxx+|your|change[_-]?me|example|sample|dummy|placeholder|redacted|\*+)$/i;
+const PLACEHOLDER_PREFIX = /^(?:\$\{|\$\(|<|%|process\.env|os\.environ|os\.getenv|getenv\(|System\.getenv|ENV\[|your[_-])/i;
+// 値が `this.x` / `self.x` のメンバー参照
+const MEMBER_REF = /^(?:this|self)\./;
+// TypeScript の型キーワード単独（`password: string;`）
+const TS_TYPE = /^(?:string|number|boolean|any|unknown|never|void|object|bigint|symbol|String|Number|Boolean|Object)$/;
+// ひらがな・カタカナ・漢字を含む値は説明文であってシークレットではない
+const JAPANESE = /[぀-ゟ゠-ヿ一-鿿]/;
+
+/** 値の先頭の引用符と末尾の `,` `;` と引用符を外す */
+function stripValue(v) {
+  return String(v).trim().replace(/^["'`]+/, '').replace(/[,;]+$/, '').replace(/["'`]+$/, '');
+}
+
+/** 参照・プレースホルダ・説明文など、シークレットではない値か（keyword は代入のキーのキーワード） */
+function isBenignValue(raw, keyword) {
+  const v = stripValue(raw);
+  if (PLACEHOLDER_WORD.test(v) || PLACEHOLDER_PREFIX.test(v) || MEMBER_REF.test(v) || TS_TYPE.test(v) || JAPANESE.test(v)) return true;
+  if (keyword && v.toLowerCase().replace(/[_-]/g, '') === keyword.toLowerCase().replace(/[_-]/g, '')) return true;
+  return false;
+}
+
+// NETRC は、同じ行に machine / login があるか、行全体が `password <値>` のときだけ対象にする（散文の password を伏せない）。
+// 同じ行に対する判定を繰り返さない（password が何度も出る長い 1 行で二乗時間になるため）
+let netrcLine = null;
+let netrcLineOk = false;
+function isNetrcLine(line) {
+  if (line !== netrcLine) {
+    netrcLine = line;
+    netrcLineOk = /\b(?:machine|login)\b/i.test(line) || /^[^\S\r]*(?:[#;]+[^\S\r]*)?password[^\S\r]+\S+[^\S\r]*\r?$/i.test(line);
+  }
+  return netrcLineOk;
+}
+
 const RULES = [
   { kind: 'AWS_ACCESS_KEY', re: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[0-9A-Z]{16}\b/g },
   { kind: 'GITHUB_TOKEN', re: /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/g },
@@ -33,13 +69,14 @@ const RULES = [
   // 行頭の空白は [^\S\r\u2028\u2029]（行終端を除く空白）にする。m フラグでは \r の直後も行頭なので、\s* だと \r の繰り返しで二乗時間になる。
   {
     kind: 'ENV_ASSIGNMENT',
-    re: /^([^\S\r\u2028\u2029]*(?:-[^\S\r\u2028\u2029]+)?(?:export\s+)?[A-Za-z0-9_.-]*?(?:PASSWORD|PASSWD|SECRET|TOKEN|APIKEY|API[_-]KEY|ACCESS[_-]KEY|PRIVATE[_-]KEY|CREDENTIALS?)\s*[:=]\s*)(\S{6,})$/gim,
-    replace: (m, head, val) => (PLACEHOLDER.test(val.trim()) ? m : `${head}«REDACTED:CREDENTIAL»`),
+    re: /^([^\S\r\u2028\u2029]*(?:-[^\S\r\u2028\u2029]+)?(?:export\s+)?[A-Za-z0-9_.-]*?(PASSWORD|PASSWD|SECRET|TOKEN|APIKEY|API[_-]KEY|ACCESS[_-]KEY|PRIVATE[_-]KEY|CREDENTIALS?)\s*[:=]\s*)(\S{6,})$/gim,
+    // 参照・同名代入・型・説明文は伏せない（isBenignValue）。それ以外の値は従来どおり伏せる
+    replace: (m, head, kw, val) => (isBenignValue(val, kw) ? m : `${head}«REDACTED:CREDENTIAL»`),
   },
   // 行の途中にある X-Api-Key ヘッダ（curl -H "X-Api-Key: ..." など。行頭のものは上の規則が処理する）
-  { kind: 'AUTH_HEADER', re: /(\bx-api-key["']?\s{0,8}[:=]\s{0,8}["']?)([A-Za-z0-9._~+/=-]{8,})/gi, replace: (m, a, val) => (PLACEHOLDER.test(val) ? m : `${a}«REDACTED:AUTH_HEADER»`) },
-  // .netrc 形式
-  { kind: 'NETRC', re: /(\bpassword\s+)(\S{4,})/gi, replace: (m, head, val) => (PLACEHOLDER.test(val) ? m : `${head}«REDACTED:CREDENTIAL»`) },
+  { kind: 'AUTH_HEADER', re: /(\bx-api-key["']?\s{0,8}[:=]\s{0,8}["']?)([A-Za-z0-9._~+/=-]{8,})/gi, replace: (m, a, val) => (isBenignValue(val) ? m : `${a}«REDACTED:AUTH_HEADER»`) },
+  // .netrc 形式（同じ行に machine / login があるか、行全体が `password <値>` のときだけ）
+  { kind: 'NETRC', re: /(\bpassword\s+)(\S{4,})/gi, replace: (m, head, val, off, line) => (isNetrcLine(line) && !isBenignValue(val) ? `${head}«REDACTED:CREDENTIAL»` : m) },
 ];
 
 const PEM_BEGIN = /-----BEGIN (?:[A-Z ]*)?(?:PRIVATE KEY|RSA PRIVATE KEY|OPENSSH PRIVATE KEY|PGP PRIVATE KEY BLOCK|CERTIFICATE)-----/;
