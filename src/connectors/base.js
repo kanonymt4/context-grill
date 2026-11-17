@@ -27,9 +27,22 @@ export function isProbablyBinary(buf) {
   return false;
 }
 
+/**
+ * UTF-8 として復号する。不正な UTF-8（Shift_JIS・EUC-JP・Latin-1 など）は null を返す。
+ * 呼び出し側が skipped.badEncoding に数えて取り込まない（U+FFFD 入りの本文を索引に入れない）。
+ * 先頭の BOM（U+FEFF）は外す。
+ */
+export function decodeText(buf) {
+  try {
+    // ignoreBOM: true は「BOM を外さず残す」指定。外すのは下の slice
+    const s = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(buf);
+    return s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
+  } catch { return null; }
+}
+
 /** 取り込まなかったファイルの理由別の件数（挙動は変えず、数えるだけ） */
 export function emptySkipped() {
-  return { unknownType: 0, tooLarge: 0, binary: 0 };
+  return { unknownType: 0, tooLarge: 0, binary: 0, badEncoding: 0 };
 }
 
 /** sync の出力に添える内訳。0 の理由は省略し、全部 0 なら空文字を返す */
@@ -39,6 +52,7 @@ export function formatSkipped(skipped) {
   if (skipped.unknownType) parts.push(`種別不明で除外 ${skipped.unknownType} 件`);
   if (skipped.tooLarge) parts.push(`サイズ超過 ${skipped.tooLarge} 件`);
   if (skipped.binary) parts.push(`バイナリ ${skipped.binary} 件`);
+  if (skipped.badEncoding) parts.push(`文字コード不明（UTF-8 ではない）${skipped.badEncoding} 件`);
   return parts.length ? `（${parts.join(' / ')}）` : '';
 }
 

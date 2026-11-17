@@ -372,6 +372,7 @@ context-grill ask "..." --dry-run               # 送信予定の証拠とプロ
 | 種別不明 | 拡張子から `code` / `doc` / `config` に分類できない（`.xyz`、拡張子なしなど） | ソースに `"includeUnknownTypes": true` |
 | サイズ超過 | `maxFileBytes`（既定 400,000 バイト）を超える | ソースの `maxFileBytes` を大きくする |
 | バイナリ | 先頭 4KB に NUL バイトを含む | なし |
+| 文字コード不明 | UTF-8 として読めない（Shift_JIS・EUC-JP・Latin-1 など） | UTF-8 に変換する |
 
 GitHub の Issue / PR（`issues` / `pulls`）の `limit` は別々に効きます（省略時はそれぞれ 100 件）。
 
