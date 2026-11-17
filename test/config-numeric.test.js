@@ -182,3 +182,55 @@ test('search: sourceId が constructor でも sourcePriority に無ければ 0 �
   assert.equal(r.length, 3);
   assert.ok(r.every((x) => Number.isFinite(x.score)), JSON.stringify(r.map((x) => x.score)));
 });
+
+// ---------------------------------------------------------------- ソース単位の数値・overlap
+// [ソースの組み立て, エラーに出るパス, 最小値]
+const SRC_NUMERIC = [
+  [(v) => ({ id: 'w', type: 'local', path: '.', maxFileBytes: v }), 'sources\\[0\\]\\.maxFileBytes', 1],
+  [(v) => ({ id: 'w', type: 'jira', baseUrl: 'https://example.invalid', limit: v }), 'sources\\[0\\]\\.limit', 0],
+  [(v) => ({ id: 'w', type: 'github', repo: 'o/r', maxFiles: v }), 'sources\\[0\\]\\.maxFiles', 0],
+  [(v) => ({ id: 'w', type: 'github', repo: 'o/r', depth: v }), 'sources\\[0\\]\\.depth', 1],
+  [(v) => ({ id: 'w', type: 'github', repo: 'o/r', maxFileBytes: v }), 'sources\\[0\\]\\.maxFileBytes', 1],
+  [(v) => ({ id: 'w', type: 'github', repo: 'o/r', issues: { enabled: true, limit: v } }), 'sources\\[0\\]\\.issues\\.limit', 0],
+  [(v) => ({ id: 'w', type: 'github', repo: 'o/r', pulls: { enabled: true, limit: v } }), 'sources\\[0\\]\\.pulls\\.limit', 0],
+  [(v) => ({ id: 'w', type: 'confluence', baseUrl: 'https://example.invalid', limit: v }), 'sources\\[0\\]\\.limit', 0],
+  [(v) => ({ id: 'w', type: 'confluence', baseUrl: 'https://example.invalid', pageSize: v }), 'sources\\[0\\]\\.pageSize', 0],
+  [(v) => ({ id: 'w', type: 'confluence', baseUrl: 'https://example.invalid', maxDepth: v }), 'sources\\[0\\]\\.maxDepth', 0],
+  [(v) => ({ id: 'w', type: 'confluence', baseUrl: 'https://example.invalid', updatedWithinDays: v }), 'sources\\[0\\]\\.updatedWithinDays', 0],
+];
+
+test('source numeric: ソース単位の数値キーに数値でない値を書くと設定エラー（Jira limit "abc"・local maxFileBytes "big" ほか）', async () => {
+  for (const [build, at] of SRC_NUMERIC) {
+    for (const bad of ['abc', 'big', '5', true, [1], { a: 1 }]) {
+      await rejects({ sources: [build(bad)] }, new RegExp(`${at} は有限の数値で指定してください`));
+    }
+  }
+});
+
+test('source numeric: 範囲外（負の値、maxFileBytes / depth は 0 も）は設定エラー', async () => {
+  for (const [build, at, min] of SRC_NUMERIC) {
+    await rejects({ sources: [build(min - 1)] }, new RegExp(`${at} は ${min} 以上の数値`));
+  }
+});
+
+test('source numeric(回帰ガード): 正常な値・省略・null・0（許容されるキー）は通る', async () => {
+  for (const [build, , min] of SRC_NUMERIC) {
+    await load({ sources: [build(min)] });
+    await load({ sources: [build(min + 10)] });
+    await load({ sources: [build(null)] });
+    await load({ sources: [build(undefined)] });
+  }
+  await load({ sources: [{ id: 'w', type: 'github', repo: 'o/r', issues: { enabled: true }, pulls: null }] });
+});
+
+test('chunk overlap: overlapLines >= maxLines / overlapChars >= maxChars は設定エラー（チャンクが爆発する）', async () => {
+  await rejects({ retrieval: { chunk: { code: { overlapLines: 10, maxLines: 10 } } } }, /retrieval\.chunk\.code\.overlapLines は maxLines（10）未満/);
+  await rejects({ retrieval: { chunk: { code: { overlapLines: 50, maxLines: 10 } } } }, /retrieval\.chunk\.code\.overlapLines は maxLines/);
+  await rejects({ retrieval: { chunk: { doc: { overlapChars: 300, maxChars: 300 } } } }, /retrieval\.chunk\.doc\.overlapChars は maxChars（300）未満/);
+});
+
+test('chunk overlap(回帰ガード): overlap が max 未満・既定値は通る', async () => {
+  await load({ retrieval: { chunk: { code: { overlapLines: 9, maxLines: 10 }, doc: { overlapChars: 299, maxChars: 300 } } } });
+  await load({ retrieval: { chunk: { code: { overlapLines: 0 } } } });
+  await load({});
+});

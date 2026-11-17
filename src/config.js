@@ -91,6 +91,13 @@ const NUMERIC_FIELDS = [
   ['retrieval.chunk.code', 'maxLines', 1], ['retrieval.chunk.code', 'overlapLines', 0], ['retrieval.chunk.code', 'maxChars', 1],
   ['retrieval.chunk.doc', 'maxChars', 1], ['retrieval.chunk.doc', 'overlapChars', 0],
 ];
+// sources[] の中で数値として読まれるキー [キー, 最小値]（コネクタが実際に読むものだけ）。
+// "abc" を通すと、Jira の limit は比較が常に false になって 0 件で成功し、local の maxFileBytes は上限が黙って無効になる
+const SOURCE_NUMERIC_FIELDS = [
+  ['limit', 0], ['maxFileBytes', 1], ['maxFiles', 0], ['depth', 1], ['pageSize', 0], ['maxDepth', 0], ['updatedWithinDays', 0],
+];
+// sources[].issues / sources[].pulls の中で数値として読まれるキー
+const SOURCE_SUB_NUMERIC_FIELDS = [['issues', 'limit', 0], ['pulls', 'limit', 0]];
 // ソース id に使えない名前。id はオブジェクトのキーとして引かれるため、prototype にある名前は
 // 自分のキーでなくても引けてしまう（status が落ち、検索のスコアが NaN になる）
 const RESERVED_IDS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -392,6 +399,20 @@ function validate(c, { expandedNames = new Set() } = {}) {
     if (s.priority !== undefined && s.priority !== null && !(typeof s.priority === 'number' && Number.isFinite(s.priority))) {
       errs.push(`${where}.priority は有限の数値で指定してください（現在: ${typeof s.priority}）`);
     }
+    const checkNum = (v, at, min) => {
+      if (v === undefined || v === null) return;
+      if (typeof v !== 'number' || !Number.isFinite(v)) {
+        errs.push(`${at} は有限の数値で指定してください（現在: ${typeof v}。文字列は "5" のような数字でも使えません）`);
+      } else if (v < min) {
+        errs.push(`${at} は ${min} 以上の数値で指定してください`);
+      }
+    };
+    if (isObj(s)) {
+      for (const [key, min] of SOURCE_NUMERIC_FIELDS) checkNum(s[key], `${where}.${key}`, min);
+      for (const [sub, key, min] of SOURCE_SUB_NUMERIC_FIELDS) {
+        if (isObj(s[sub])) checkNum(s[sub][key], `${where}.${sub}.${key}`, min);
+      }
+    }
     if (ids.has(s.id)) errs.push(`${where}.id "${s.id}" が重複しています`);
     ids.add(s.id);
     if (!['github', 'confluence', 'jira', 'local'].includes(s.type)) {
@@ -499,6 +520,13 @@ function validate(c, { expandedNames = new Set() } = {}) {
       errs.push(`${sec}.${key} は有限の数値で指定してください（現在: ${typeof v}。文字列は "5" のような数字でも使えません）`);
     } else if (min !== null && v < min) {
       errs.push(`${sec}.${key} は ${min} 以上の数値で指定してください`);
+    }
+  }
+  // overlap が max 以上だと窓が進まず、チャンクが爆発する（10 行の窓に 10 行の重なりで 31 件 → 2991 件）
+  for (const [sec, ov, mx] of [['retrieval.chunk.code', 'overlapLines', 'maxLines'], ['retrieval.chunk.doc', 'overlapChars', 'maxChars']]) {
+    const o = sectionAt(sec)[ov], m = sectionAt(sec)[mx];
+    if (typeof o === 'number' && typeof m === 'number' && Number.isFinite(o) && Number.isFinite(m) && o >= m) {
+      errs.push(`${sec}.${ov} は ${mx}（${m}）未満で指定してください（現在: ${o}）`);
     }
   }
   // effortPresets: マージ後の値で検査する（既定の段階の部分指定は既定の値が残る）
