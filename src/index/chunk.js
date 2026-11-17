@@ -6,7 +6,8 @@ import { redactPemBlocks } from '../util/redact.js';
 const DECL_MAX_LINE = 2000;
 
 const DECL_RE = /^(\s{0,4})(export\s+|public\s+|private\s+|protected\s+|internal\s+|static\s+|final\s+|async\s+|@)*\s*(function|class|interface|type|enum|struct|const|let|var|def|func|fn|module|namespace|impl|trait|package|describe|it|test|CREATE\s+TABLE|CREATE\s+OR\s+REPLACE)\b/;
-const HEADING_RE = /^(#{1,6})\s+(.*)$/;
+// CRLF の行末の '\r'（. は一致しない）と先頭の BOM を許す。見出し行自体は本文に逐語で残す
+const HEADING_RE = /^\uFEFF?(#{1,6})\s+(.*?)\r?$/;
 
 /**
  * コード: 宣言境界を優先した行ウィンドウ分割（行番号を保持 → 引用検証と permalink に必須）
@@ -132,6 +133,8 @@ export function chunkText(doc, cfg) {
       continue;
     }
     let pos = 0;
+    let scanned = 0;
+    let lineOffset = 0;
     while (pos < body.length) {
       let end = Math.min(body.length, pos + maxChars);
       if (end < body.length) {
@@ -147,7 +150,9 @@ export function chunkText(doc, cfg) {
       const startsMid = pos > 0 && body[pos - 1] !== '\n';
       const endsMid = end < body.length && body[end] !== '\n';
       const slice = body.slice(pos, end);
-      const lineOffset = body.slice(0, pos).split('\n').length - 1;
+      // pos は単調増加なので、前回の位置からの改行数を足していく（毎回先頭から数えると二乗になる）
+      for (let k = body.indexOf('\n', scanned); k >= 0 && k < pos; k = body.indexOf('\n', k + 1)) lineOffset++;
+      scanned = pos;
       const nLines = slice.split('\n').length;
       if (slice.trim()) {
         const c = baseChunk(doc, idx++, sec.startLine + lineOffset, sec.startLine + lineOffset + nLines - 1, slice, title);
