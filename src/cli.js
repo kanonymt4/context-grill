@@ -561,7 +561,19 @@ async function cmdDoctor(flags) {
     }
 
     const p = paths(config);
-    checks.push({ name: '索引', ok: IndexStore.exists(p.index), detail: IndexStore.exists(p.index) ? p.index : '未構築（context-grill sync）' });
+    let indexDetail = IndexStore.exists(p.index) ? p.index : '未構築（context-grill sync）';
+    if (IndexStore.exists(p.index)) {
+      // 設定が索引の作成後に変わっていれば注記する（読めない索引はここでは判定しない。ok は変えない）
+      try {
+        const st = await IndexStore.open(p.index, { postings: false });
+        try {
+          if (isIndexStale(config, st.stats())) indexDetail += `（${STALE_INDEX_MESSAGE}）`;
+        } finally {
+          await st.close();
+        }
+      } catch { /* 索引を開けない場合は従来どおりの表示 */ }
+    }
+    checks.push({ name: '索引', ok: IndexStore.exists(p.index), detail: indexDetail });
     initEgress(config);
     const plan = egressPlan();
     const offline = plan.mode === 'offline';
@@ -635,13 +647,35 @@ async function cmdStatus(flags) {
   } finally {
     await store.close();
   }
-  if (flags.json) { process.stdout.write(JSON.stringify(stats, null, 2) + '\n'); return 0; }
+  // 食い違い（設定が索引の作成後に変わった）のときだけ、stale / configured を足す
+  const stale = isIndexStale(config, stats);
+  const configuredIds = new Set(config.sources.map((s) => s.id));
+  if (stale) {
+    for (const [id, s] of Object.entries(stats.sources)) if (!configuredIds.has(id)) s.configured = false;
+  }
+  if (flags.json) {
+    process.stdout.write(JSON.stringify(stale ? { ...stats, stale: true } : stats, null, 2) + '\n');
+    return 0;
+  }
+  if (stale) log.warn(STALE_INDEX_MESSAGE);
   process.stdout.write(`プロジェクト: ${config.project}\n索引: ${stats.chunks} チャンク / ${stats.terms} 語 / ベクトル次元 ${stats.dims || 'なし(BM25のみ)'}\n構築: ${stats.builtAt}\n索引キー: ${stats.indexKey}\n\n`);
   for (const [id, s] of Object.entries(stats.sources)) {
-    process.stdout.write(`  ${id.padEnd(16)} ${String(s.documents).padStart(5)} 資料 / ${String(s.chunks).padStart(6)} チャンク  ${Object.entries(s.kinds).map(([k, v]) => `${k}:${v}`).join(' ')}\n`);
+    const note = s.configured === false ? '  （設定に無いため検索対象外）' : '';
+    process.stdout.write(`  ${id.padEnd(16)} ${String(s.documents).padStart(5)} 資料 / ${String(s.chunks).padStart(6)} チャンク  ${Object.entries(s.kinds).map(([k, v]) => `${k}:${v}`).join(' ')}${note}\n`);
   }
   return 0;
 }
+
+/** 設定が索引の作成後に変わっているか（両方の indexKey がそろっているときだけ比較する） */
+function isIndexStale(config, stats) {
+  return Boolean(config?.indexKey && stats?.indexKey && config.indexKey !== stats.indexKey);
+}
+
+// 文言は src/index/search.js の warnIfIndexStale に合わせている
+const STALE_INDEX_MESSAGE = '設定が索引の作成後に変わっています（sources の priority・include/exclude・埋め込み設定などの変更でも出ます）。'
+  + '`context-grill sync` で索引を作り直してください。それまでは、設定から外したソースは検索から除きますが、'
+  + 'exclude / extraDenyPaths で除外したファイルなど、索引に残った資料は検索結果に出ることがあります。'
+  + 'MCP サーバーが常駐している場合は、sync のあと MCP サーバーを再起動してください';
 
 // -------------------------------------------------------------- search
 async function cmdSearch(query, flags) {
