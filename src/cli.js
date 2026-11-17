@@ -99,7 +99,10 @@ function parseArgs(argv) {
     const a = argv[i];
     if (a === '--') { out._.push(...argv.slice(i + 1)); break; }
     if (a.startsWith('--')) {
-      let [k, v] = a.slice(2).split('=');
+      // 最初の `=` だけで分けて、値の中の `=` は残す（split('=') だと 2 つ目以降が黙って捨てられる）
+      const eq = a.indexOf('=');
+      let k = eq < 0 ? a.slice(2) : a.slice(2, eq);
+      let v = eq < 0 ? undefined : a.slice(eq + 1);
       let neg = false;
       if (k.startsWith('no-')) { neg = true; k = k.slice(3); }
       if (BOOL_FLAGS.has(k) && a.includes('=')) {

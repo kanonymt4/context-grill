@@ -232,3 +232,17 @@ test('--help / --version 値なしは従来どおり', async () => {
   assert.equal(v.status, 0);
   assert.match(v.stdout, /^\d+\.\d+\.\d+/);
 });
+
+test('否定形に true / false を付けた --no-embed=true / --no-offline=false もエラー（反転させない）', async () => {
+  for (const arg of ['--no-embed=true', '--no-embed=false', '--no-offline=true', '--no-offline=false']) {
+    const r = await run(['status', arg, '-c', cfgEmbed]);
+    assert.equal(r.status, 1, `${arg}: ${r.stdout}`);
+    assert.match(r.stderr, /値を取りません/, `${arg}: ${r.stderr}`);
+  }
+});
+
+test('--v=foo（--version の短い形に不正な値）はエラー', async () => {
+  const r = await run(['status', '--v=foo', '-c', cfg]);
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stderr, /--v は値を取りません/, r.stderr);
+});
