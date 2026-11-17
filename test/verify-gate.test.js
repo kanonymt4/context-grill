@@ -175,3 +175,46 @@ test('(8) JSON が無い応答の結果を renderMarkdown に通しても落ち�
   });
   assert.ok(md.includes('# 仕様整理'));
 });
+
+// 逐語引用の照合は、空白の種類（NBSP など）と Unicode 正規化形（NFC/NFD）の違いを吸収する。
+// 文字そのものの同一視（数字・語順・1 文字違い）は行わない。
+const quoteRun = (evText, quoteText) => verify(
+  envelope([goodItem({ quotes: [{ evidence: 'E1', text: quoteText }] })]),
+  { pack: { items: [{ id: 'E1', text: evText }] }, schema, policy, taskId: 'spec' },
+);
+
+test('(9) 証拠が NBSP・引用が通常の空白でも一致する（その逆も）', () => {
+  assert.equal(quoteRun('最大 100 件', '最大 100 件').ok, true);
+  assert.equal(quoteRun('最大 100 件', '最大 100 件').ok, true);
+});
+
+test('(9) 他の空白類（細い空白・ゼロ幅 BOM・全角）も同様に一致する', () => {
+  assert.equal(quoteRun('a b', 'a b').ok, true);
+  assert.equal(quoteRun('a b', 'a b').ok, true);
+  assert.equal(quoteRun('a　b', 'a b').ok, true);
+  assert.equal(quoteRun('a﻿b', 'a b').ok, true);
+});
+
+test('(9) NFD と NFC の違いは一致する（証拠側・引用側のどちらが NFD でも）', () => {
+  const nfc = 'café';
+  const nfd = 'café';
+  assert.notEqual(nfc, nfd);
+  assert.equal(quoteRun(nfc, nfd).ok, true);
+  assert.equal(quoteRun(nfd, nfc).ok, true);
+  assert.equal(quoteRun('ひらがな ガ', 'ガ').ok, true);
+  assert.equal(quoteRun('ガ', 'ガ').ok, true);
+});
+
+test('(9) 対照: 1 文字違い・数字の違い・語順の違いは従来どおり E_QUOTE_MISMATCH', () => {
+  for (const [ev, q] of [
+    ['最大 100 件', '最大 101 件'],
+    ['最大 100 件', '最大 100 个'],
+    ['alpha beta', 'beta alpha'],
+    ['café', 'cafe'],
+    ['〜10', '～10'],
+  ]) {
+    const v = quoteRun(ev, q);
+    assert.equal(v.ok, false, `${ev} / ${q}`);
+    assert.ok(codes(v).includes('E_QUOTE_MISMATCH'), `${ev} / ${q}: ${JSON.stringify(v.violations)}`);
+  }
+});

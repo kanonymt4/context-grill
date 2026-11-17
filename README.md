@@ -668,7 +668,7 @@ private_key / private-key / *.privatekey / private_key.{txt,pem,key,json,yml,yam
   （引用符なしの `PASSWORD=…` / YAML の `password: …` / `- DB_PASSWORD=…` / `X-Api-Key: …` も対象）
 - PEM 秘密鍵は**文書単位**で伏せます（チャンク境界をまたいでも、BEGIN〜END が 1 行に入った形式でも。索引に入る前に処理するため、`search --raw` でも本文は出ません）
 - `context_grill_static_scan`（MCP）と `scan` の endpoints（route / snippet）も墨消しされます
-- `process.env.API_KEY` のような環境変数参照は誤検知しません
+- 値が環境変数参照（`process.env.X` / `${X}` / `os.environ` / `<...>` など）、キーと同名の変数代入（`this.token = token`）、TypeScript の型（`password: string;`）、日本語を含む説明文の行は伏せません。散文中の `password` も、同じ行に `machine` / `login` が無く行全体が `password <値>` でもなければ伏せません。上記以外の値（`password: hunter2…` のような末尾にカンマが付く形を含む）は従来どおり伏せます
 - **行数を変えない**実装なので、行番号・逐語引用の検証は壊れません
 
 ```
