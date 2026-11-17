@@ -174,3 +174,59 @@ test('redactMessage: BEARER を含む名前の環境変数の値が落ちる', (
     else process.env.ATLASSIAN_BEARER = prev;
   }
 });
+
+// ---- 誤検知の削減（環境変数参照・同名代入・型・日本語の説明文・散文の password）と、本物の検出の維持 ----
+test('redact: 無害な行（環境変数参照・同名代入・TS の型・日本語・散文）は変わらない', () => {
+  const harmless = [
+    '  password: process.env.DB_PASSWORD,',
+    '  password: string;',
+    '  token: number,',
+    '    this.token = token;',
+    'self.password = password',
+    'this.password = this.options.password;',
+    '      DB_PASSWORD: ${DB_PASSWORD}',
+    'API_KEY=<your-key>',
+    'API_KEY=your-api-key-here',
+    'SECRET=$(cat /run/secrets/app)',
+    'DB_PASSWORD=os.environ["DB_PASSWORD"]',
+    'password = os.getenv("DB_PASSWORD")',
+    'password = System.getenv("DB_PASSWORD")',
+    "password = ENV['DB_PASSWORD']",
+    'x-api-key: process.env.API_KEY',
+    '- API_KEY: 外部決済APIの認証キー',
+    'The password must be at least 12 characters long.',
+    'password を再設定するには管理者へ連絡してください',
+    'password を再設定するには…',
+    'Reset your password using the link below.',
+  ];
+  for (const line of harmless) {
+    const r = redactText(line);
+    assert.equal(r.text, line, `変わってはいけない行が変わった: ${JSON.stringify(line)}`);
+    assert.equal(r.count, 0, line);
+  }
+});
+
+test('redact: 本物の認証情報は従来どおり墨消しされる（末尾カンマ付き・netrc 形式を含む）', () => {
+  const real = [
+    'password: hunter2secret',
+    'password: hunter2secret,',
+    'DB_PASSWORD=s3cr3tP@ss!',
+    '  api_key: abcd1234efgh5678',
+    '- TOKEN=abc123def456',
+    'export SECRET=Abcd1234Efgh5678',
+    'db.password = p4ssw0rd!!',
+    'X-Api-Key: Abcd1234Efgh5678',
+    'machine h login u password hunter2secret',
+    'password hunter2secret',
+  ];
+  for (const line of real) {
+    const r = redactText(line);
+    assert.ok(!r.text.includes('hunter2secret') && !/s3cr3tP|abcd1234efgh|abc123def|Abcd1234Efgh|p4ssw0rd/.test(r.text), `値が残っている: ${JSON.stringify(line)} -> ${JSON.stringify(r.text)}`);
+    assert.ok(r.count >= 1, line);
+  }
+});
+
+test('redact: 最悪入力（password の繰り返し）が 1000ms 未満', () => {
+  const ms = timeMs('password abcd '.repeat(LONG / 14));
+  assert.ok(ms < 1000, `${Math.round(ms)}ms`);
+});
