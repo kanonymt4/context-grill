@@ -61,6 +61,23 @@ function collectSeedIds(src) {
   return [...ids];
 }
 
+/**
+ * ページネーションの次の URL を返す。無い・訪問済みなら null。
+ * 同じ next を返し続けるサーバーで無限ループしないよう、訪問済みの URL は辿らない。
+ * seen には最初の URL を入れておく。
+ */
+function nextUrl(base, res, seen, requireResults = false) {
+  const nx = res?._links?.next;
+  if (!nx || (requireResults && !(res?.results || []).length)) return null;
+  const url = nx.startsWith('http') ? nx : base.replace(/\/wiki$/, '') + nx;
+  if (seen.has(url)) {
+    log.warn(`Confluence のページネーションが同じ next を返し続けたため打ち切りました: ${url.split('?')[0]}`);
+    return null;
+  }
+  seen.add(url);
+  return url;
+}
+
 /** 子ページを再帰的に辿る（ページツリー単位の取り込み） */
 async function expandDescendants(base, headers, seeds, { maxDepth = 10, limit = 500, purpose }) {
   const all = new Set(seeds);
@@ -69,6 +86,7 @@ async function expandDescendants(base, headers, seeds, { maxDepth = 10, limit = 
     const next = [];
     for (const id of frontier) {
       let url = `${base}/api/v2/pages/${encodeURIComponent(id)}/children?limit=250`;
+      const seen = new Set([url]);
       while (url && all.size < limit) {
         const res = await httpJson(url, { headers, purpose });
         for (const c of res?.results || []) {
@@ -76,8 +94,7 @@ async function expandDescendants(base, headers, seeds, { maxDepth = 10, limit = 
           if (!all.has(cid)) { all.add(cid); next.push(cid); }
           if (all.size >= limit) break;
         }
-        const nx = res?._links?.next;
-        url = nx ? (nx.startsWith('http') ? nx : base.replace(/\/wiki$/, '') + nx) : null;
+        url = nextUrl(base, res, seen);
       }
     }
     frontier = next;
@@ -117,12 +134,11 @@ async function fetchPagesByIds(base, headers, ids, purpose) {
 async function fetchByCql(base, headers, cql, limit, purpose) {
   const out = [];
   let url = `${base}/rest/api/content/search?cql=${encodeURIComponent(cql)}&expand=body.storage,version,space,metadata.labels&limit=50`;
+  const seen = new Set([url]);
   while (url && out.length < limit) {
     const res = await httpJson(url, { headers, purpose });
-    const results = res?.results || [];
-    out.push(...results);
-    const nx = res?._links?.next;
-    url = nx && results.length ? (nx.startsWith('http') ? nx : base.replace(/\/wiki$/, '') + nx) : null;
+    out.push(...(res?.results || []));
+    url = nextUrl(base, res, seen, true);
   }
   return out.slice(0, limit);
 }
@@ -198,12 +214,11 @@ export async function syncConfluence(src, ctx) {
       }
       let url = `${base}/api/v2/pages?body-format=storage&limit=${pageSize}&space-id=${spaceId}`;
       if (src.status) url += `&status=${encodeURIComponent(src.status)}`;
+      const seen = new Set([url]);
       while (url && raw.length < limit) {
         const res = await httpJson(url, { headers, purpose });
-        const results = res?.results || [];
-        raw.push(...results);
-        const nx = res?._links?.next;
-        url = nx && results.length ? (nx.startsWith('http') ? nx : base.replace(/\/wiki$/, '') + nx) : null;
+        raw.push(...(res?.results || []));
+        url = nextUrl(base, res, seen, true);
       }
       raw = raw.slice(0, limit);
     }
