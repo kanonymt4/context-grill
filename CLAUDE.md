@@ -1101,7 +1101,51 @@ Confluence の HTML 変換より簡単。
     ファイルが重ならなければ worker は並行に走らせられる（今回は最大 6 本）。同じファイル（`search.js` など）は直列にした
 
   **残り（未修正・未測定）**
-  - `--config=x=y.json` が `x` に切り詰められる（#106 より前からある。`--config` に `=` を含むパスは使えない。**Opus が実測、未修正**）
+  - ~~`--config=x=y.json` が `x` に切り詰められる（#106 より前からある。`--config` に `=` を含むパスは使えない。**Opus が実測、未修正**）~~ **2026-11-19 修正（#122）**
   - 会話側のモデルが enum 外の `effort` を送るか、anthropic の `model_context_window_exceeded` など `max_tokens` 以外の打ち切りを #105 が
     扱わなくてよいか、Windows・Node 20.10 での挙動、実際の埋め込みでの検索（`DUP_SIM=0.95` が実文書で意図しない候補を後回しにしないか）、
     トークンが `insteadOf` の書き換え先の https に届くか、Confluence / Jira の実接続（いずれも実環境が要るため、この環境では測れない）
+
+- 2026-11-18 〜 11-19 **Fable に「残りがあれば確認・指示」を 2 回目に依頼し、見つかった項目を #119〜#129 で直した**。
+
+  1 回目（#104〜#117）の後に、同じ Fable（Plan 型のサブエージェント）へ読み取り専用で再確認させ、指示書を受けた。実装は worker、
+  生の差分とテスト出力の確認は私（メインの Claude）、の分担は前回と同じ。波（wave）ごとに worktree を分け、ファイルが重ならない PR は
+  並行、同じファイルは直列にした。
+
+  **直したもの**
+  - #119（high）`planQueries` の識別子抽出の正規表現が、ドットの連続（`a.a.a.a…` のような入力）で指数時間になった。最初の選択肢を
+    `[A-Za-z_][A-Za-z0-9_]*[./][A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*` に直した
+  - #120 検証ゲートの逐語引用の照合が、NFC と空白の種類（NBSP・全角空白・各種 en/em 空白・BOM）の違いで、正しい引用を棄却した。
+    照合前に NFC と空白の正規化を揃える
+  - #121・#125 墨消しの誤検知（コード・散文）を減らし、現行のトークン形式を足した。`isBenignValue`（プレースホルダ語・メンバー参照・
+    TS の型・日本語・同名の識別子）を ENV_ASSIGNMENT / AUTH_HEADER / NETRC で共有。NETRC は `machine` / `login` がある行か、行全体が
+    `password <値>` のときだけ。新しい種別は GITLAB_TOKEN / ATLASSIAN_API_TOKEN / SLACK_APP_TOKEN / HUGGINGFACE_TOKEN / DOCKER_PAT /
+    STRIPE_WEBHOOK_SECRET / SLACK_WEBHOOK / AZURE_ACCOUNT_KEY。**README §10.3 の記述も変えた**
+  - #122 `--flag=a=b` を最初の `=` だけで分ける（`--config=x=y.json` が `x` に切り詰められていた件も同時に解消）。`usage.md` の
+    Windows のパス例は `C:\temp\report` に差し替えた
+  - #123 `htmlToText` がコード内の記号・字下げを壊し、実体参照を二重に復号していた。コードをセンチネルで退避してから戻し、実体参照は
+    1 回の置換で復号する。**Confluence の索引キャッシュに `HTML_TEXT_VERSION = 2` を足したので、既存のキャッシュは初回 sync で作り直される。**
+    `test/html-regex` の期待値（`<pre>` の字下げ）も意図して変えた
+  - #124 CRLF・BOM 付きの文書で、Markdown の見出しが認識されず節に分かれなかった。`HEADING_RE` が BOM と末尾の CR を許す
+  - #126 `sources[]` の数値キー（`maxFiles` など）と、`chunk.overlap < chunk.maxChars/maxLines` を設定の読み込みで検査する
+  - #127 設定が索引と食い違うとき（`indexKey` 不一致、設定から外したソースの資料が索引に残る）、`status` と `doctor` が警告する
+    （`stale: true`、`sources.<id>.configured: false`）。**警告文は `cli.js` と `search.js` の 2 か所に別々にある**
+  - #128 UTF-8 として不正な文書は取り込まずに件数を出す（`skipped.badEncoding`）。BOM は外す。**BOM を外すと本文のハッシュが変わるので、
+    BOM 付きの文書は初回だけ埋め込みキャッシュが外れる**
+  - #129 コネクタの黙った失敗 3 件。(1) GitHub API モードのツリー応答が `truncated: true` のとき警告し、`state.truncated = true`
+    （真でなければキー自体を足さない）。(2) `httpJson` が 2xx なのに JSON でない応答（ログインページなど）を、`noRetry` で本文を載せないエラーにする
+    （以前は `SyntaxError` で 3 回再送）。(3) Confluence のページネーションが同じ `next` を返し続けても止まる（訪問済み URL の Set。
+    子ページ・CQL・space の 3 か所）。**同じ `next` が返り続けた場合、`syncConfluence` は例外にせず、取得済みの分で完了して警告を出す**
+
+  **やり方で学んだこと**
+  - **pr-scope は、ブランチが main より古いと偽の失敗になる。** `origin/<base>` との差分でファイルとディレクトリを数えるため、他の PR が先に
+    入ると、自分が触っていないファイルまで数に入る。`gh pr update-branch` してから再実行する（#122 で発生）
+  - **macOS ランナーのキャンセルは、前回と同じく steps が 0 のジョブ。** コードの失敗ではないので `gh run rerun <run> --failed`
+  - **worker は、指示書の禁止事項を破ることがある**（#123 で書き換え用スクリプトを使った）。差分を読んで確かめる。テスト名が既存と衝突する
+    ことも 2 回あった（#122・#128）
+
+  **残り（未修正・未測定）**
+  - 会話側のモデルが enum 外の `effort` を送るか、`max_tokens` 以外の打ち切り（anthropic の `model_context_window_exceeded` など）を #105 が扱わなくて
+    よいか、Windows・Node 20.10 での挙動、実際の埋め込みでの検索（`DUP_SIM=0.95` が実文書で意図しない候補を後回しにしないか）、トークンが
+    `insteadOf` の書き換え先の https に届くか、Confluence / Jira の実接続（いずれも実環境が要るため、この環境では測れない）
+  - この回の PR（#119〜#129）を対象にした差分だけのレビューは、まだ行っていない
