@@ -227,6 +227,7 @@ function permalink(src, sha, p, start, end) {
 export async function syncGithub(src, ctx) {
   const security = ctx?.config?.security || {};
   let blocked = 0;
+  let treeTruncated = false;
   const skipped = emptySkipped();
   const include = src.include || [];
   const exclude = [...DEFAULT_EXCLUDE, ...(src.exclude || [])];
@@ -269,6 +270,11 @@ export async function syncGithub(src, ctx) {
     const refInfo = await httpJson(`${api}/repos/${src.repo}/commits/${encodeURIComponent(src.ref || 'HEAD')}`, { headers, purpose: `github:${src.id}` });
     sha = refInfo.sha;
     const tree = await httpJson(`${api}/repos/${src.repo}/git/trees/${sha}?recursive=1`, { headers, purpose: `github:${src.id}` });
+    // 大きなツリーでは GitHub が一部だけ返す（truncated: true）。黙って一部だけ取り込まない
+    if (tree.truncated) {
+      treeTruncated = true;
+      log.warn(`${src.id}: GitHub のツリー応答が途中で打ち切られています（truncated）。取り込みは一部のファイルのみです。大きなリポジトリは mode: "clone" を使ってください`);
+    }
     const files = (tree.tree || []).filter((t) => {
       if (t.type !== 'blob') return false;
       if (!isIndexable(t.path, security)) { blocked++; return false; }
@@ -336,7 +342,9 @@ export async function syncGithub(src, ctx) {
     }
   }
 
-  return { docs, state: { sha, syncedAt: new Date().toISOString(), count: docs.length, mode, blockedSensitive: blocked, skipped } };
+  const state = { sha, syncedAt: new Date().toISOString(), count: docs.length, mode, blockedSensitive: blocked, skipped };
+  if (treeTruncated) state.truncated = true;
+  return { docs, state };
 }
 
 export function githubLineUrl(doc, start, end) {
