@@ -135,6 +135,16 @@ export async function httpJson(url, opts = {}) {
       err.status = res.status;
       throw err;
     }
-    return body ? JSON.parse(body) : null;
+    if (!body) return null;
+    try {
+      return JSON.parse(body);
+    } catch {
+      // 2xx なのに JSON でない（ログインページ・プロキシのエラーページなど）。再送しても直らず、
+      // 本文は載せない（URL もクエリを除く）
+      const err = new Error(`JSON でない応答を受け取りました: ${url.split('?')[0]}（Content-Type: ${res.headers?.get?.('content-type') || '不明'}）`);
+      err.noRetry = true;
+      err.status = res.status;
+      throw err;
+    }
   }, { onRetry: (e, i, w) => log.warn(`再試行 ${i + 1}: ${redactMessage(e.message).split('\n')[0]} (${w}ms待機)`) });
 }
