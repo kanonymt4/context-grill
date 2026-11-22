@@ -3,7 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { isIncluded } from '../util/misc.js';
 import { isSensitiveDir } from '../util/sensitive.js';
-import { classify, isProbablyBinary, makeDoc, isIndexable, emptySkipped, decodeText } from './base.js';
+import { classify, isProbablyBinary, makeDoc, isIndexable, emptySkipped, decodeText, warnBadEncoding } from './base.js';
 
 async function* walk(root, rel = '') {
   const entries = await fsp.readdir(path.join(root, rel), { withFileTypes: true });
@@ -26,6 +26,7 @@ export async function syncLocal(src, ctx = {}) {
   const docs = [];
   let blocked = 0;
   const skipped = emptySkipped();
+  const badPaths = [];
   for await (const rel of walk(root)) {
     if (!isIndexable(rel, security)) { blocked++; continue; }
     if (!isIncluded(rel, src.include || [], src.exclude || [])) continue;
@@ -37,12 +38,13 @@ export async function syncLocal(src, ctx = {}) {
     const { kind, lang } = classify(rel);
     if (kind === 'other' && !src.includeUnknownTypes) { skipped.unknownType++; continue; }
     const text = decodeText(buf);
-    if (text === null) { skipped.badEncoding++; continue; }
+    if (text === null) { skipped.badEncoding++; badPaths.push(rel); continue; }
     docs.push(makeDoc({
       sourceId: src.id, sourceType: 'local', docPath: rel, title: rel, kind, lang,
       text, url: pathToFileURL(abs).href, version: String(st.mtimeMs),
       meta: { root, bytes: st.size },
     }));
   }
+  warnBadEncoding(src.id, badPaths);
   return { docs, state: { syncedAt: new Date().toISOString(), count: docs.length, root, blockedSensitive: blocked, skipped } };
 }

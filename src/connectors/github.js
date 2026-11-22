@@ -8,7 +8,7 @@ import { log } from '../util/log.js';
 import { redactMessage } from '../util/redact.js';
 import { isSensitiveDir, isInside } from '../util/sensitive.js';
 import { assertAllowed, auditExternal, EgressBlocked } from '../util/egress.js';
-import { classify, isProbablyBinary, makeDoc, httpJson, isIndexable, emptySkipped, decodeText } from './base.js';
+import { classify, isProbablyBinary, makeDoc, httpJson, isIndexable, emptySkipped, decodeText, warnBadEncoding } from './base.js';
 
 const exec = promisify(execFile);
 
@@ -229,6 +229,7 @@ export async function syncGithub(src, ctx) {
   let blocked = 0;
   let treeTruncated = false;
   const skipped = emptySkipped();
+  const badPaths = [];
   const include = src.include || [];
   const exclude = [...DEFAULT_EXCLUDE, ...(src.exclude || [])];
   const maxBytes = src.maxFileBytes ?? 400_000;
@@ -251,7 +252,7 @@ export async function syncGithub(src, ctx) {
       const { kind, lang } = classify(rel);
       if (kind === 'other' && !src.includeUnknownTypes) { skipped.unknownType++; continue; }
       const text = decodeText(buf);
-      if (text === null) { skipped.badEncoding++; continue; }
+      if (text === null) { skipped.badEncoding++; badPaths.push(rel); continue; }
       docs.push(makeDoc({
         sourceId: src.id, sourceType: 'github', docPath: rel, title: rel,
         kind, lang, text,
@@ -290,7 +291,7 @@ export async function syncGithub(src, ctx) {
       const buf = Buffer.from(blob.content || '', blob.encoding === 'base64' ? 'base64' : 'utf8');
       if (isProbablyBinary(buf)) { skipped.binary++; continue; }
       const text = decodeText(buf);
-      if (text === null) { skipped.badEncoding++; continue; }
+      if (text === null) { skipped.badEncoding++; badPaths.push(f.path); continue; }
       docs.push(makeDoc({
         sourceId: src.id, sourceType: 'github', docPath: f.path, title: f.path,
         kind, lang, text,
@@ -299,6 +300,8 @@ export async function syncGithub(src, ctx) {
       }));
     }
   }
+
+  warnBadEncoding(src.id, badPaths);
 
   // Issue / PR も一次資料として取り込む（既定はオフ）
   if (src.issues?.enabled || src.pulls?.enabled) {
