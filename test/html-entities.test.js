@@ -78,7 +78,11 @@ test('本文に番兵と同じ文字列があっても壊れない', () => {
   // 退避の番兵は \uE000 と \uE001 を使うので、本文にそれらや番兵に似た列が現れるケースを入れる
   const fake = '\uE000cg0_0\uE001 \uE000cg1_0\uE001 \uE000 \uE001';
   const out = htmlToText(`<p>${fake}</p>${macro('code1')}<p>&#xE000;cg0_0&#xE001;</p>${macro('code2')}`);
-  assert.ok(out.startsWith(fake), out);
+  // 入力の番兵文字は出力に残さず（取り除く）、コードの中身と取り違えない
+  assert.ok(!/[]/.test(out), out);
+  assert.ok(out.startsWith('cg0_0 cg1_0'), out);
+  assert.equal(out.match(/code1/g).length, 1, out);
+  assert.equal(out.match(/code2/g).length, 1, out);
   assert.ok(out.includes('```\ncode1\n```'), out);
   assert.ok(out.includes('```\ncode2\n```'), out);
   assert.ok(out.includes('&#xE000;cg0_0&#xE001;'), out);

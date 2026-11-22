@@ -190,6 +190,34 @@ function replacePre(s, fn) {
   return out + s.slice(pos);
 }
 
+/** <ri:user ri:account-id="…"/> を @… にし、<ac:link> を [[ページ名]] にする（タグ単位で一致させてから属性を取り出す） */
+function convertMentionsAndLinks(s) {
+  s = s.replace(/<ri:user[^<>]*\/>/gi, (m) => {
+    const a = /ri:account-id="([^"]*)"/.exec(m);
+    return a ? `@${a[1]}` : m;
+  });
+  return replaceAcLinks(s);
+}
+
+/**
+ * <pre> の中身を、字下げを保ったままテキストにする。CDATA の中身はタグ除去・変換の対象にしない
+ * （<![CDATA[a<b]]> の < を、タグの始まりと誤認しない）。CDATA の外では、<br> を改行にし、メンション・リンクを変換してからタグを除く。
+ */
+function preInnerToText(inner) {
+  const plain = (t) => convertMentionsAndLinks(t).replace(/<br\s*\/?>/gi, '\n').replace(/<\/?[a-z0-9:-]+[^<>]*>/gi, '');
+  let out = '';
+  let pos = 0;
+  for (;;) {
+    const o = inner.indexOf('<![CDATA[', pos);
+    if (o === -1) break;
+    const c = inner.indexOf(']]>', o + 9);
+    if (c === -1) break;
+    out += plain(inner.slice(pos, o)) + inner.slice(o + 9, c);
+    pos = c + 3;
+  }
+  return out + plain(inner.slice(pos));
+}
+
 /**
  * htmlToText の変換規則の版。変換結果が変わる修正のたびに上げる
  * （Confluence の差分同期は、ページの版が同じならキャッシュ本文を使うので、この版も条件に含める）。
@@ -199,7 +227,8 @@ export const HTML_TEXT_VERSION = 2;
 /** Confluence storage format / 一般的な HTML をプレーンテキスト化（依存ゼロ） */
 export function htmlToText(html) {
   if (!html) return '';
-  let s = String(html);
+  // 退避用の番兵（U+E000 / U+E001）が本文にあると、復号後に番兵と一致して本文がコードに置き換わるので、先に取り除く
+  let s = String(html).replace(/[]/g, '');
   // コード（コードマクロ・plain-text-body・<pre>）は、タグ除去・復号・空白の圧縮の対象から外すため番兵へ退避し、最後に戻す。
   // 番兵の接頭辞は、入力に現れない文字列を選ぶ（本文に似た文字列があっても壊れない）
   let prefix;
@@ -212,13 +241,9 @@ export function htmlToText(html) {
   // コードマクロは fenced block として温存（仕様書内のコードは一次資料として重要）
   s = replaceCodeMacros(s, (code) => `\n\`\`\`\n${keep(decodeEntities(code))}\n\`\`\`\n`);
   s = replacePlainTextBodies(s, (t) => `\n${keep(decodeEntities(t))}\n`);
-  s = replacePre(s, (inner) => `\n${keep(decodeEntities(inner.replace(/<br\s*\/?>/gi, '\n').replace(/<\/?[a-z0-9:-]+[^<>]*>/gi, '')))}\n`);
+  s = replacePre(s, (inner) => `\n${keep(decodeEntities(preInnerToText(inner)))}\n`);
   // タグ単位で一致させてから属性を取り出す（[^<>]* で次の < か > で止め、閉じないタグの繰り返しで三乗にならないようにする）
-  s = s.replace(/<ri:user[^<>]*\/>/gi, (m) => {
-    const a = /ri:account-id="([^"]*)"/.exec(m);
-    return a ? `@${a[1]}` : m;
-  });
-  s = replaceAcLinks(s);
+  s = convertMentionsAndLinks(s);
   s = unwrapCdata(s);
   s = removeScriptStyle(s);
   s = s.replace(/<h([1-6])[^<>]*>/gi, (_, n) => '\n' + '#'.repeat(Number(n)) + ' ');
