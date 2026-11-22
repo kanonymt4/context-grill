@@ -333,8 +333,8 @@ export async function loadConfig(explicitPath) {
   const expanded = expandEnv(rest, '', envErrs, expandedNames);
   if (envErrs.length) throw new Error('設定エラー:\n  - ' + envErrs.join('\n  - '));
   const merged = deepMerge(DEFAULTS, expanded);
-  // 利用者が overlap を書かず max だけ小さくしたとき、既定の overlap が max 以上になる。
-  // 既定値の調整なので、エラーにせず max 未満に丸める（明示した overlap は丸めず validate が検査する）
+  // 利用者が overlap を書かず max だけ小さくしたとき、既定の overlap が max の半分を超えることがある（max - 1 まで許すと窓が 1 行ずつしか進まずチャンクが爆発する）。
+  // 既定値の調整なので、エラーにせず floor(max / 2) に丸める（明示した overlap は丸めず validate が検査する）
   for (const [sec, ov, mx] of [['code', 'overlapLines', 'maxLines'], ['doc', 'overlapChars', 'maxChars']]) {
     const userSec = isObj(expanded) && isObj(expanded.retrieval) && isObj(expanded.retrieval.chunk) ? expanded.retrieval.chunk[sec] : undefined;
     // null は deepMerge で既定値に戻るので「書いていない」扱い
@@ -342,7 +342,7 @@ export async function loadConfig(explicitPath) {
     const s = merged.retrieval?.chunk?.[sec];
     if (!isObj(s) || typeof s[mx] !== 'number' || !Number.isFinite(s[mx]) || s[mx] < 1) continue;
     // DEFAULTS のオブジェクトを書き換えないよう、コピーに差し替える
-    if (s[ov] >= s[mx]) merged.retrieval.chunk[sec] = { ...s, [ov]: Math.max(0, s[mx] - 1) };
+    if (s[ov] > Math.floor(s[mx] / 2)) merged.retrieval.chunk[sec] = { ...s, [ov]: Math.floor(s[mx] / 2) };
   }
   // DEFAULTS の配列を共有しない。形の検証は presets.js の validatePresets が行い、
   // ここでは throw しない（不正な preset があっても sync / search / MCP 起動は止めない）。
