@@ -8,13 +8,19 @@ const PLACEHOLDER = /^(?:\$\{|<|%|process\.env|os\.environ|ENV\[|System\.getenv|
 // ENV_ASSIGNMENT / NETRC / x-api-key 用。上の PLACEHOLDER は「全体一致」なので、`process.env.X` のような
 // 接頭辞の形の参照には効かない（CREDENTIAL 規則は別の正規表現で補っている）。ここでは語と接頭辞を分ける。
 const PLACEHOLDER_WORD = /^(?:null|undefined|true|false|xxx+|your|change[_-]?me|example|sample|dummy|placeholder|redacted|\*+)$/i;
-const PLACEHOLDER_PREFIX = /^(?:\$\{|\$\(|<|%|process\.env|os\.environ|os\.getenv|getenv\(|System\.getenv|ENV\[|your[_-])/i;
+// `<` は `<your-key>` のように閉じたものだけ、`%` は `%VAR%` の形だけ、your- は英字と区切りだけの値（数字を含むものは本物の値とみなす）
+const PLACEHOLDER_PREFIX = /^(?:\$\{|\$\(|<[^>]*>|%[A-Za-z_]+%|process\.env|os\.environ|os\.getenv|getenv\(|System\.getenv|ENV\[|your[_-][A-Za-z_-]*$)/i;
 // 値が `this.x` / `self.x` のメンバー参照
 const MEMBER_REF = /^(?:this|self)\./;
 // TypeScript の型キーワード単独（`password: string;`）
 const TS_TYPE = /^(?:string|number|boolean|any|unknown|never|void|object|bigint|symbol|String|Number|Boolean|Object)$/;
 // ひらがな・カタカナ・漢字を含む値は説明文であってシークレットではない
 const JAPANESE = /[぀-ゟ゠-ヿ一-鿿]/;
+const JAPANESE_G = /[぀-ゟ゠-ヿ一-鿿]/g;
+// 日本語を除いた残りに、秘密らしい ASCII の連なり（6 字以上）がある値は説明文とみなさない
+const SECRET_RUN = /[A-Za-z0-9+/=_-]{6,}/;
+// `password` の続きが散文でない（秘密らしい）値: 数字か記号を含み 6 字以上
+const SECRETISH = /^(?=\S*[\d!@#$%^&*])\S{6,}$/;
 
 /** 値の先頭の引用符と末尾の `,` `;` と引用符を外す */
 function stripValue(v) {
@@ -24,7 +30,8 @@ function stripValue(v) {
 /** 参照・プレースホルダ・説明文など、シークレットではない値か（keyword は代入のキーのキーワード） */
 function isBenignValue(raw, keyword) {
   const v = stripValue(raw);
-  if (PLACEHOLDER_WORD.test(v) || PLACEHOLDER_PREFIX.test(v) || MEMBER_REF.test(v) || TS_TYPE.test(v) || JAPANESE.test(v)) return true;
+  if (PLACEHOLDER_WORD.test(v) || PLACEHOLDER_PREFIX.test(v) || MEMBER_REF.test(v) || TS_TYPE.test(v)) return true;
+  if (JAPANESE.test(v) && !SECRET_RUN.test(v.replace(JAPANESE_G, ' '))) return true;
   if (keyword && v.toLowerCase().replace(/[_-]/g, '') === keyword.toLowerCase().replace(/[_-]/g, '')) return true;
   return false;
 }
@@ -87,7 +94,9 @@ const RULES = [
   // 行の途中にある X-Api-Key ヘッダ（curl -H "X-Api-Key: ..." など。行頭のものは上の規則が処理する）
   { kind: 'AUTH_HEADER', re: /(\bx-api-key["']?\s{0,8}[:=]\s{0,8}["']?)([A-Za-z0-9._~+/=-]{8,})/gi, replace: (m, a, val) => (isBenignValue(val) ? m : `${a}«REDACTED:AUTH_HEADER»`) },
   // .netrc 形式（同じ行に machine / login があるか、行全体が `password <値>` のときだけ）
-  { kind: 'NETRC', re: /(\bpassword\s+)(\S{4,})/gi, replace: (m, head, val, off, line) => (isNetrcLine(line) && !isBenignValue(val) ? `${head}«REDACTED:CREDENTIAL»` : m) },
+  // それ以外でも、値が引用符で始まる・直前が `--`・値が秘密らしい（数字か記号を含む 6 字以上）なら散文ではないとみなす
+  // （`WITH PASSWORD 'x'` / `--password x` / `enable password x`）
+  { kind: 'NETRC', re: /(\bpassword\s+)(\S{4,})/gi, replace: (m, head, val, off, line) => ((isNetrcLine(line) || /^["'`]/.test(val) || line.slice(Math.max(0, off - 2), off) === '--' || SECRETISH.test(val)) && !isBenignValue(val) ? `${head}«REDACTED:CREDENTIAL»` : m) },
 ];
 
 const PEM_BEGIN = /-----BEGIN (?:[A-Z ]*)?(?:PRIVATE KEY|RSA PRIVATE KEY|OPENSSH PRIVATE KEY|PGP PRIVATE KEY BLOCK|CERTIFICATE)-----/;
