@@ -45,6 +45,20 @@ export function emptySkipped() {
   return { unknownType: 0, tooLarge: 0, binary: 0, badEncoding: 0 };
 }
 
+/** 除外したファイル名の警告に出す最大件数 */
+const BAD_ENCODING_NAME_LIMIT = 5;
+
+/**
+ * UTF-8 として不正で除外したファイルのパスを警告する（最大 5 件、残りは「ほか N 件」）。
+ * パスだけを出し、本文は出さない。件数は skipped.badEncoding 側が持つ。
+ */
+export function warnBadEncoding(sourceId, paths) {
+  if (!paths || paths.length === 0) return;
+  const shown = paths.slice(0, BAD_ENCODING_NAME_LIMIT);
+  const rest = paths.length - shown.length;
+  log.warn(`${sourceId}: UTF-8 ではないため取り込まなかったファイル: ${shown.join(', ')}${rest > 0 ? `（ほか ${rest} 件）` : ''}`);
+}
+
 /** sync の出力に添える内訳。0 の理由は省略し、全部 0 なら空文字を返す */
 export function formatSkipped(skipped) {
   if (!skipped) return '';
