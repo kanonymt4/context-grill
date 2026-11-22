@@ -189,7 +189,7 @@ const SRC_NUMERIC = [
   [(v) => ({ id: 'w', type: 'local', path: '.', maxFileBytes: v }), 'sources\\[0\\]\\.maxFileBytes', 1],
   [(v) => ({ id: 'w', type: 'jira', baseUrl: 'https://example.invalid', limit: v }), 'sources\\[0\\]\\.limit', 0],
   [(v) => ({ id: 'w', type: 'github', repo: 'o/r', maxFiles: v }), 'sources\\[0\\]\\.maxFiles', 0],
-  [(v) => ({ id: 'w', type: 'github', repo: 'o/r', depth: v }), 'sources\\[0\\]\\.depth', 1],
+  [(v) => ({ id: 'w', type: 'github', repo: 'o/r', depth: v }), 'sources\\[0\\]\\.depth', 0],
   [(v) => ({ id: 'w', type: 'github', repo: 'o/r', maxFileBytes: v }), 'sources\\[0\\]\\.maxFileBytes', 1],
   [(v) => ({ id: 'w', type: 'github', repo: 'o/r', issues: { enabled: true, limit: v } }), 'sources\\[0\\]\\.issues\\.limit', 0],
   [(v) => ({ id: 'w', type: 'github', repo: 'o/r', pulls: { enabled: true, limit: v } }), 'sources\\[0\\]\\.pulls\\.limit', 0],
@@ -207,7 +207,7 @@ test('source numeric: ソース単位の数値キーに数値でない値を書�
   }
 });
 
-test('source numeric: 範囲外（負の値、maxFileBytes / depth は 0 も）は設定エラー', async () => {
+test('source numeric: 範囲外（負の値、maxFileBytes は 0 も）は設定エラー', async () => {
   for (const [build, at, min] of SRC_NUMERIC) {
     await rejects({ sources: [build(min - 1)] }, new RegExp(`${at} は ${min} 以上の数値`));
   }

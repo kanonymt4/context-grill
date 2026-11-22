@@ -94,7 +94,7 @@ const NUMERIC_FIELDS = [
 // sources[] の中で数値として読まれるキー [キー, 最小値]（コネクタが実際に読むものだけ）。
 // "abc" を通すと、Jira の limit は比較が常に false になって 0 件で成功し、local の maxFileBytes は上限が黙って無効になる
 const SOURCE_NUMERIC_FIELDS = [
-  ['limit', 0], ['maxFileBytes', 1], ['maxFiles', 0], ['depth', 1], ['pageSize', 0], ['maxDepth', 0], ['updatedWithinDays', 0],
+  ['limit', 0], ['maxFileBytes', 1], ['maxFiles', 0], ['depth', 0], ['pageSize', 0], ['maxDepth', 0], ['updatedWithinDays', 0],
 ];
 // sources[].issues / sources[].pulls の中で数値として読まれるキー
 const SOURCE_SUB_NUMERIC_FIELDS = [['issues', 'limit', 0], ['pulls', 'limit', 0]];
@@ -333,6 +333,17 @@ export async function loadConfig(explicitPath) {
   const expanded = expandEnv(rest, '', envErrs, expandedNames);
   if (envErrs.length) throw new Error('設定エラー:\n  - ' + envErrs.join('\n  - '));
   const merged = deepMerge(DEFAULTS, expanded);
+  // 利用者が overlap を書かず max だけ小さくしたとき、既定の overlap が max 以上になる。
+  // 既定値の調整なので、エラーにせず max 未満に丸める（明示した overlap は丸めず validate が検査する）
+  for (const [sec, ov, mx] of [['code', 'overlapLines', 'maxLines'], ['doc', 'overlapChars', 'maxChars']]) {
+    const userSec = isObj(expanded) && isObj(expanded.retrieval) && isObj(expanded.retrieval.chunk) ? expanded.retrieval.chunk[sec] : undefined;
+    // null は deepMerge で既定値に戻るので「書いていない」扱い
+    if (isObj(userSec) && Object.hasOwn(userSec, ov) && userSec[ov] !== null && userSec[ov] !== undefined) continue;
+    const s = merged.retrieval?.chunk?.[sec];
+    if (!isObj(s) || typeof s[mx] !== 'number' || !Number.isFinite(s[mx]) || s[mx] < 1) continue;
+    // DEFAULTS のオブジェクトを書き換えないよう、コピーに差し替える
+    if (s[ov] >= s[mx]) merged.retrieval.chunk[sec] = { ...s, [ov]: Math.max(0, s[mx] - 1) };
+  }
   // DEFAULTS の配列を共有しない。形の検証は presets.js の validatePresets が行い、
   // ここでは throw しない（不正な preset があっても sync / search / MCP 起動は止めない）。
   merged.presets = rawPresets ?? [];
