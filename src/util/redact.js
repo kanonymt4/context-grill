@@ -9,7 +9,7 @@ const PLACEHOLDER = /^(?:\$\{|<|%|process\.env|os\.environ|ENV\[|System\.getenv|
 // 接頭辞の形の参照には効かない（CREDENTIAL 規則は別の正規表現で補っている）。ここでは語と接頭辞を分ける。
 const PLACEHOLDER_WORD = /^(?:null|undefined|true|false|xxx+|your|change[_-]?me|example|sample|dummy|placeholder|redacted|\*+)$/i;
 // `<` は `<your-key>` のように閉じたものだけ、`%` は `%VAR%` の形だけ、your- は英字と区切りだけの値（数字を含むものは本物の値とみなす）
-const PLACEHOLDER_PREFIX = /^(?:\$\{|\$\(|<[^>]*>|%[A-Za-z_]+%|process\.env|os\.environ|os\.getenv|getenv\(|System\.getenv|ENV\[|your[_-][A-Za-z_-]*$)/i;
+const PLACEHOLDER_PREFIX = /^(?:\$\{|\$\(|<[^>]*>$|%[A-Za-z_]+%$|process\.env|os\.environ|os\.getenv|getenv\(|System\.getenv|ENV\[|your[_-][A-Za-z_-]*$)/i;
 // 値が `this.x` / `self.x` のメンバー参照
 const MEMBER_REF = /^(?:this|self)\./;
 // TypeScript の型キーワード単独（`password: string;`）

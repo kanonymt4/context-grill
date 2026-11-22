@@ -64,6 +64,9 @@ test('redact(M1): `<` `%` で始まるだけの値、your- で始まる値は伏
   assertRedacted(`PASSWORD=<${V2}`, V2);
   assertRedacted(`PASSWORD=%2F${V2}`, V2);
   assertRedacted('PASSWORD=your-real-pass-Xk9', 'your-real-pass-Xk9');
+  // 閉じた後ろに本物の値が続く形（値全体がプレースホルダの形のときだけ良性）
+  assertRedacted('PASSWORD=<x>Xk9mQ2pZ7', 'Xk9mQ2pZ7');
+  assertRedacted('PASSWORD=%A%Xk9mQ2pZ7', 'Xk9mQ2pZ7');
 });
 
 test('redact(M1): プレースホルダ・参照の形は伏せない', () => {
